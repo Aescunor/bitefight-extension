@@ -1,0 +1,58 @@
+{
+  "manifest_version": 3,
+  "name": "Bitefight \u2013 Battle Simulator",
+  "short_name": "BF Simulator",
+  "description": "Battle simulator and bot assistant for Bitefight. Story Bot, Hunt Bot, Ruins Farming, Grotto, PvP, Gifts, Global settings, formation simulator.",
+  "version": "0.9.0",
+  "icons": {
+    "16": "img/icon-16.png",
+    "48": "img/icon-48.png",
+    "128": "img/icon-128.png"
+  },
+  "background": {
+    "service_worker": "js/worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.bitefight.gameforge.com/*"
+      ],
+      "exclude_matches": [
+        "https://lobby.bitefight.gameforge.com/*",
+        "https://forum.bitefight.gameforge.com/*",
+        "https://support.gameforge.com/*"
+      ],
+      "js": [
+        "js/content.js",
+        "js/bot.js"
+      ],
+      "css": [
+        "css/panel.css",
+        "css/bot-panel.css"
+      ],
+      "run_at": "document_end",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "matches": [
+        "https://*.bitefight.gameforge.com/*"
+      ],
+      "resources": [
+        "html/panel.html",
+        "js/simulator.js",
+        "js/bridge.js",
+        "css/panel.css",
+        "img/*"
+      ]
+    }
+  ],
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://*.bitefight.gameforge.com/*"
+  ]
+}

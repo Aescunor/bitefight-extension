@@ -1,0 +1,158 @@
+/* ============================================================
+   Bitefight Battle Simulator — Panel Styles (injected)
+   ============================================================ */
+
+/* Floating tlačidlo */
+#bf-sim-btn {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 99999;
+  background: linear-gradient(135deg, #1a0d12, #2d0f1a);
+  border: 2px solid #8b0000;
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 4px 20px rgba(139,0,0,0.5);
+  transition: all 0.2s;
+  color: #c9a84c;
+  font-family: 'Cinzel', Georgia, serif;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  user-select: none;
+}
+
+#bf-sim-btn:hover {
+  border-color: #c0392b;
+  box-shadow: 0 6px 28px rgba(192,57,43,0.6);
+  transform: translateY(-1px);
+}
+
+#bf-sim-btn img {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+}
+
+.bf-sim-label {
+  white-space: nowrap;
+}
+
+.bf-sim-notif {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  background: #c0392b;
+  color: #fff;
+  border-radius: 50%;
+  width: 16px;
+  height: 16px;
+  font-size: 0.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  animation: bf-pulse 1.5s infinite;
+}
+
+@keyframes bf-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.2); }
+}
+
+/* Panel kontajner */
+#bf-sim-container {
+  position: fixed;
+  top: 60px;
+  right: 20px;
+  z-index: 99998;
+  width: 820px;
+  height: 85vh;
+  max-height: 850px;
+  flex-direction: column;
+  background: #0a0608;
+  border: 2px solid #4a2020;
+  border-radius: 8px;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.9), 0 0 0 1px rgba(139,0,0,0.3);
+  overflow: hidden;
+  display: none;
+  resize: both;
+}
+
+/* Hlavička panelu */
+#bf-sim-header {
+  background: linear-gradient(135deg, #1a0d12, #230f15);
+  border-bottom: 1px solid #4a2020;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  color: #c9a84c;
+  font-family: 'Cinzel', Georgia, serif;
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  user-select: none;
+}
+
+#bf-sim-close {
+  background: none;
+  border: none;
+  color: #7a5a4a;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 3px;
+  transition: color 0.15s;
+  line-height: 1;
+}
+
+#bf-sim-close:hover {
+  color: #c0392b;
+}
+
+.bf-badge {
+  background: rgba(0,0,0,0.4);
+  border: 1px solid #3a2020;
+  border-radius: 10px;
+  padding: 2px 8px;
+  font-size: 0.65rem;
+  color: #c9a84c;
+  font-family: 'Cinzel', Georgia, serif;
+  white-space: nowrap;
+}
+
+.bf-badge-blood {
+  border-color: #8b0000;
+  color: #e74c3c;
+}
+
+.bf-badge-orb {
+  border-color: #c0392b;
+  animation: bf-pulse 2s infinite;
+}
+
+/* iFrame */
+#bf-sim-iframe {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #0a0608;
+}
+
+/* ── Server tag v hlavičke ────────────────────────────────── */
+.bf-srv-tag {
+  background: rgba(139,0,0,0.25);
+  border: 1px solid #4a1010;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 0.6rem;
+  color: #c9a84c;
+  margin: 0 4px;
+  vertical-align: middle;
+}
+
+

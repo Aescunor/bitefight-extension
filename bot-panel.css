@@ -1,0 +1,639 @@
+/* ============================================================
+   Bitefight Bot Panel — Left Side Panel Styles
+   Phase 3: Hunt, Extraction, Ruins, Recruit, Story, Grotto, PvP, Gifts, Global
+   ============================================================ */
+
+/* ── Toggle Button (left side) ──────────────────────────────── */
+#bf-bot-btn {
+  position: fixed;
+  bottom: 20px;
+  left: 20px;
+  z-index: 99999;
+  background: linear-gradient(135deg, #0d1a12, #0f2d1a);
+  border: 2px solid #006400;
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 4px 20px rgba(0,100,0,0.4);
+  transition: all 0.2s;
+  color: #4caf50;
+  font-family: 'Cinzel', Georgia, serif;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  user-select: none;
+}
+#bf-bot-btn:hover {
+  border-color: #2ecc71;
+  box-shadow: 0 6px 28px rgba(46,204,113,0.4);
+  transform: translateY(-1px);
+}
+#bf-bot-btn .bf-bot-icon { font-size: 1.1rem; }
+.bf-bot-status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: transparent;
+  flex-shrink: 0;
+  transition: background 0.3s;
+}
+/* White — bot off, global-only active */
+.bf-bot-status-dot.dot-white {
+  background: #ccc;
+  box-shadow: 0 0 4px rgba(200,200,200,0.4);
+}
+/* Green — actively executing actions */
+.bf-bot-status-dot.dot-green {
+  background: #2ecc71;
+  animation: bf-dot-pulse-green 1.5s infinite;
+}
+@keyframes bf-dot-pulse-green {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(46,204,113,0.5); }
+  50% { box-shadow: 0 0 8px 3px rgba(46,204,113,0.3); }
+}
+/* Yellow — enabled but waiting (cooldown, delay) */
+.bf-bot-status-dot.dot-yellow {
+  background: #f1c40f;
+  animation: bf-dot-pulse-yellow 2s infinite;
+}
+@keyframes bf-dot-pulse-yellow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(241,196,15,0.5); }
+  50% { box-shadow: 0 0 8px 3px rgba(241,196,15,0.3); }
+}
+/* Red — Central STOP engaged */
+.bf-bot-status-dot.dot-red {
+  background: #e74c3c;
+  box-shadow: 0 0 6px rgba(231,76,60,0.6);
+}
+/* Blink red — error during bot run */
+.bf-bot-status-dot.dot-error {
+  background: #e74c3c;
+  animation: bf-dot-blink-red 0.6s infinite;
+}
+@keyframes bf-dot-blink-red {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.15; }
+}
+/* Legacy .active class — map to green for backwards compat */
+.bf-bot-status-dot.active {
+  background: #2ecc71;
+  animation: bf-dot-pulse-green 1.5s infinite;
+}
+
+/* ── Central STOP button ─────────────────────────────────────── */
+#bf-central-stop {
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  border: 2px solid #888;
+  background: radial-gradient(circle at 40% 40%, #d44, #911);
+  cursor: pointer;
+  flex-shrink: 0;
+  position: relative;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.4), inset 0 1px 2px rgba(255,255,255,0.15);
+  transition: all 0.15s;
+}
+#bf-central-stop:hover {
+  border-color: #e74c3c;
+  box-shadow: 0 0 10px rgba(231,76,60,0.5), inset 0 1px 2px rgba(255,255,255,0.15);
+  transform: scale(1.1);
+}
+#bf-central-stop.engaged {
+  background: radial-gradient(circle at 40% 40%, #ff2020, #c00);
+  border-color: #ff4444;
+  box-shadow: 0 0 14px rgba(255,0,0,0.6), inset 0 1px 2px rgba(255,255,255,0.2);
+  animation: bf-estop-glow 1.2s infinite;
+}
+@keyframes bf-estop-glow {
+  0%, 100% { box-shadow: 0 0 14px rgba(255,0,0,0.6), inset 0 1px 2px rgba(255,255,255,0.2); }
+  50% { box-shadow: 0 0 20px rgba(255,0,0,0.9), inset 0 1px 2px rgba(255,255,255,0.2); }
+}
+
+/* ── Main Panel Container ───────────────────────────────────── */
+#bf-bot-panel {
+  position: fixed;
+  top: 60px;
+  left: 20px;
+  z-index: 99998;
+  width: 400px;
+  max-height: 85vh;
+  display: none;
+  flex-direction: column;
+  background: #0a0a08;
+  border: 2px solid #1a3a1a;
+  border-radius: 8px;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.9), 0 0 0 1px rgba(0,100,0,0.2);
+  overflow: hidden;
+  font-family: 'Cinzel', Georgia, serif;
+  color: #b8c9a0;
+  font-size: 0.72rem;
+}
+
+/* ── Header ─────────────────────────────────────────────────── */
+#bf-bot-header {
+  background: linear-gradient(135deg, #0d150a, #142210);
+  border-bottom: 1px solid #1a3a1a;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  color: #4caf50;
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  user-select: none;
+  cursor: grab;
+}
+#bf-bot-header:active { cursor: grabbing; }
+#bf-bot-close {
+  background: none; border: none;
+  color: #5a7a4a; font-size: 1rem;
+  cursor: pointer; padding: 2px 6px;
+  border-radius: 3px; line-height: 1;
+}
+#bf-bot-close:hover { color: #e74c3c; }
+
+/* ── Tabs ───────────────────────────────────────────────────── */
+.bf-bot-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  border-bottom: 1px solid #1a3a1a;
+  background: #0c0e08;
+  flex-shrink: 0;
+}
+.bf-bot-tab {
+  flex: 0 1 auto;
+  padding: 5px 6px;
+  text-align: center;
+  font-size: 0.58rem;
+  color: #5a7a4a;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+  user-select: none;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.bf-bot-tab:hover { color: #4caf50; background: rgba(46,204,113,0.05); }
+.bf-bot-tab.active {
+  color: #4caf50;
+  border-bottom-color: #4caf50;
+  background: rgba(46,204,113,0.08);
+}
+
+/* ── Tab Content Area ───────────────────────────────────────── */
+.bf-bot-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 12px;
+  min-height: 200px;
+  max-height: 65vh;
+}
+.bf-bot-body::-webkit-scrollbar { width: 5px; }
+.bf-bot-body::-webkit-scrollbar-track { background: #0a0a08; }
+.bf-bot-body::-webkit-scrollbar-thumb { background: #1a3a1a; border-radius: 3px; }
+
+.bf-bot-section { display: none; }
+.bf-bot-section.active { display: block; }
+
+/* ── Form Elements ──────────────────────────────────────────── */
+.bf-bot-group {
+  margin-bottom: 10px;
+  padding: 8px;
+  background: rgba(20,34,16,0.4);
+  border: 1px solid #1a3a1a;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.bf-bot-group-title {
+  font-size: 0.68rem;
+  color: #4caf50;
+  margin-bottom: 6px;
+  letter-spacing: 0.06em;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.bf-bot-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 5px;
+  font-size: 0.68rem;
+}
+.bf-bot-label {
+  color: #7a9a6a;
+  min-width: 90px;
+  flex-shrink: 0;
+}
+.bf-bot-select, .bf-bot-input {
+  background: #0a0a08;
+  border: 1px solid #1a3a1a;
+  color: #b8c9a0;
+  font-family: 'Cinzel', serif;
+  font-size: 0.68rem;
+  padding: 3px 6px;
+  border-radius: 3px;
+  outline: none;
+  flex: 1;
+  min-width: 0;
+}
+.bf-bot-select:focus, .bf-bot-input:focus { border-color: #4caf50; }
+.bf-bot-input[type="number"] { width: 55px; flex: none; text-align: center; }
+.bf-bot-input.bf-min-unit-input {
+  width: 100% !important;
+  flex: 1 1 auto !important;
+  min-width: 0;
+  box-sizing: border-box;
+  text-align: center;
+  font-size: 0.6rem;
+  padding: 2px 2px;
+}
+
+.bf-bot-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 0.66rem;
+  color: #7a9a6a;
+  cursor: pointer;
+  margin-bottom: 4px;
+  min-width: 0;
+  word-wrap: break-word;
+}
+.bf-bot-checkbox input { accent-color: #4caf50; cursor: pointer; flex-shrink: 0; margin-top: 2px; }
+.bf-bot-row .bf-bot-checkbox { margin-bottom: 0; flex-shrink: 0; }
+
+/* ── Buttons ────────────────────────────────────────────────── */
+.bf-bot-btn {
+  background: linear-gradient(135deg, #0a3a0a, #1a5a1a);
+  border: 1px solid #2ecc71;
+  color: #4caf50;
+  font-family: 'Cinzel', serif;
+  font-size: 0.68rem;
+  padding: 6px 14px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.15s;
+  letter-spacing: 0.04em;
+  width: 100%;
+  text-align: center;
+}
+.bf-bot-btn:hover { background: linear-gradient(135deg, #1a5a1a, #2a7a2a); }
+.bf-bot-btn.running {
+  border-color: #e74c3c;
+  color: #e74c3c;
+  background: linear-gradient(135deg, #3a0a0a, #5a1a1a);
+}
+.bf-bot-btn.running:hover { background: linear-gradient(135deg, #5a1a1a, #7a2a2a); }
+.bf-bot-btn:disabled {
+  opacity: 0.4; cursor: not-allowed;
+}
+
+/* ── Status / Log ───────────────────────────────────────────── */
+.bf-bot-status {
+  padding: 6px 8px;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid #1a3a1a;
+  border-radius: 3px;
+  margin-bottom: 8px;
+  font-size: 0.66rem;
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.bf-bot-status .status-text { color: #7a9a6a; }
+.bf-bot-status .status-value { color: #4caf50; }
+
+.bf-bot-log {
+  background: rgba(0,0,0,0.4);
+  border: 1px solid #1a3a1a;
+  border-radius: 3px;
+  padding: 6px 8px;
+  max-height: 150px;
+  overflow-y: auto;
+  font-size: 0.62rem;
+  font-family: monospace, serif;
+  color: #5a7a4a;
+  line-height: 1.6;
+}
+.bf-bot-log::-webkit-scrollbar { width: 3px; }
+.bf-bot-log::-webkit-scrollbar-thumb { background: #1a3a1a; }
+
+.bf-log-entry { border-bottom: 1px solid rgba(26,58,26,0.3); padding: 2px 0; }
+.bf-log-time { color: #3a5a3a; }
+.bf-log-ok { color: #2ecc71; }
+.bf-log-warn { color: #e67e22; }
+.bf-log-err { color: #e74c3c; }
+.bf-log-info { color: #5a9aca; }
+
+/* ── Ruins Level List ───────────────────────────────────────── */
+.bf-ruins-levels {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 3px;
+  margin: 6px 0;
+}
+.bf-ruins-lvl {
+  background: #0c0e08;
+  border: 1px solid #1a3a1a;
+  border-radius: 2px;
+  padding: 3px 2px;
+  text-align: center;
+  font-size: 0.62rem;
+  color: #5a7a4a;
+  cursor: pointer;
+  transition: all 0.12s;
+  user-select: none;
+}
+.bf-ruins-lvl:hover { border-color: #4caf50; color: #4caf50; }
+.bf-ruins-lvl.selected {
+  background: rgba(46,204,113,0.15);
+  border-color: #4caf50;
+  color: #4caf50;
+}
+
+/* ── Hunt Quality Badges ────────────────────────────────────── */
+.bf-q-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 2px;
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.bf-q-S { background: rgba(231,76,60,0.2); border: 1px solid #e74c3c; color: #e74c3c; }
+.bf-q-A { background: rgba(230,126,34,0.2); border: 1px solid #e67e22; color: #e67e22; }
+.bf-q-B { background: rgba(142,68,173,0.2); border: 1px solid #8e44ad; color: #8e44ad; }
+.bf-q-C { background: rgba(52,152,219,0.2); border: 1px solid #3498db; color: #3498db; }
+.bf-q-D { background: rgba(149,165,166,0.2); border: 1px solid #95a5a6; color: #95a5a6; }
+.bf-q-E { background: rgba(90,90,90,0.2); border: 1px solid #666; color: #888; }
+
+/* ── Compact info row ───────────────────────────────────────── */
+.bf-bot-info-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-bottom: 8px;
+  min-width: 0;
+}
+.bf-bot-info-cell {
+  background: rgba(0,0,0,0.3);
+  border: 1px solid #1a3a1a;
+  border-radius: 3px;
+  padding: 4px 6px;
+  font-size: 0.64rem;
+}
+.bf-bot-info-cell .label { color: #5a7a4a; }
+.bf-bot-info-cell .value { color: #4caf50; float: right; }
+
+/* ── Top Toggle Button ────────────────────────────────────── */
+.bf-bot-toggle-top {
+  margin: 4px 0 6px;
+  width: 100%;
+  font-size: 0.72rem !important;
+  padding: 6px 10px !important;
+}
+
+/* ── Ignore Quality Row ──────────────────────────────────── */
+.bf-ignore-q-row {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+.bf-q-check {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  cursor: pointer;
+  font-size: 0.62rem;
+}
+.bf-q-check input[type="checkbox"] {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  cursor: pointer;
+}
+.bf-q-check input:checked + .bf-q-badge {
+  opacity: 0.3;
+  text-decoration: line-through;
+}
+
+/* ── Pin Button ───────────────────────────────────────────── */
+#bf-bot-pin {
+  background: none;
+  border: 1px solid transparent;
+  color: #4caf50;
+  cursor: pointer;
+  font-size: 0.7rem;
+  padding: 2px 4px;
+  border-radius: 3px;
+  transition: all 0.2s;
+}
+#bf-bot-pin:hover {
+  border-color: #2ecc71;
+  background: rgba(46,204,113,0.1);
+}
+#bf-bot-pin.active {
+  border-color: #e0a030;
+  color: #f0c040;
+  background: rgba(224,160,48,0.1);
+}
+
+/* ── Cooldown Bar ─────────────────────────────────────────── */
+.bf-bot-cooldown {
+  background: rgba(0,0,0,0.4);
+  border: 1px solid #1a3a1a;
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin: 6px 0 8px;
+}
+.bf-cooldown-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.68rem;
+  color: #e0a030;
+  margin-bottom: 4px;
+}
+#bf-cooldown-time {
+  font-family: 'Courier New', monospace;
+  font-weight: bold;
+  color: #f0c040;
+  font-size: 0.72rem;
+}
+.bf-cooldown-bar-bg {
+  background: rgba(0,0,0,0.5);
+  border: 1px solid #333;
+  border-radius: 3px;
+  height: 8px;
+  overflow: hidden;
+}
+.bf-cooldown-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #2ecc71, #e0a030);
+  border-radius: 3px;
+  transition: width 1s linear;
+}
+.bf-cooldown-eta {
+  font-size: 0.58rem;
+  color: #5a7a4a;
+  text-align: right;
+  margin-top: 2px;
+}
+
+/* ── Preset Cards ─────────────────────────────────────────── */
+.bf-preset-card {
+  background: rgba(0,0,0,0.3);
+  border: 1px solid #1a3a1a;
+  border-radius: 3px;
+  padding: 4px 6px;
+  margin-bottom: 3px;
+  position: relative;
+  font-size: 0.58rem;
+}
+.bf-preset-enemy {
+  color: #e07040;
+  margin-bottom: 1px;
+}
+.bf-preset-form {
+  color: #4caf50;
+}
+.bf-preset-del {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.6rem;
+  opacity: 0.4;
+  padding: 0 2px;
+}
+.bf-preset-del:hover {
+  opacity: 1;
+}
+.bf-preset-add-form {
+  background: rgba(0,40,0,0.3);
+  border: 1px solid #1a3a1a;
+  border-radius: 3px;
+  padding: 6px;
+  margin-bottom: 4px;
+}
+
+/* ── Battle Log Panel ─────────────────────────────────────── */
+#bf-battlelog-btn {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 99998;
+  background: rgba(0,0,0,0.7);
+  border: 1px solid #1a3a1a;
+  border-radius: 6px;
+  padding: 5px 8px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  color: #4caf50;
+  transition: all 0.2s;
+}
+#bf-battlelog-btn:hover {
+  border-color: #4caf50;
+  background: rgba(0,40,0,0.7);
+}
+#bf-battlelog-panel {
+  position: fixed;
+  top: 38px;
+  left: 8px;
+  z-index: 99997;
+  width: 340px;
+  max-height: 70vh;
+  background: rgba(10,10,10,0.95);
+  border: 1px solid #1a3a1a;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  font-family: 'Segoe UI', Tahoma, sans-serif;
+  font-size: 0.6rem;
+  color: #8a8;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+#bf-bl-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 8px;
+  background: rgba(0,30,0,0.5);
+  border-bottom: 1px solid #1a3a1a;
+  font-weight: 600;
+  color: #4caf50;
+  font-size: 0.65rem;
+}
+.bf-bl-tabs {
+  display: flex;
+  border-bottom: 1px solid #1a3a1a;
+}
+.bf-bl-tab {
+  flex: 1;
+  text-align: center;
+  padding: 4px;
+  font-size: 0.58rem;
+  color: #555;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+}
+.bf-bl-tab:hover { color: #8a8; }
+.bf-bl-tab.active {
+  color: #4caf50;
+  border-bottom-color: #4caf50;
+}
+.bf-bl-tab-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+.bf-bl-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 5px 8px;
+  border-bottom: 1px solid #0a1a0a;
+  font-size: 0.58rem;
+  color: #6a8a6a;
+}
+.bf-bl-summary b { color: #4caf50; }
+.bf-bl-list {
+  overflow-y: auto;
+  max-height: calc(70vh - 80px);
+  padding: 4px;
+}
+.bf-bl-entry {
+  background: rgba(0,0,0,0.3);
+  border: 1px solid #0a1a0a;
+  border-radius: 3px;
+  padding: 4px 6px;
+  margin-bottom: 2px;
+  font-size: 0.55rem;
+  line-height: 1.4;
+}
+.bf-bl-win { border-left: 2px solid #2ecc71; }
+.bf-bl-loss { border-left: 2px solid #e74c3c; }
+.bf-bl-entry-top {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  color: #666;
+}
+.bf-bl-time { color: #555; }
+.bf-bl-level { color: #e0a030; font-weight: 600; }
+.bf-bl-result { font-size: 0.6rem; }
+.bf-bl-src { color: #444; font-size: 0.5rem; }
+.bf-bl-entry-mid {
+  display: flex;
+  gap: 8px;
+  color: #6a8a6a;
+  margin: 1px 0;
+}
+.bf-bl-entry-bot { color: #888; }

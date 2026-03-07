@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bitefight – Battle Simulator</title>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@700;900&family=Cinzel:wght@400;600&family=IM+Fell+English:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --blood: #8b0000;
+    --crimson: #c0392b;
+    --gold: #c9a84c;
+    --gold-light: #f0d080;
+    --dark: #0a0608;
+    --dark2: #150c10;
+    --panel: #1a0d12;
+    --panel2: #230f15;
+    --border: #4a2020;
+    --text: #d4b896;
+    --text-dim: #7a5a4a;
+    --brute: #e67e22;
+    --occult: #8e44ad;
+    --monster: #27ae60;
+    --vanguard: #2980b9;
+    --rearguard: #c0392b;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--dark);
+    color: var(--text);
+    font-family: 'IM Fell English', serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+    background-image:
+      radial-gradient(ellipse at 20% 50%, rgba(139,0,0,0.08) 0%, transparent 60%),
+      radial-gradient(ellipse at 80% 20%, rgba(80,0,40,0.12) 0%, transparent 50%),
+      url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23300010' fill-opacity='0.3'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+  }
+
+  h1 {
+    font-family: 'Cinzel Decorative', cursive;
+    font-size: clamp(1.6rem, 4vw, 2.8rem);
+    color: var(--gold);
+    text-align: center;
+    letter-spacing: 0.08em;
+    text-shadow: 0 0 30px rgba(201,168,76,0.5), 0 2px 4px #000;
+    padding: 1.5rem 1rem 0.5rem;
+  }
+
+  .subtitle {
+    text-align: center;
+    color: var(--text-dim);
+    font-style: italic;
+    font-size: 0.9rem;
+    margin-bottom: 1.5rem;
+    letter-spacing: 0.15em;
+  }
+
+  .divider {
+    width: 60%;
+    margin: 0 auto 1.5rem;
+    border: none;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--gold), transparent);
+  }
+
+  .app {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 1rem 3rem;
+  }
+
+  /* ARMY BUILDER */
+  .builder-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    margin-bottom: 1.5rem;
+  }
+
+  @media(max-width: 800px) {
+    .builder-grid { grid-template-columns: 1fr; }
+  }
+
+  .army-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1.2rem;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .army-panel::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--gold), transparent);
+  }
+
+  .army-panel.allies::after {
+    content: 'ALLIES';
+    position: absolute;
+    top: 0.4rem; right: 0.8rem;
+    font-family: 'Cinzel', serif;
+    font-size: 0.65rem;
+    color: var(--gold-light);
+    letter-spacing: 0.2em;
+    opacity: 0.5;
+  }
+
+  .army-panel.enemies::after {
+    content: 'ENEMIES';
+    position: absolute;
+    top: 0.4rem; right: 0.8rem;
+    font-family: 'Cinzel', serif;
+    font-size: 0.65rem;
+    color: var(--crimson);
+    letter-spacing: 0.2em;
+    opacity: 0.7;
+  }
+
+  .panel-title {
+    font-family: 'Cinzel', serif;
+    font-size: 1rem;
+    color: var(--gold);
+    margin-bottom: 1rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+  }
+
+  .enemies .panel-title { color: var(--crimson); }
+
+  /* Tier cards */
+  .tier-list { display: flex; flex-direction: column; gap: 0.6rem; }
+
+  .tier-card {
+    background: var(--panel2);
+    border: 1px solid #2a1218;
+    border-radius: 3px;
+    padding: 0.6rem 0.8rem;
+    display: grid;
+    grid-template-columns: auto 1fr auto auto auto auto auto;
+    align-items: center;
+    gap: 0.5rem;
+    transition: border-color 0.2s;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .tier-card:hover { border-color: var(--gold); }
+  .tier-card.selected { border-color: var(--gold); background: rgba(201,168,76,0.05); }
+  .tier-card.enemy-selected { border-color: var(--crimson); background: rgba(192,57,43,0.05); }
+
+  .tier-label {
+    font-family: 'Cinzel', serif;
+    font-size: 0.75rem;
+    color: var(--gold-light);
+    min-width: 55px;
+  }
+
+  .enemies .tier-label { color: var(--crimson); }
+
+  .stat-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 0.7rem;
+    padding: 1px 5px;
+    border-radius: 2px;
+    background: rgba(255,255,255,0.04);
+    color: var(--text-dim);
+  }
+
+  .stat-badge .val { color: var(--text); font-weight: bold; }
+
+  .type-badge {
+    font-size: 0.65rem;
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-family: 'Cinzel', serif;
+    letter-spacing: 0.05em;
+  }
+
+  .type-Brute { background: rgba(230,126,34,0.2); color: #e67e22; }
+  .type-Occult { background: rgba(142,68,173,0.2); color: #9b59b6; }
+  .type-Monster { background: rgba(39,174,96,0.2); color: #2ecc71; }
+
+  .pos-badge {
+    font-size: 0.6rem;
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-family: 'Cinzel', serif;
+  }
+
+  .pos-Vanguard { background: rgba(41,128,185,0.2); color: #5dade2; }
+  .pos-Rearguard { background: rgba(192,57,43,0.2); color: #e74c3c; }
+
+  .qty-control {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .qty-btn {
+    min-width: 20px; height: 20px;
+    padding: 0 5px;
+    background: var(--border);
+    border: none;
+    color: var(--text);
+    cursor: pointer;
+    border-radius: 2px;
+    font-size: 0.9rem;
+    line-height: 1;
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s;
+  }
+
+  .qty-btn:hover { background: var(--crimson); }
+
+  .qty-input {
+    width: 44px;
+    text-align: center;
+    background: var(--dark);
+    border: 1px solid var(--border);
+    color: var(--gold-light);
+    font-family: 'Cinzel', serif;
+    font-size: 0.8rem;
+    padding: 1px 2px;
+    border-radius: 2px;
+    -moz-appearance: textfield;
+  }
+  .qty-input::-webkit-inner-spin-button,
+  .qty-input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  .qty-input:focus { outline: none; border-color: var(--gold); }
+
+  .skill-tip {
+    font-size: 0.62rem;
+    color: var(--text-dim);
+    font-style: italic;
+    grid-column: 1 / -1;
+    padding-top: 2px;
+    border-top: 1px solid #1e0e12;
+    margin-top: 2px;
+  }
+
+  /* Power meter */
+  .power-bar {
+    margin-top: 1rem;
+    padding: 0.6rem;
+    background: rgba(0,0,0,0.3);
+    border: 1px solid #2a1218;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    font-size: 0.78rem;
+  }
+
+  .power-label { color: var(--text-dim); font-family: 'Cinzel', serif; font-size: 0.7rem; }
+
+  .power-track {
+    flex: 1;
+    height: 6px;
+    background: #1a0d12;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .power-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--blood), var(--gold));
+    border-radius: 3px;
+    transition: width 0.3s;
+  }
+
+  .power-val { color: var(--gold); font-family: 'Cinzel', serif; font-size: 0.8rem; min-width: 60px; text-align: right; }
+
+  /* Controls */
+  .controls {
+    display: flex;
+    justify-content: center;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+  }
+
+  .btn {
+    font-family: 'Cinzel', serif;
+    font-size: 0.85rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 0.7rem 2rem;
+    border: 1px solid var(--gold);
+    background: transparent;
+    color: var(--gold);
+    cursor: pointer;
+    border-radius: 3px;
+    transition: all 0.2s;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .btn::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: var(--gold);
+    transform: translateY(100%);
+    transition: transform 0.2s;
+    z-index: 0;
+  }
+
+  .btn:hover::before { transform: translateY(0); }
+  .btn:hover { color: var(--dark); }
+  .btn span { position: relative; z-index: 1; }
+
+  .btn.danger { border-color: var(--crimson); color: var(--crimson); }
+  .btn.danger::before { background: var(--crimson); }
+  .btn.danger:hover { color: white; }
+
+  /* Battlefield */
+  .battlefield {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1.2rem;
+    margin-bottom: 1.5rem;
+    position: relative;
+  }
+
+  .battlefield::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--crimson), transparent);
+  }
+
+  .bf-title {
+    font-family: 'Cinzel', serif;
+    font-size: 0.85rem;
+    text-align: center;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.2em;
+    margin-bottom: 1rem;
+  }
+
+  .bf-sides {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 1rem;
+    align-items: start;
+  }
+
+  .bf-side { display: flex; flex-direction: column; gap: 0.5rem; }
+
+  .bf-unit {
+    background: var(--panel2);
+    border: 1px solid #2a1218;
+    border-radius: 3px;
+    padding: 0.5rem 0.7rem;
+    font-size: 0.78rem;
+    transition: all 0.3s;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .bf-unit.dead {
+    opacity: 0.3;
+    filter: grayscale(1);
+    border-color: #1a0a0e;
+  }
+
+  .bf-unit.attacking {
+    border-color: var(--gold);
+    box-shadow: 0 0 12px rgba(201,168,76,0.4);
+    animation: attackPulse 0.4s ease;
+  }
+
+  .bf-unit.taking-damage {
+    border-color: var(--crimson);
+    box-shadow: 0 0 12px rgba(192,57,43,0.6);
+    animation: damagePulse 0.4s ease;
+  }
+
+  @keyframes attackPulse {
+    0% { transform: translateX(0); }
+    30% { transform: translateX(8px); }
+    60% { transform: translateX(-4px); }
+    100% { transform: translateX(0); }
+  }
+
+  @keyframes damagePulse {
+    0% { transform: translateX(0); }
+    30% { transform: translateX(-6px); }
+    60% { transform: translateX(4px); }
+    100% { transform: translateX(0); }
+  }
+
+  .bf-unit-name {
+    font-family: 'Cinzel', serif;
+    font-size: 0.72rem;
+    color: var(--gold-light);
+    margin-bottom: 3px;
+  }
+
+  .enemies-side .bf-unit-name { color: var(--crimson); }
+
+  .hp-bar-wrap { margin-top: 3px; }
+
+  .hp-bar {
+    height: 4px;
+    background: #1a0a0e;
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .hp-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--blood), #e74c3c);
+    border-radius: 2px;
+    transition: width 0.4s ease;
+  }
+
+  .hp-fill.ally { background: linear-gradient(90deg, #27ae60, #2ecc71); }
+
+  .hp-text {
+    font-size: 0.62rem;
+    color: var(--text-dim);
+    text-align: right;
+    margin-top: 1px;
+  }
+
+  .vs-symbol {
+    font-family: 'Cinzel Decorative', cursive;
+    font-size: 1.5rem;
+    color: var(--crimson);
+    text-shadow: 0 0 20px rgba(192,57,43,0.6);
+    align-self: center;
+    text-align: center;
+  }
+
+  /* Combat Log */
+  .log-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1.2rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .log-title {
+    font-family: 'Cinzel', serif;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.2em;
+    margin-bottom: 0.8rem;
+  }
+
+  #log-container {
+    height: 280px;
+    overflow-y: auto;
+    background: #0d0608;
+    border: 1px solid #1a0a0e;
+    border-radius: 3px;
+    padding: 0.8rem;
+    font-size: 0.78rem;
+    line-height: 1.8;
+    scroll-behavior: smooth;
+  }
+
+  #log-container::-webkit-scrollbar { width: 4px; }
+  #log-container::-webkit-scrollbar-track { background: #0d0608; }
+  #log-container::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .log-round {
+    color: var(--gold);
+    font-family: 'Cinzel', serif;
+    font-size: 0.75rem;
+    letter-spacing: 0.1em;
+    margin: 0.5rem 0 0.2rem;
+    padding-bottom: 0.2rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .log-attack { color: var(--text); }
+  .log-attack .attacker { color: var(--gold-light); }
+  .log-attack .target { color: #e74c3c; }
+  .log-attack .dmg { color: var(--crimson); font-weight: bold; }
+  .log-attack .ally-attacker { color: #5dade2; }
+  .log-attack .ally-target { color: #58d68d; }
+  .log-death { color: #7f8c8d; font-style: italic; }
+  .log-skill { color: #9b59b6; font-style: italic; }
+  .log-result { color: var(--gold); font-family: 'Cinzel', serif; font-size: 0.85rem; text-align: center; margin-top: 0.5rem; }
+  .log-result.victory { color: #2ecc71; }
+  .log-result.defeat { color: var(--crimson); }
+
+  /* Result overlay */
+  #result-banner {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.85);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+
+  #result-banner.show { display: flex; }
+
+  .result-box {
+    background: var(--panel);
+    border: 2px solid var(--gold);
+    border-radius: 6px;
+    padding: 3rem;
+    text-align: center;
+    max-width: 420px;
+    position: relative;
+    animation: resultReveal 0.5s ease;
+  }
+
+  @keyframes resultReveal {
+    from { opacity: 0; transform: scale(0.8); }
+    to { opacity: 1; transform: scale(1); }
+  }
+
+  .result-box.defeat-box { border-color: var(--crimson); }
+
+  .result-icon { font-size: 3rem; margin-bottom: 1rem; }
+
+  .result-title {
+    font-family: 'Cinzel Decorative', cursive;
+    font-size: 1.8rem;
+    color: var(--gold);
+    margin-bottom: 0.5rem;
+    text-shadow: 0 0 20px rgba(201,168,76,0.5);
+  }
+
+  .defeat-box .result-title { color: var(--crimson); }
+
+  .result-sub {
+    color: var(--text-dim);
+    font-style: italic;
+    margin-bottom: 1.5rem;
+    font-size: 0.9rem;
+  }
+
+  /* Tooltip */
+  .skill-icon {
+    display: inline-block;
+    width: 16px; height: 16px;
+    background: rgba(201,168,76,0.15);
+    border: 1px solid var(--gold);
+    border-radius: 50%;
+    text-align: center;
+    line-height: 14px;
+    font-size: 0.6rem;
+    color: var(--gold);
+    cursor: help;
+    font-family: serif;
+    flex-shrink: 0;
+    position: relative;
+  }
+
+  .skill-icon .tooltip {
+    display: none;
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: #1a0d12;
+    border: 1px solid var(--gold);
+    border-radius: 4px;
+    padding: 6px 9px;
+    font-size: 0.68rem;
+    color: var(--text);
+    font-family: 'IM Fell English', serif;
+    font-style: italic;
+    white-space: normal;
+    width: 200px;
+    z-index: 100;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.7);
+    pointer-events: none;
+    line-height: 1.4;
+  }
+
+  .skill-icon:hover .tooltip {
+    display: block;
+  }
+
+  .tier-info-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    flex: 1;
+  }
+
+  .status-badge {
+    font-size: 0.6rem;
+    padding: 1px 5px;
+    border-radius: 2px;
+    background: rgba(155,89,182,0.25);
+    color: #9b59b6;
+    font-style: italic;
+  }
+
+  /* Speed banner */
+  .turn-order {
+    background: #0d0608;
+    border: 1px solid #1a0a0e;
+    border-radius: 3px;
+    padding: 0.5rem 0.8rem;
+    margin-bottom: 1rem;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    align-items: center;
+  }
+
+  .turn-badge {
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 0.67rem;
+    font-family: 'Cinzel', serif;
+  }
+
+  .turn-badge.ally { background: rgba(41,128,185,0.2); color: #5dade2; }
+  .turn-badge.enemy { background: rgba(192,57,43,0.2); color: #e74c3c; }
+  .turn-badge.active { box-shadow: 0 0 6px currentColor; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <h1>⚔ Bitefight</h1>
+  <p class="subtitle">Battle Simulator
+    <span style="font-family:Cinzel,serif;font-size:0.6rem;color:#7a5a4a;vertical-align:middle;margin-left:8px;border:1px solid #3a2020;padding:1px 7px;border-radius:10px;background:rgba(0,0,0,0.3)">v0.8.0</span>
+    <span class="skill-icon" style="margin-left:8px;width:18px;height:18px;line-height:16px;font-size:0.7rem;vertical-align:middle">?
+      <span class="tooltip" style="width:300px;font-style:normal;left:auto;right:-10px;transform:none;top:calc(100% + 6px);bottom:auto">
+        <strong style="font-family:Cinzel,serif;font-size:0.7rem;color:var(--gold)">📖 About Simulator</strong><br><br>
+        This tool simulates battles in Bitefight based on game rules — attack order, unit types, tier special abilities and damage calculation. It helps build and test formations before real combat, as well as auto-optimize army composition.<br><br>
+        <span style="color:#c0392b">⚠ Simulation is not 100% accurate — results may differ from actual battle outcomes in game. Simulator is not responsible for higher unit or Blood Essence losses than simulated. We recommend verifying results with a small test before deploying large armies.</span>
+      </span>
+    </span>
+    <span class="skill-icon" style="margin-left:4px;width:18px;height:18px;line-height:16px;font-size:0.6rem;vertical-align:middle;border-color:#8e44ad;background:rgba(142,68,173,0.15);color:#9b59b6">🔔
+      <span class="tooltip" style="width:260px;font-style:normal;left:auto;right:-10px;transform:none;top:calc(100% + 6px);bottom:auto;border-color:#8e44ad">
+        <strong style="font-family:Cinzel,serif;font-size:0.7rem;color:#9b59b6">🔔 Coming Soon</strong><br><br>
+        <span style="color:var(--text)">Upcoming simulator updates:</span><br><br>
+        <span style="color:#2ecc71">✓ Enemy Tier e6 — Specter (added)</span><br>
+        <span style="color:#9b59b6">• Enemy Tier e7, e8, e9 — coming soon</span><br>
+        <span style="color:#9b59b6">• Ally Tier 5, 6... — coming soon</span><br>
+        <span style="color:var(--text-dim);font-size:0.65rem;font-style:italic">More tiers and features will be added gradually.</span>
+      </span>
+    </span>
+  </p>
+  <hr class="divider">
+
+  <!-- ARMY BUILDER -->
+  <div class="builder-grid">
+    <!-- ALLIES -->
+    <div class="army-panel allies">
+      <div class="panel-title" style="display:flex;align-items:center;justify-content:space-between">
+        <span>⚔ Allied Army</span>
+        <label style="display:flex;align-items:center;gap:0.4rem;font-size:0.72rem;color:var(--text-dim)">
+          Power Limit:
+          <input type="number" id="power-limit-input-el" value="20" min="1" max="999"
+            style="width:52px;background:var(--dark);border:1px solid var(--border);color:var(--gold);font-family:'Cinzel',serif;font-size:0.78rem;padding:2px 5px;border-radius:2px;text-align:center">
+        </label>
+      </div>
+      <div id="ally-unlock-bar" style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px;padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid #2a1218;border-radius:3px;align-items:center">
+        <span style="font-family:Cinzel,serif;font-size:0.62rem;color:var(--text-dim);letter-spacing:.1em;margin-right:2px">UNLOCKED:</span>
+      </div>
+      <div class="tier-list" id="ally-tiers"></div>
+      <div class="power-bar">
+        <span class="power-label">POWER</span>
+        <div class="power-track"><div class="power-fill" id="ally-power-fill" style="width:0%"></div></div>
+        <span class="power-val" id="ally-power-text">0 / 20</span>
+      </div>
+    </div>
+
+    <!-- ENEMIES -->
+    <div class="army-panel enemies">
+      <div class="panel-title">💀 Enemy Army</div>
+      <div id="enemy-unlock-bar" style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px;padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid #2a1218;border-radius:3px;align-items:center">
+        <span style="font-family:Cinzel,serif;font-size:0.62rem;color:var(--text-dim);letter-spacing:.1em;margin-right:2px">UNLOCKED:</span>
+      </div>
+      <div class="tier-list" id="enemy-tiers"></div>
+      <div class="power-bar">
+        <span class="power-label">POWER</span>
+        <div class="power-track"><div class="power-fill" id="enemy-power-fill" style="width:0%"></div></div>
+        <span class="power-val" id="enemy-power-text">0 / —</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- CONTROLS -->
+  <div class="controls">
+    <button class="btn" id="btn-start-battle"><span>⚔ Start Battle</span></button>
+    <button class="btn" id="btn-step-battle"><span>▶ Step</span></button>
+    <button class="btn" id="btn-auto-play"><span>⏩ Auto</span></button>
+    <button class="btn" id="btn-open-optimizer" style="border-color:#8e44ad;color:#9b59b6"><span>🧠 Optimize</span></button>
+    <button class="btn danger" id="btn-reset-battle"><span>↺ Reset</span></button>
+  </div>
+
+  <!-- BATTLEFIELD -->
+  <div class="battlefield">
+    <div class="bf-title">— Battlefield —</div>
+    <div id="turn-order-bar" class="turn-order" style="display:none"></div>
+    <div class="bf-sides">
+      <div class="bf-side" id="bf-allies"></div>
+      <div class="vs-symbol">VS</div>
+      <div class="bf-side enemies-side" id="bf-enemies"></div>
+    </div>
+  </div>
+
+  <!-- LOG -->
+  <div class="log-panel">
+    <div class="log-title">📜 Battle Log</div>
+    <div id="log-container"><span style="color:var(--text-dim);font-style:italic">Build your armies and start the battle...</span></div>
+  </div>
+</div>
+
+<!-- OPTIMIZER MODAL -->
+<div id="optimizer-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.88);z-index:200;overflow-y:auto;padding:2rem 1rem">
+  <div style="max-width:680px;margin:0 auto;background:var(--panel);border:1px solid #8e44ad;border-radius:6px;padding:1.5rem;position:relative">
+    <button id="btn-close-optimizer" style="position:absolute;top:0.8rem;right:0.8rem;background:none;border:none;color:var(--text-dim);font-size:1.2rem;cursor:pointer">✕</button>
+    <div style="font-family:'Cinzel Decorative',cursive;color:#9b59b6;font-size:1.1rem;margin-bottom:0.3rem;text-shadow:0 0 15px rgba(155,89,182,0.4)">🧠 Formation Optimizer</div>
+    <div style="color:var(--text-dim);font-size:0.78rem;font-style:italic;margin-bottom:1.2rem">Automatically finds the best formation against the chosen enemy</div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.8rem;margin-bottom:1rem">
+      <div>
+        <div style="font-family:Cinzel,serif;font-size:0.7rem;color:var(--text-dim);letter-spacing:.1em;margin-bottom:4px">PRIORITY</div>
+        <select id="opt-priority" style="width:100%;background:var(--dark);border:1px solid var(--border);color:var(--text);font-family:'IM Fell English',serif;padding:5px 8px;border-radius:2px;font-size:0.82rem">
+          <option value="win_essence">Victory + min. Blood Essence</option>
+          <option value="win_units">Victory + max. survived units</option>
+          <option value="essence_only">Min. Blood Essence only (incl. defeat)</option>
+        </select>
+      </div>
+      <div>
+        <div style="font-family:Cinzel,serif;font-size:0.7rem;color:var(--text-dim);letter-spacing:.1em;margin-bottom:4px">TOP RESULTS</div>
+        <select id="opt-top" style="width:100%;background:var(--dark);border:1px solid var(--border);color:var(--text);font-family:'IM Fell English',serif;padding:5px 8px;border-radius:2px;font-size:0.82rem">
+          <option value="5">Top 5</option>
+          <option value="10">Top 10</option>
+          <option value="3">Top 3</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Max units per tier -->
+    <div style="margin-bottom:1rem;padding:0.7rem 0.9rem;background:rgba(0,0,0,0.25);border:1px solid #2a1218;border-radius:3px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div style="font-family:Cinzel,serif;font-size:0.7rem;color:var(--text-dim);letter-spacing:.1em">🔢 MAX UNITS PER TIER</div>
+        <span id="opt-combo-count" style="font-family:Cinzel,serif;font-size:0.65rem;color:var(--text-dim)"></span>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center" id="opt-max-inputs"></div>
+      <div id="opt-combo-warn" style="margin-top:6px;font-size:0.68rem;font-style:italic;display:none"></div>
+    </div>
+
+    <!-- Strategy options -->
+    <div style="margin-bottom:1rem;padding:0.7rem 0.9rem;background:rgba(0,0,0,0.25);border:1px solid #2a1218;border-radius:3px">
+      <div style="font-family:Cinzel,serif;font-size:0.7rem;color:var(--text-dim);letter-spacing:.1em;margin-bottom:8px">⚙ STRATEGIES</div>
+      <div id="opt-strategies" style="display:flex;flex-direction:column;gap:6px"></div>
+    </div>
+
+    <!-- Mode selector -->
+    <div style="margin-bottom:1rem;padding:0.7rem 0.9rem;background:rgba(0,0,0,0.25);border:1px solid #2a1218;border-radius:3px">
+      <div style="font-family:Cinzel,serif;font-size:0.7rem;color:var(--text-dim);letter-spacing:.1em;margin-bottom:8px">🔬 OPTIMIZATION MODE</div>
+      <div style="display:flex;gap:6px;flex-direction:column">
+        <label style="cursor:pointer;display:flex;align-items:flex-start;gap:8px">
+          <input type="radio" name="opt-mode" value="deep" checked id="opt-mode-deep"
+            style="margin-top:3px;accent-color:#9b59b6">
+          <span>
+            <span style="font-family:Cinzel,serif;font-size:0.72rem;color:var(--text)">🔬 Deep Simulation</span>
+            <span style="display:block;font-size:0.68rem;color:var(--text-dim);font-style:italic">Full precise simulation. Finds optimal formation. Recommended up to Power ~200.</span>
+          </span>
+        </label>
+        <label style="cursor:pointer;display:flex;align-items:flex-start;gap:8px">
+          <input type="radio" name="opt-mode" value="fast" id="opt-mode-fast"
+            style="margin-top:3px;accent-color:#e67e22">
+          <span>
+            <span style="font-family:Cinzel,serif;font-size:0.72rem;color:#e67e22">⚡ Fast Scan</span>
+            <span style="display:block;font-size:0.68rem;color:var(--text-dim);font-style:italic">Quick search for first winning formations. Regardless of losses. For Power 200+.</span>
+          </span>
+        </label>
+      </div>
+    </div>
+
+    <button id="btn-run-optimizer" class="btn" style="width:100%;border-color:#8e44ad;color:#9b59b6;margin-bottom:1.2rem">
+      <span id="opt-btn-label">⚙ Run Optimizer</span>
+    </button>
+
+    <div id="opt-progress" style="display:none;margin-bottom:1rem">
+      <div style="font-size:0.72rem;color:var(--text-dim);margin-bottom:4px;font-family:Cinzel,serif;letter-spacing:.08em" id="opt-progress-label">Testing combinations...</div>
+      <div style="height:6px;background:var(--dark);border-radius:3px;overflow:hidden">
+        <div id="opt-progress-bar" style="height:100%;background:linear-gradient(90deg,#6c3483,#9b59b6);width:0%;transition:width 0.2s;border-radius:3px"></div>
+      </div>
+    </div>
+
+    <div id="opt-results"></div>
+  </div>
+</div>
+
+<!-- RESULT -->
+<div id="result-banner">
+  <div class="result-box" id="result-box">
+    <button id="btn-close-result" style="position:absolute;top:0.8rem;right:0.8rem;background:none;border:none;color:var(--text-dim);font-size:1.2rem;cursor:pointer;line-height:1" title="Close">✕</button>
+    <div class="result-icon" id="result-icon">⚔</div>
+    <div class="result-title" id="result-title">VICTORY</div>
+    <div class="result-sub" id="result-sub"></div>
+    <div id="result-stats" style="margin:1rem 0;text-align:left;background:rgba(0,0,0,0.3);border:1px solid var(--border);border-radius:3px;padding:0.8rem;font-size:0.78rem;line-height:2"></div>
+    <div style="display:flex;gap:0.8rem;justify-content:center;flex-wrap:wrap;margin-top:1.2rem">
+      <button class="btn" id="btn-close-result-2"><span>📜 Show Results</span></button>
+      <button class="btn danger" id="btn-reset-battle-2"><span>↺ Simulate Again</span></button>
+    </div>
+  </div>
+</div>
+
+<script src="../js/simulator.js"></script>
+<script src="../js/bridge.js"></script>
+</body>
+</html>
