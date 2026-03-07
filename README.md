@@ -13,8 +13,6 @@ Chrome extension for **[Bitefight](https://www.bitefight.gameforge.com/)** — a
 - Interactive army builder with tier unlock system and power limits
 - Step-by-step or auto-play battle visualization with detailed combat log
 - **Formation Optimizer** — brute-force and fast-scan modes to find optimal formations against any enemy composition
-- That simulator have 90% accuracy up to level 20. 75% accuracy up to level 30. After level 30, accuracy is very low for now.
-
 
 ### 🤖 Bot Modules
 - **Hunt Bot** — automated human hunting with configurable HP thresholds, healing, and gold management
@@ -49,6 +47,31 @@ Chrome extension for **[Bitefight](https://www.bitefight.gameforge.com/)** — a
 The extension works on all Bitefight Gameforge servers:
 - `s*.bitefight.gameforge.com` (SK, EN, DE, and others)
 
+Lobby, forum, and support subdomains are excluded automatically.
+
+---
+
+## Project Structure
+
+```
+├── manifest.json        # Extension config (Manifest V3)
+├── js/
+│   ├── content.js       # Content script — DOM detection, army reading, data bridge
+│   ├── bot.js           # Bot engine — state machine for all bot modules
+│   ├── simulator.js     # Battle simulator logic, optimizer, tier definitions
+│   ├── bridge.js        # Communication bridge between content script and simulator iframe
+│   └── worker.js        # Background service worker for chrome.storage
+├── html/
+│   └── panel.html       # Simulator UI (loads in iframe)
+├── css/
+│   ├── panel.css        # Simulator panel styles
+│   └── bot-panel.css    # Bot panel styles
+└── img/
+    ├── icon-16.png
+    ├── icon-48.png
+    └── icon-128.png
+```
+
 ---
 
 ## How It Works
@@ -67,4 +90,4 @@ All settings and state are stored per-server in `chrome.storage.local`, so each 
 
 ## License
 
-GPL-3.0
+This project is licensed under the [GNU General Public License v3.0](LICENSE). You are free to use, modify, and distribute this software, but any derivative work must also be open-source under the same license.
