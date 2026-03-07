@@ -13,6 +13,7 @@ Chrome extension for **[Bitefight](https://www.bitefight.gameforge.com/)** — a
 - Interactive army builder with tier unlock system and power limits
 - Step-by-step or auto-play battle visualization with detailed combat log
 - **Formation Optimizer** — brute-force and fast-scan modes to find optimal formations against any enemy composition
+- Accuracy is above 90% only level >20.
 
 ### 🤖 Bot Modules
 - **Hunt Bot** — automated human hunting with configurable HP thresholds, healing, and gold management
@@ -89,5 +90,7 @@ All settings and state are stored per-server in `chrome.storage.local`, so each 
 ---
 
 ## License
+
+Copyright (C) 2026 Aescunor
 
 This project is licensed under the [GNU General Public License v3.0](LICENSE). You are free to use, modify, and distribute this software, but any derivative work must also be open-source under the same license.
