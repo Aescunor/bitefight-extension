@@ -3,6 +3,8 @@
 // State machine running as content script
 // Hunt Bot, Extraction, Ruins Farming, Auto-Recruit, Story Mode
 // Grotto (Demon Hunt), PvP, Gifts, Global Settings
+// Copyright (C) 2026 Aescunor
+// GNU General Public License v3.0
 // ============================================================
 (function () {
   'use strict';
