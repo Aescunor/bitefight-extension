@@ -1,4 +1,6 @@
 // ===================== DATA =====================
+// Copyright (C) 2026 Aescunor
+// GNU General Public License v3.0
 let ARMY_POWER_LIMIT = 20;
 
 function updatePowerLimit() {
@@ -1314,3 +1316,5 @@ document.addEventListener('DOMContentLoaded', function () {
   const btnCloseRes2 = document.getElementById('btn-close-result-2');
   if (btnCloseRes2) btnCloseRes2.addEventListener('click', closeResult);
 });
+// Copyright (C) 2026 Aescunor
+// GNU General Public License v3.0
