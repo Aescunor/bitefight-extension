@@ -109,10 +109,10 @@
     // ancestral/show: #enemyCardInner .enemySlot:not(.locked-unit)
     const slots = document.querySelectorAll('#enemyCardInner .enemySlot:not(.locked-unit)');
     if (slots.length) {
-      const enemies = Array.from(slots).map(slot => ({
+      const enemies = Array.from(slots).map((slot, i) => ({
         name: slot.querySelector('.valueName')?.textContent?.trim() || '',
         qty:  parseInt(slot.querySelector('.qtyValue')?.textContent?.trim()) || 0,
-        tier: toTier(slot.querySelector('.valueName')?.textContent?.trim() || ''),
+        tier: toTier(null, i),
         pos:  slot.classList.contains('enemyFront') ? 'Vanguard' : 'Rearguard'
       })).filter(e => e.qty > 0);
       if (enemies.length) return { enemies, source: 'ancestral-show' };
@@ -126,10 +126,10 @@
       const difficulty = parseInt(active.querySelector('.cyan-layer')?.textContent) || null;
       const enemies = Array.from(active.querySelectorAll('.enemyUnits[title]'))
         .filter(el => el.getAttribute('title'))
-        .map(el => ({
+        .map((el, i) => ({
           name: el.getAttribute('title'),
           qty:  parseInt((el.querySelector('p')?.textContent||'x0').replace('x',''))||0,
-          tier: toTier(el.getAttribute('title')), pos: null
+          tier: toTier(null, i), pos: null
         })).filter(e => e.qty > 0);
       if (enemies.length) return { enemies, source: 'ancestral-index', powerLimit: difficulty };
     }
