@@ -3,9 +3,9 @@
 // State machine running as content script
 // Hunt Bot, Extraction, Ruins Farming, Auto-Recruit, Story Mode
 // Grotto (Demon Hunt), PvP, Gifts, Global Settings
+// ============================================================
 // Copyright (C) 2026 Aescunor
 // GNU General Public License v3.0
-// ============================================================
 (function () {
   'use strict';
 
@@ -3539,6 +3539,12 @@
               </div>
             </div>
             <button class="bf-bot-btn" id="bf-preset-add-btn" style="font-size:0.6rem;padding:3px 8px;width:100%">➕ Add Preset</button>
+            <div class="bf-bot-row" style="gap:4px;margin-top:4px">
+              <button class="bf-bot-btn" id="bf-preset-export" style="flex:1;font-size:0.58rem;padding:3px 6px">📤 Export CSV</button>
+              <button class="bf-bot-btn" id="bf-preset-import-btn" style="flex:1;font-size:0.58rem;padding:3px 6px">📥 Import CSV</button>
+              <input type="file" id="bf-preset-import-file" accept=".csv,.txt" style="display:none">
+            </div>
+            <div id="bf-preset-import-status" style="font-size:0.55rem;color:#e0a030;margin-top:3px;display:none"></div>
           </div>
 
           <div class="bf-bot-group">
@@ -4501,6 +4507,150 @@
         renderPresetList();
       });
     });
+
+    // ── PRESET EXPORT (CSV) ──────────────────────────────────
+    document.getElementById('bf-preset-export').addEventListener('click', () => {
+      loadPresets(presets => {
+        // CSV header
+        const rows = ['Level,Enemy,Formation'];
+        // Sort levels numerically
+        const levels = Object.keys(presets).sort((a, b) => Number(a) - Number(b));
+        let total = 0;
+        for (const lvl of levels) {
+          for (const p of presets[lvl]) {
+            // Formation obj → string like "T1:20,T3:38"
+            const formStr = qtyToString(p.formation);
+            // Quote fields that contain commas
+            const enemyField = p.enemy.includes(',') ? `"${p.enemy}"` : p.enemy;
+            const formField = formStr.includes(',') ? `"${formStr}"` : formStr;
+            rows.push(`${lvl},${enemyField},${formField}`);
+            total++;
+          }
+        }
+        if (total === 0) {
+          alert('No presets to export.');
+          return;
+        }
+        const csv = rows.join('\n');
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `bf-presets-${new Date().toISOString().slice(0,10)}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        botLog('ok', `Exported ${total} presets to CSV.`);
+      });
+    });
+
+    // ── PRESET IMPORT (CSV) ──────────────────────────────────
+    const importFileInput = document.getElementById('bf-preset-import-file');
+    const importStatus = document.getElementById('bf-preset-import-status');
+
+    document.getElementById('bf-preset-import-btn').addEventListener('click', () => {
+      importFileInput.value = '';
+      importFileInput.click();
+    });
+
+    importFileInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        const text = evt.target.result;
+        const lines = text.split(/\r?\n/).filter(l => l.trim());
+
+        // Detect and skip header row
+        const firstLine = lines[0].trim().toLowerCase();
+        const startIdx = (firstLine.startsWith('level') || firstLine.startsWith('"level')) ? 1 : 0;
+
+        let imported = 0;
+        let errors = 0;
+        const newPresets = {};
+
+        for (let i = startIdx; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+
+          // Parse CSV with quoted fields support
+          const fields = parseCSVLine(line);
+          if (fields.length < 3) { errors++; continue; }
+
+          const lvl = String(parseInt(fields[0].trim()));
+          if (isNaN(parseInt(lvl)) || parseInt(lvl) < 1 || parseInt(lvl) > 30) { errors++; continue; }
+
+          const enemyStr = fields[1].trim();
+          const formStr = fields[2].trim();
+          if (!enemyStr || !formStr) { errors++; continue; }
+
+          const enemyObj = parseQtyString(enemyStr);
+          const formObj = parseQtyString(formStr);
+          const canonicalEnemy = enemyFingerprint(enemyObj);
+
+          if (!canonicalEnemy || Object.keys(formObj).length === 0) { errors++; continue; }
+
+          if (!newPresets[lvl]) newPresets[lvl] = [];
+          // Overwrite duplicate enemy in same level
+          newPresets[lvl] = newPresets[lvl].filter(p => p.enemy !== canonicalEnemy);
+          newPresets[lvl].push({ enemy: canonicalEnemy, formation: formObj });
+          imported++;
+        }
+
+        if (imported === 0) {
+          importStatus.textContent = `⚠ No valid presets found. ${errors} error(s).`;
+          importStatus.style.color = '#e04040';
+          importStatus.style.display = 'block';
+          return;
+        }
+
+        // Merge with existing presets
+        loadPresets(existing => {
+          for (const lvl of Object.keys(newPresets)) {
+            if (!existing[lvl]) existing[lvl] = [];
+            for (const np of newPresets[lvl]) {
+              existing[lvl] = existing[lvl].filter(p => p.enemy !== np.enemy);
+              existing[lvl].push(np);
+            }
+          }
+          savePresets(existing);
+          renderPresetList();
+          const msg = `✅ Imported ${imported} presets.` + (errors > 0 ? ` ${errors} row(s) skipped.` : '');
+          importStatus.textContent = msg;
+          importStatus.style.color = errors > 0 ? '#e0a030' : '#5a7a4a';
+          importStatus.style.display = 'block';
+          botLog('ok', msg);
+          setTimeout(() => { importStatus.style.display = 'none'; }, 5000);
+        });
+      };
+      reader.readAsText(file);
+    });
+
+    // CSV line parser — handles quoted fields with commas inside
+    function parseCSVLine(line) {
+      const fields = [];
+      let current = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') {
+          if (inQuotes && i + 1 < line.length && line[i + 1] === '"') {
+            current += '"';
+            i++; // skip escaped quote
+          } else {
+            inQuotes = !inQuotes;
+          }
+        } else if (ch === ',' && !inQuotes) {
+          fields.push(current);
+          current = '';
+        } else {
+          current += ch;
+        }
+      }
+      fields.push(current);
+      return fields;
+    }
 
     // Min units checkbox toggle
     document.getElementById('bf-ruins-stop-min-units')?.addEventListener('change', (e) => {
