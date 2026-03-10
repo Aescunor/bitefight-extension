@@ -1,9 +1,11 @@
+
 {
   "manifest_version": 3,
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArLJ+xyqpNJ3xY9uyGo7R74LUXiLbIWzMuy/dIPANh9GvIT3Hry8b6MjlDYEQwllYxRq6xW1XosTWezkL8aErta7k8SSY1RyhCYkzbnhGECBDwjsHmqevo1yr7RRhZ4coJxOPzjtOgXAa8nra2lWdJTa1Gs0G/8Jt+P3dhE33558doEBEtLDjfEjp2dRyfyU9up/HW9XytTOTTas5d8YmaI5HGpkf1ngMmbgN1IqkeuvJHKWQztk8hNUQ0Ft6N5EcCZAYNc7UxCGP8PGwqB/s5IXcryvEZq8rnJm+2jTyALjQ4jcxoOmHhPeKdbyqlq/zzB0Dph6VbG1EicCfIB2r5wIDAQAB",
   "name": "Bitefight \u2013 Battle Simulator",
   "short_name": "BF Simulator",
   "description": "Battle simulator and bot assistant for Bitefight. Story Bot, Hunt Bot, Ruins Farming, Grotto, PvP, Gifts, Global settings, formation simulator.",
-  "version": "0.9.0",
+  "version": "0.9.2",
   "icons": {
     "16": "img/icon-16.png",
     "48": "img/icon-48.png",
