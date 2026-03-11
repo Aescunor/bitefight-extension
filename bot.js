@@ -18,9 +18,84 @@
   function sSet(obj, cb) { if (!ctxOk()) return; try { chrome.storage.local.set(obj, cb); } catch(e) {} }
 
   const SERVER_ID = hostname.split('.')[0] || 'unknown';
-  const SK = (k) => SERVER_ID + '_bot_' + k;
+  let PLAYER_ID = null; // Detected async at boot
+  const SK = (k) => SERVER_ID + (PLAYER_ID ? '_p' + PLAYER_ID : '') + '_bot_' + k;
+  const PID_CACHE_KEY = SERVER_ID + '__pid'; // Server-level cache (no player prefix)
   const PAGE = window.location.pathname;
   const BASE = window.location.origin;
+
+  // ── PLAYER ID DETECTION (Multi-Account Support) ────────────
+  const PID_TTL = 10 * 60 * 1000; // 10 min cache TTL
+  const _onProfileNow = PAGE.startsWith('/profile');
+
+  function detectPlayerId() {
+    return new Promise((resolve) => {
+      if (!ctxOk()) { resolve(null); return; }
+
+      // A) On profile page — always detect from DOM (free, always fresh)
+      if (_onProfileNow) {
+        const fromDOM = detectFromDOM();
+        if (fromDOM) { cacheAndResolve(fromDOM); return; }
+      }
+
+      // B) Check storage cache with TTL
+      chrome.storage.local.get([PID_CACHE_KEY], (r) => {
+        const cached = r[PID_CACHE_KEY];
+        if (cached && cached.id && (Date.now() - (cached.ts || 0)) < PID_TTL) {
+          PLAYER_ID = String(cached.id);
+          resolve(PLAYER_ID);
+          return;
+        }
+
+        // C) Try DOM on current page
+        const fromDOM = detectFromDOM();
+        if (fromDOM) { cacheAndResolve(fromDOM); return; }
+
+        // D) Fetch /profile/index and parse
+        fetch(BASE + '/profile/index', { credentials: 'include' })
+          .then(resp => resp.text())
+          .then(html => {
+            let m = html.match(/<div\s+id="senderid"[^>]*>(\d+)<\/div>/);
+            if (m) { cacheAndResolve(m[1]); return; }
+            m = html.match(/\/profile\/player\/(\d+)/);
+            if (m) { cacheAndResolve(m[1]); return; }
+            // E) Last resort: use stale cache if available
+            if (cached && cached.id) {
+              PLAYER_ID = String(cached.id);
+              resolve(PLAYER_ID);
+              return;
+            }
+            resolve(null);
+          })
+          .catch(() => {
+            if (cached && cached.id) { PLAYER_ID = String(cached.id); resolve(PLAYER_ID); }
+            else resolve(null);
+          });
+      });
+
+      function detectFromDOM() {
+        const senderEl = document.getElementById('senderid');
+        if (senderEl) {
+          const id = (senderEl.textContent || '').trim();
+          if (/^\d+$/.test(id)) return id;
+        }
+        const profLink = document.querySelector('a[href*="/profile/player/"]');
+        if (profLink) {
+          const m = profLink.getAttribute('href').match(/\/profile\/player\/(\d+)/);
+          if (m) return m[1];
+        }
+        return null;
+      }
+
+      function cacheAndResolve(id) {
+        PLAYER_ID = String(id);
+        if (ctxOk()) {
+          try { chrome.storage.local.set({ [PID_CACHE_KEY]: { id: PLAYER_ID, ts: Date.now() } }); } catch(e) {}
+        }
+        resolve(PLAYER_ID);
+      }
+    });
+  }
 
   // ── HP / HEALTH READING ─────────────────────────────────────
   function readHP() {
@@ -3146,7 +3221,7 @@
         const csv = rows.map(r => r.join(';')).join('\n');
         const blob = new Blob([csv], { type: 'text/csv' });
         const url = URL.createObjectURL(blob);
-        const a = document.createElement('a'); a.href = url; a.download = `bf-battlelog-${SERVER_ID}.csv`; a.click();
+        const a = document.createElement('a'); a.href = url; a.download = `bf-battlelog-${SERVER_ID}${PLAYER_ID ? '-p' + PLAYER_ID : ''}.csv`; a.click();
         URL.revokeObjectURL(url);
       });
     });
@@ -3166,7 +3241,7 @@
         const csv = rows.map(r => r.join(';')).join('\n');
         const blob = new Blob([csv], { type: 'text/csv' });
         const url = URL.createObjectURL(blob);
-        const a = document.createElement('a'); a.href = url; a.download = `bf-essence-${SERVER_ID}.csv`; a.click();
+        const a = document.createElement('a'); a.href = url; a.download = `bf-essence-${SERVER_ID}${PLAYER_ID ? '-p' + PLAYER_ID : ''}.csv`; a.click();
         URL.revokeObjectURL(url);
       });
     });
@@ -3305,8 +3380,9 @@
     panel.id = 'bf-bot-panel';
     panel.innerHTML = `
       <div id="bf-bot-header">
-        <span>🤖 BF Bot <span style="font-size:0.55rem;opacity:0.4;margin-left:4px">v0.9.0 · ${SERVER_ID}</span></span>
+        <span>🤖 BF Bot <span style="font-size:0.55rem;opacity:0.4;margin-left:4px">v0.9.3 · ${SERVER_ID}</span></span>
         <div style="display:flex;gap:4px;align-items:center">
+          <span id="bf-player-badge" style="font-size:0.52rem;color:#9a7a5a;opacity:0.7">${PLAYER_ID ? '👤 #' + PLAYER_ID : ''}</span>
           <button id="bf-bot-pin" title="Pin panel (stays open after reload)">📌</button>
           <button id="bf-bot-close">✕</button>
         </div>
@@ -3969,6 +4045,11 @@
 
         <!-- GLOBAL TAB -->
         <div class="bf-bot-section" id="bf-bot-global">
+          <div class="bf-bot-group" id="bf-server-info-block">
+            <div class="bf-bot-group-title">🌐 Server</div>
+            <div style="font-size:0.66rem;color:#9a7a5a">${SERVER_ID}</div>
+            <div style="font-size:0.62rem;color:#7a9a6a;margin-top:2px" id="bf-global-player-badge">${PLAYER_ID ? '👤 Player: #' + PLAYER_ID : '👤 Player: detecting...'}</div>
+          </div>
           <div class="bf-bot-group">
             <div class="bf-bot-group-title">💰 Gold</div>
             <div class="bf-bot-row">
@@ -5488,11 +5569,16 @@
   }
 
   // ── INIT ─────────────────────────────────────────────────────
+  function boot() {
+    detectPlayerId().then(() => {
+      createBotPanel();
+      createBattleLogPanel();
+    });
+  }
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => { createBotPanel(); createBattleLogPanel(); });
+    document.addEventListener('DOMContentLoaded', boot);
   } else {
-    createBotPanel();
-    createBattleLogPanel();
+    boot();
   }
 
 })();
