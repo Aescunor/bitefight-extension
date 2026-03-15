@@ -1,8 +1,7 @@
 // ===================== DATA =====================
+let ARMY_POWER_LIMIT = 20;
 // Copyright (C) 2026 Aescunor
 // GNU General Public License v3.0
-let ARMY_POWER_LIMIT = 20;
-
 function updatePowerLimit() {
   const val = parseInt(document.getElementById('power-limit-input-el').value) || 20;
   ARMY_POWER_LIMIT = Math.max(1, val);
@@ -18,6 +17,8 @@ const ALLY_TIERS = [
     skill: '+33% damage vs enemies with speed < 3', skillId: 'T3_VS_SLOW' },
   { id: 'T4', label: 'Tier 4', dmg: 7, hp: 4, spd: 4, power: 7, cost: 35, pos: 'Rearguard', type: 'Monster',
     skill: 'Attacks rearguard. Reduces target group damage by 25% for 1 round.', skillId: 'T4_REARGUARD_DEBUFF' },
+  { id: 'T5', label: 'Tier 5', dmg: 9, hp: 5, spd: 2, power: 10, cost: 50, pos: 'Rearguard', type: 'Occult',
+    skill: '+10% damage for each group of units that dies in battle.', skillId: 'T5_DEATH_BUFF' },
 ];
 
 const ENEMY_TIERS = [
@@ -33,6 +34,8 @@ const ENEMY_TIERS = [
     skill: 'On death, deals 20% of its HP as damage to attacker', skillId: 'E5_DEATH_THORNS' },
   { id: 'E6', label: 'Tier e6', dmg: 7, hp: 2, spd: 4, power: null, pos: 'Vanguard', type: 'Occult',
     skill: 'Gains +50% attack if target group has double or more units than this group. Checked each round.', skillId: 'E6_DOUBLE_BONUS' },
+  { id: 'E7', label: 'Tier e7', dmg: 8, hp: 12, spd: 4, power: null, pos: 'Vanguard', type: 'Brute',
+    skill: 'While alive, player Rearguard deals 15% less damage.', skillId: 'E7_REAR_SUPPRESS' },
 ];
 
 // ===================== STATE =====================
@@ -351,11 +354,11 @@ function executeRound() {
   }
 
   // End-of-round skills
-  // E3: if still alive at end of round, +10% buff to a random friendly
+  // E3: if still alive at end of round, +10% buff to strongest friendly group
   bs.enemies.filter(g => g.alive && g.tier.skillId === 'E3_BUFF_ALLY').forEach(e3 => {
     const friendlies = bs.enemies.filter(g => g.alive && g.id !== e3.id);
     if (friendlies.length > 0) {
-      const t = friendlies[Math.floor(Math.random() * friendlies.length)];
+      const t = friendlies.reduce((best, g) => (g.tier.dmg * g.aliveUnits > best.tier.dmg * best.aliveUnits ? g : best));
       t.damageBuff = +(((t.damageBuff || 1.0) + 0.1).toFixed(2));
       addLog(`<span class="log-skill">✦ ${e3.label} (E3): Buffs ${t.label} by 10% damage (total ×${t.damageBuff.toFixed(1)})</span>`);
     }
@@ -418,10 +421,14 @@ function performAttack(attacker, target, bs) {
     dmg *= attacker.damageBuff;
   }
 
-  // E4: +20% if this unit is the first attacker this round
-  if (attacker.tier.skillId === 'E4_REARGUARD_FIRST' && bs.firstAttackerThisRound === attacker.id) {
-    dmg *= 1.2;
-    addLog(`<span class="log-skill">✦ Tier e4: +20% damage (attacks first)</span>`);
+  // E4: +20% if this unit has strictly the highest speed among all alive units (no ties)
+  if (attacker.tier.skillId === 'E4_REARGUARD_FIRST') {
+    const allAlive = [...bs.allies, ...bs.enemies].filter(g => g.alive);
+    const maxSpd = Math.max(...allAlive.map(g => g.tier.spd));
+    if (attacker.tier.spd === maxSpd && allAlive.filter(g => g.tier.spd === maxSpd).length === 1) {
+      dmg *= 1.2;
+      addLog(`<span class="log-skill">✦ Tier e4: +20% damage (attacks first)</span>`);
+    }
   }
 
   // E6: +50% if target group has >= 2x units compared to this group
@@ -431,6 +438,25 @@ function performAttack(attacker, target, bs) {
     if (targetUnits >= attackerUnits * 2) {
       dmg *= 1.5;
       addLog(`<span class="log-skill">✦ Tier e6: +50% damage (target has ${targetUnits} vs ${attackerUnits} units)</span>`);
+    }
+  }
+
+  // T5: +10% damage for each group that has died so far in this battle
+  if (attacker.tier.skillId === 'T5_DEATH_BUFF') {
+    const deadGroups = [...bs.allies, ...bs.enemies].filter(g => !g.alive).length;
+    if (deadGroups > 0) {
+      const t5Mult = 1 + deadGroups * 0.1;
+      dmg *= t5Mult;
+      addLog(`<span class="log-skill">✦ Tier 5: +${deadGroups * 10}% damage (${deadGroups} groups dead)</span>`);
+    }
+  }
+
+  // E7: while alive, player's Rearguard deals 15% less damage
+  if (attacker.side === 'ally' && attacker.tier.pos === 'Rearguard') {
+    const e7Alive = bs.enemies.some(g => g.alive && g.tier.skillId === 'E7_REAR_SUPPRESS');
+    if (e7Alive) {
+      dmg *= 0.85;
+      addLog(`<span class="log-skill">✦ Tier e7 aura: Ally Rearguard −15% damage</span>`);
     }
   }
 
@@ -767,6 +793,7 @@ function simulateBattleSilent(allyQtys, enemyQtys) {
       const enemySide = attacker.side === 'ally' ? bs.enemies : bs.allies;
       const target = pickTarget(attacker, enemySide);
       if (!target) continue;
+      attacker.attackedThisRound = true;
       attackSilent(attacker, target, bs);
     }
 
@@ -820,8 +847,29 @@ function attackSilent(attacker, target, bs) {
   if (attacker.tier.skillId === 'T1_FIRST_ROUND_DMG' && bs.firstRound) dmg *= 1.25;
   if (attacker.tier.skillId === 'T3_VS_SLOW' && target.tier.spd < 3) dmg *= 1.33;
   if (attacker.damageBuff && attacker.damageBuff > 1.0) dmg *= attacker.damageBuff;
-  if (attacker.tier.skillId === 'E4_REARGUARD_FIRST' && bs.firstAttackerThisRound === attacker.id) dmg *= 1.2;
+
+  // E4: +20% only if strictly highest speed (no ties)
+  if (attacker.tier.skillId === 'E4_REARGUARD_FIRST') {
+    const allAlive = [...bs.allies, ...bs.enemies].filter(g => g.alive);
+    const maxSpd = Math.max(...allAlive.map(g => g.tier.spd));
+    if (attacker.tier.spd === maxSpd && allAlive.filter(g => g.tier.spd === maxSpd).length === 1) {
+      dmg *= 1.2;
+    }
+  }
+
   if (attacker.tier.skillId === 'E6_DOUBLE_BONUS' && (target.aliveUnits || 1) >= (attacker.aliveUnits || 1) * 2) dmg *= 1.5;
+
+  // T5: +10% per dead group
+  if (attacker.tier.skillId === 'T5_DEATH_BUFF') {
+    const deadGroups = [...bs.allies, ...bs.enemies].filter(g => !g.alive).length;
+    if (deadGroups > 0) dmg *= (1 + deadGroups * 0.1);
+  }
+
+  // E7: while alive, player's Rearguard deals 15% less
+  if (attacker.side === 'ally' && attacker.tier.pos === 'Rearguard') {
+    if (bs.enemies.some(g => g.alive && g.tier.skillId === 'E7_REAR_SUPPRESS')) dmg *= 0.85;
+  }
+
   if (attacker.debuffed) dmg *= 0.75;
 
   const typeMult = getTypeMultiplier(attacker.tier.type, target.tier.type);
@@ -1316,5 +1364,7 @@ document.addEventListener('DOMContentLoaded', function () {
   const btnCloseRes2 = document.getElementById('btn-close-result-2');
   if (btnCloseRes2) btnCloseRes2.addEventListener('click', closeResult);
 });
+
+
 // Copyright (C) 2026 Aescunor
 // GNU General Public License v3.0
