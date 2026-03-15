@@ -270,11 +270,12 @@
     container.style.display = 'none';
     container.innerHTML = `
       <div id="bf-sim-header">
-        <span>⚔ BF Simulator <span style="font-size:0.6rem;opacity:0.4;margin-left:4px">β v0.9.3 · ${SERVER_ID}${PLAYER_ID ? ' · #' + PLAYER_ID : ''}</span></span>
+        <span>⚔ BF Simulator <span style="font-size:0.6rem;opacity:0.4;margin-left:4px">β v0.9.5 · ${SERVER_ID}${PLAYER_ID ? ' · #' + PLAYER_ID : ''}</span></span>
         <div style="display:flex;gap:6px;align-items:center">
           <span id="bf-ap-badge"  class="bf-badge">AP: –</span>
           <span id="bf-be-badge"  class="bf-badge bf-badge-blood">BE: –</span>
           <span id="bf-orb-badge" class="bf-badge bf-badge-orb" style="display:none">🔴 Orby!</span>
+          <button id="bf-sim-fullscreen" title="Fullscreen">⛶</button>
           <button id="bf-sim-close">✕</button>
         </div>
       </div>
@@ -294,6 +295,43 @@
 
     container.querySelector('#bf-sim-close').addEventListener('click', () => {
       container.style.display = 'none';
+    });
+
+    // Fullscreen toggle
+    let isFullscreen = false;
+    const fsBtn = container.querySelector('#bf-sim-fullscreen');
+    const savedStyle = {};
+    fsBtn.addEventListener('click', () => {
+      isFullscreen = !isFullscreen;
+      if (isFullscreen) {
+        // Save current position/size
+        savedStyle.top = container.style.top;
+        savedStyle.left = container.style.left;
+        savedStyle.right = container.style.right;
+        savedStyle.bottom = container.style.bottom;
+        savedStyle.width = container.style.width;
+        savedStyle.height = container.style.height;
+        // Apply fullscreen
+        container.classList.add('bf-sim-fullscreen');
+        container.style.top = '0';
+        container.style.left = '0';
+        container.style.right = '0';
+        container.style.bottom = '0';
+        container.style.width = '100vw';
+        container.style.height = '100vh';
+        fsBtn.textContent = '⛶';
+        fsBtn.title = 'Exit Fullscreen';
+      } else {
+        container.classList.remove('bf-sim-fullscreen');
+        container.style.top = savedStyle.top || '';
+        container.style.left = savedStyle.left || '';
+        container.style.right = savedStyle.right || 'auto';
+        container.style.bottom = savedStyle.bottom || 'auto';
+        container.style.width = '';
+        container.style.height = '';
+        fsBtn.textContent = '⛶';
+        fsBtn.title = 'Fullscreen';
+      }
     });
 
     makeDraggable(container, container.querySelector('#bf-sim-header'));
