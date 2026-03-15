@@ -1,5 +1,5 @@
 // ============================================================
-// Bitefight Battle Simulator — Bridge v0.8.0
+// Bitefight Battle Simulator — Bridge v0.9.1
 // FIX: field names s.ally / s.enemy (nie allyFormation/enemyShow)
 // FIX: no inline onclick= handlers (CSP)
 // FIX: auto-import without additional clicking
@@ -107,7 +107,7 @@ function doAllyImport() {
   const ally = window._bf_ally;
   if (!ally || typeof allyQuantities === 'undefined') return;
 
-  const idMap = { '1':'T1', '2':'T2', '3':'T3', '4':'T4', '5':'T5', '6':'T6' };
+  const idMap = { '1':'T1', '2':'T2', '3':'T3', '4':'T4', '5':'T5', '6':'T6', '7':'T7', '8':'T8' };
   ally.units.forEach(u => {
     const tid = idMap[String(u.id)];
     if (tid) allyQuantities[tid] = parseInt(u.owned) || 0;
