@@ -1017,7 +1017,7 @@
     // Kick off ruins if enabled (cooperative mode)
     if (settings.ruinsEnabled && state.ruinsState !== 'done') {
       botLog('info', 'Hunt on cooldown → Starting Ruins');
-      setTimeout(() => {
+      botSetTimeout(() => {
         loadState(st => {
           loadSettings(se => {
             if (se.ruinsEnabled && st.ruinsState !== 'done') {
@@ -1058,7 +1058,7 @@
           state.huntState = 'navigating';
           state.extractionsThisSession = 0;
           saveState(state);
-          setTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 3000));
+          botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 3000));
           return;
         }
         const remaining = Math.ceil(((state.orbWaitUntil || 0) - Date.now()) / 60000);
@@ -1141,7 +1141,7 @@
           const neededAP = HUNT_TYPES.find(h => h.id === huntType)?.ap || 1;
           if (ap.current !== null && ap.current >= neededAP) {
             botLog('info', `AB: ${abPct}% → Lov: ${HUNT_TYPES.find(h => h.id === huntType)?.name} (typ ${huntType})`);
-            setTimeout(() => { window.location.href = BASE + '/robbery/humanhunt/' + huntType; }, randomDelay(1500, 3500));
+            botSetTimeout(() => { window.location.href = BASE + '/robbery/humanhunt/' + huntType; }, randomDelay(1500, 3500));
           } else {
             botLog('warn', `AP: ${ap.current}/${neededAP}, nedostatok pre lov.`);
             state.huntState = 'done';
@@ -1150,7 +1150,7 @@
           return;
         } else {
           // Navigate to hunt choice page
-          setTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1500, 3500));
+          botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1500, 3500));
           return;
         }
       }
@@ -1202,7 +1202,7 @@
           if (result.hasExtraction && result.orbsReady > 0) {
             // Extraction modal might still be open, wait a bit and retry
             botLog('info', 'Extraction still in progress, waiting...');
-            setTimeout(() => botTick(state, settings), randomDelay(2000, 4000));
+            botSetTimeout(() => botTick(state, settings), randomDelay(2000, 4000));
             return;
           }
           
@@ -1287,11 +1287,11 @@
                 if (showModal === '1') {
                   // Need to confirm modal — click extract then confirm
                   extractBtn.click();
-                  setTimeout(() => {
+                  botSetTimeout(() => {
                     const confirmBtn = document.getElementById('confirmModal_buttonLeft');
                     if (confirmBtn) confirmBtn.click();
                     // FALLBACK: if extraction is inline (no page redirect), re-tick after delay
-                    setTimeout(() => {
+                    botSetTimeout(() => {
                       loadState(st => {
                         loadSettings(se => {
                           if (se.huntEnabled && st.huntState === 'extracting') {
@@ -1322,7 +1322,7 @@
                 } else {
                   extractBtn.click();
                   // FALLBACK: if extraction is inline (no page redirect), re-tick after delay
-                  setTimeout(() => {
+                  botSetTimeout(() => {
                     loadState(st => {
                       loadSettings(se => {
                         if (se.huntEnabled && st.huntState === 'extracting') {
@@ -1382,7 +1382,7 @@
           state.huntState = 'navigating';
           saveState(state);
           botLog('info', `Navigating to hunt: ${HUNT_TYPES.find(h => h.id === huntType)?.name}`);
-          setTimeout(() => { window.location.href = BASE + '/robbery/humanhunt/' + huntType; }, randomDelay(600, 1500));
+          botSetTimeout(() => { window.location.href = BASE + '/robbery/humanhunt/' + huntType; }, randomDelay(600, 1500));
           return;
         } else {
           // No AP
@@ -1408,7 +1408,7 @@
           state.huntState = 'navigating';
           state.lastKnownABPct = abPct; // save for use on result page
           saveState(state);
-          setTimeout(() => { window.location.href = BASE + '/robbery/humanhunt/' + huntType; }, randomDelay(600, 1500));
+          botSetTimeout(() => { window.location.href = BASE + '/robbery/humanhunt/' + huntType; }, randomDelay(600, 1500));
           return;
         } else {
           botLog('warn', `AP: ${ap.current}/${neededAP}, nedostatok pre lov.`);
@@ -1423,7 +1423,7 @@
           botLog('info', 'Navigating to hunt page...');
           state.huntState = 'navigating';
           saveState(state);
-          setTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(600, 1500));
+          botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(600, 1500));
           return;
         }
       }
@@ -1445,7 +1445,7 @@
       if (shouldRecruit) {
         if (!PAGE.includes('/nourishing/')) {
           botLog('info', 'Recruit: Navigating to Crimson Sanctuary for recruitment');
-          setTimeout(() => { window.location.href = BASE + '/nourishing/index'; }, randomDelay(1000, 2000));
+          botSetTimeout(() => { window.location.href = BASE + '/nourishing/index'; }, randomDelay(1000, 2000));
           return;
         }
         // On nourishing page — trigger recruitment
@@ -1698,14 +1698,14 @@
         // Click "Pokračovať" to go back to ruins index
         if (contLink) {
           saveState(state);
-          setTimeout(() => { contLink.click(); }, randomDelay(1000, 2500));
+          botSetTimeout(() => { contLink.click(); }, randomDelay(1000, 2500));
           return;
         }
 
         // No continue link — navigate manually
         saveState(state);
         botLog('info', `Ruins: Navigating to layer ${levels[state.ruinsCurrentIdx]}`);
-        setTimeout(() => { window.location.href = BASE + '/ancestral/show/' + levels[state.ruinsCurrentIdx]; }, randomDelay(800, 2000));
+        botSetTimeout(() => { window.location.href = BASE + '/ancestral/show/' + levels[state.ruinsCurrentIdx]; }, randomDelay(800, 2000));
         return;
       }
       // Still on fighting state but not on result page — might be loading
@@ -1759,7 +1759,7 @@
       const waitMin = Math.round(waitMs / 60000);
       botLog('info', `Ruins: All layers on cooldown. Waiting ${waitMin} min.`);
       saveState(state);
-      setTimeout(() => {
+      botSetTimeout(() => {
         loadState(st => {
           loadSettings(se => {
             if (se.ruinsEnabled && st.ruinsState !== 'done') ruinsTick(st, se);
@@ -1773,7 +1773,7 @@
     if (now - lastAttack < intervalMs) {
       // Current level still on cooldown after scan (shouldn't happen, but safety)
       saveState(state);
-      setTimeout(() => ruinsTick(state, settings), 100);
+      botSetTimeout(() => ruinsTick(state, settings), 100);
       return;
     }
 
@@ -1797,7 +1797,7 @@
       botLog('info', `Ruins: Navigating to layer ${levels[state.ruinsCurrentIdx]}`);
       state.ruinsState = 'navigating';
       saveState(state);
-      setTimeout(() => { window.location.href = BASE + '/ancestral/show/' + levels[state.ruinsCurrentIdx]; }, randomDelay(800, 2000));
+      botSetTimeout(() => { window.location.href = BASE + '/ancestral/show/' + levels[state.ruinsCurrentIdx]; }, randomDelay(800, 2000));
       return;
     }
 
@@ -1892,7 +1892,7 @@
             botLog('warn', `Layer ${level}: No formation found, skipping`);
             state.ruinsCurrentIdx++;
             saveState(state);
-            setTimeout(() => botTick(state, settings), randomDelay(1000, 2000));
+            botSetTimeout(() => botTick(state, settings), randomDelay(1000, 2000));
           }
           return;
         }
@@ -1926,7 +1926,7 @@
               if (i >= clicks.length) { resolve(); return; }
               clicks[i].click();
               i++;
-              setTimeout(nextClick, 80 + Math.floor(Math.random() * 120)); // 80-200ms per click
+              botSetTimeout(nextClick, 80 + Math.floor(Math.random() * 120)); // 80-200ms per click
             }
             nextClick();
           });
@@ -1937,13 +1937,13 @@
         function setNextSlider() {
           if (sliderIdx >= tierOrder.length) {
             // All sliders set — wait for fightBtn unlock
-            setTimeout(doFight, 400 + Math.floor(Math.random() * 400));
+            botSetTimeout(doFight, 400 + Math.floor(Math.random() * 400));
             return;
           }
           const [tid, qty] = tierOrder[sliderIdx];
           sliderIdx++;
           clickSliderTo(tid, qty).then(() => {
-            setTimeout(setNextSlider, 200 + Math.floor(Math.random() * 500)); // pause between tiers
+            botSetTimeout(setNextSlider, 200 + Math.floor(Math.random() * 500)); // pause between tiers
           });
         }
 
@@ -1963,12 +1963,12 @@
               maxUnitsBeforeFight: { ...maxUnits },
             };
             saveState(state);
-            setTimeout(() => { fightBtn.click(); }, randomDelay(300, 800));
+            botSetTimeout(() => { fightBtn.click(); }, randomDelay(300, 800));
           } else {
             botLog('warn', `Ruins layer ${level}: fightBtn locked, skipping`);
             state.ruinsCurrentIdx++;
             saveState(state);
-            setTimeout(() => botTick(state, settings), randomDelay(1000, 2000));
+            botSetTimeout(() => botTick(state, settings), randomDelay(1000, 2000));
           }
         }
 
@@ -2027,7 +2027,7 @@
         if (settings.storyChurch && !isChurchPage()) {
           if (!settings.storyChurchOverAP || (ap.current !== null && ap.current >= 1)) {
             botLog('info', 'Navigating to church for healing...');
-            setTimeout(() => { window.location.href = BASE + '/city/church'; }, randomDelay(1500, 3000));
+            botSetTimeout(() => { window.location.href = BASE + '/city/church'; }, randomDelay(1500, 3000));
             return;
           }
         }
@@ -2035,7 +2035,7 @@
         // Wait and re-check
         const waitTime = randomDelay(10000, 20000);
         botLog('info', `Waiting for regeneration... (next check ~${Math.round(waitTime/1000)}s)`);
-        setTimeout(() => {
+        botSetTimeout(() => {
           loadState(st => {
             loadSettings(se => {
               if (se.storyEnabled) storyTick(st, se);
@@ -2073,13 +2073,13 @@
       const healBtn = document.querySelector('a[href*="/city/church/heal"], .btn[href*="church/heal"], input[type="submit"]');
       if (healBtn) {
         botLog('info', 'Healing at church...');
-        setTimeout(() => {
+        botSetTimeout(() => {
           healBtn.click ? healBtn.click() : (window.location.href = healBtn.href || BASE + '/city/church/heal');
         }, randomDelay(500, 1200));
         return;
       }
       // After healing, navigate to adventure
-      setTimeout(() => { window.location.href = BASE + '/city/adventure'; }, randomDelay(1000, 2000));
+      botSetTimeout(() => { window.location.href = BASE + '/city/adventure'; }, randomDelay(1000, 2000));
       return;
     }
 
@@ -2094,7 +2094,7 @@
         state.storyState = 'waiting_ap';
         saveState(state);
         updateStoryUI(settings, state);
-        setTimeout(() => {
+        botSetTimeout(() => {
           loadState(st => {
             loadSettings(se => {
               if (se.storyEnabled) storyTick(st, se);
@@ -2105,7 +2105,7 @@
       }
 
       botLog('info', 'Starting story quest...');
-      setTimeout(() => { window.location.href = BASE + '/city/adventure/startquest'; }, randomDelay(800, 2000));
+      botSetTimeout(() => { window.location.href = BASE + '/city/adventure/startquest'; }, randomDelay(800, 2000));
       return;
     }
 
@@ -2128,7 +2128,7 @@
 
       if (!decisions.length) {
         botLog('warn', 'No decisions on the page');
-        setTimeout(() => { window.location.href = BASE + '/city/adventure'; }, randomDelay(2000, 4000));
+        botSetTimeout(() => { window.location.href = BASE + '/city/adventure'; }, randomDelay(2000, 4000));
         return;
       }
 
@@ -2160,7 +2160,7 @@
       saveState(state);
 
       // Navigate to decision
-      setTimeout(() => {
+      botSetTimeout(() => {
         window.location.href = BASE + '/city/adventure/decision/' + chosen.id;
       }, randomDelay(800, 2200));
       return;
@@ -2169,7 +2169,7 @@
     // ── ON WORKING PAGE ───────────────────────────────────────
     if (isStoryWorkingPage()) {
       botLog('info', 'Story — quest is processing...');
-      setTimeout(() => {
+      botSetTimeout(() => {
         loadState(st => {
           loadSettings(se => {
             if (se.storyEnabled) storyTick(st, se);
@@ -2182,7 +2182,7 @@
     // ── ON STORY PAGE (general — might be result or continuation)
     if (isStoryPage()) {
       // Might be a result page or a continuation — just reload adventure
-      setTimeout(() => { window.location.href = BASE + '/city/adventure'; }, randomDelay(1000, 2500));
+      botSetTimeout(() => { window.location.href = BASE + '/city/adventure'; }, randomDelay(1000, 2500));
       return;
     }
 
@@ -2192,7 +2192,7 @@
         botLog('info', 'Navigating to story page...');
         state.storyState = 'navigating';
         saveState(state);
-        setTimeout(() => { window.location.href = BASE + '/city/adventure'; }, randomDelay(600, 1500));
+        botSetTimeout(() => { window.location.href = BASE + '/city/adventure'; }, randomDelay(600, 1500));
         return;
       }
     }
@@ -2203,12 +2203,12 @@
         botLog('ok', 'AP recovered → Continuing story');
         state.storyState = 'active';
         saveState(state);
-        setTimeout(() => { window.location.href = BASE + '/city/adventure'; }, randomDelay(1000, 2000));
+        botSetTimeout(() => { window.location.href = BASE + '/city/adventure'; }, randomDelay(1000, 2000));
         return;
       }
       const waitTime = randomDelay(30000, 60000);
       botLog('info', `Waiting for AP... (next check ~${Math.round(waitTime/1000)}s)`);
-      setTimeout(() => {
+      botSetTimeout(() => {
         loadState(st => {
           loadSettings(se => {
             if (se.storyEnabled) storyTick(st, se);
@@ -2249,17 +2249,17 @@
 
     function doNext(ci) {
       if (ci >= calls.length) {
-        setTimeout(() => autoRecruit(formation, idx + 1, keys), 500);
+        botSetTimeout(() => autoRecruit(formation, idx + 1, keys), 500);
         return;
       }
       const c = calls[ci];
       const btn = document.getElementById('recruits-' + c.unitId + '-' + c.amount);
       if (btn && !btn.classList.contains('disabled')) {
         btn.click();
-        setTimeout(() => doNext(ci + 1), randomDelay(300, 600));
+        botSetTimeout(() => doNext(ci + 1), randomDelay(300, 600));
       } else {
         botLog('warn', `Recruit T${c.unitId} x${c.amount} — button disabled`);
-        setTimeout(() => autoRecruit(formation, idx + 1, keys), 300);
+        botSetTimeout(() => autoRecruit(formation, idx + 1, keys), 300);
       }
     }
     doNext(0);
@@ -2394,7 +2394,7 @@
               state.goldLastSpend = Date.now();
               state.goldNavigating = false;
               saveState(state);
-              setTimeout(() => { window.location.href = link.href; }, randomDelay(800, 1500));
+              botSetTimeout(() => { window.location.href = link.href; }, randomDelay(800, 1500));
               return true;
             }
           }
@@ -2407,7 +2407,7 @@
         botLog('info', '💰 Gold: Navigating to profile for training');
         state.goldNavigating = true;
         saveState(state);
-        setTimeout(() => { window.location.href = BASE + '/profile/index'; }, randomDelay(1000, 2000));
+        botSetTimeout(() => { window.location.href = BASE + '/profile/index'; }, randomDelay(1000, 2000));
         return true;
       }
       return false;
@@ -2428,7 +2428,7 @@
           state.goldLastSpend = Date.now();
           state.goldNavigating = false;
           saveState(state);
-          setTimeout(() => { donateBtn.click(); }, randomDelay(800, 1500));
+          botSetTimeout(() => { donateBtn.click(); }, randomDelay(800, 1500));
           return true;
         }
         return false;
@@ -2439,7 +2439,7 @@
         botLog('info', '💰 Gold: Navigating to clan for donation');
         state.goldNavigating = true;
         saveState(state);
-        setTimeout(() => { window.location.href = BASE + '/clan'; }, randomDelay(1000, 2000));
+        botSetTimeout(() => { window.location.href = BASE + '/clan'; }, randomDelay(1000, 2000));
         return true;
       }
       return false;
@@ -2482,7 +2482,7 @@
         state.graveyardWorking = true;
         state.graveyardWorkUntil = Date.now() + workHours * 3600000;
         saveState(state);
-        setTimeout(() => { workBtn.click(); }, randomDelay(800, 1500));
+        botSetTimeout(() => { workBtn.click(); }, randomDelay(800, 1500));
         return;
       }
     }
@@ -2496,7 +2496,7 @@
         botLog('info', `🪦 Graveyard: Navigating (${apLow ? 'AP: ' + ap.current : 'HP: ' + hpPct + '%'})`);
         state.graveyardWorking = false;
         saveState(state);
-        setTimeout(() => { window.location.href = BASE + '/city/graveyard'; }, randomDelay(1000, 2000));
+        botSetTimeout(() => { window.location.href = BASE + '/city/graveyard'; }, randomDelay(1000, 2000));
       }
     }
   }
@@ -2522,7 +2522,7 @@
               botLog('info', `🎁 DBG: Opening dark blue gift (${qty} remaining, AP: ${ap.current})`);
               state.giftsDBGOpened = (state.giftsDBGOpened || 0) + 1;
               saveState(state);
-              setTimeout(() => { window.location.href = dbgLink.href; }, randomDelay(500, 1200));
+              botSetTimeout(() => { window.location.href = dbgLink.href; }, randomDelay(500, 1200));
               return;
             } else {
               botLog('warn', '🎁 DBG: No dark blue gifts in inventory');
@@ -2533,7 +2533,7 @@
         } else {
           // Navigate to profile
           botLog('info', '🎁 DBG: Navigating to profile to open gifts');
-          setTimeout(() => { window.location.href = BASE + '/profile/index'; }, randomDelay(800, 1500));
+          botSetTimeout(() => { window.location.href = BASE + '/profile/index'; }, randomDelay(800, 1500));
           return;
         }
       }
@@ -2574,7 +2574,7 @@
             botLog('info', `🎁 Purple: Opening purple gift #${opened + 1} (${qty} remaining)`);
             state.giftsPurpleOpened = opened + 1;
             saveState(state);
-            setTimeout(() => { window.location.href = pgLink.href; }, getSpeedDelay(settings));
+            botSetTimeout(() => { window.location.href = pgLink.href; }, getSpeedDelay(settings));
             return;
           } else {
             botLog('warn', '🎁 Purple: No purple gifts in inventory');
@@ -2593,7 +2593,7 @@
       } else {
         // Navigate to profile
         botLog('info', '🎁 Purple: Navigating to profile');
-        setTimeout(() => { window.location.href = BASE + '/profile/index'; }, randomDelay(800, 1500));
+        botSetTimeout(() => { window.location.href = BASE + '/profile/index'; }, randomDelay(800, 1500));
         return;
       }
     }
@@ -2639,12 +2639,12 @@
           botLog('warn', `Grotto: HP ${hpPct}% < ${settings.grottoMinHP}% → Idem do kostola`);
           state.grottoState = 'healing';
           saveState(state);
-          setTimeout(() => { window.location.href = BASE + '/city/church'; }, randomDelay(1000, 2000));
+          botSetTimeout(() => { window.location.href = BASE + '/city/church'; }, randomDelay(1000, 2000));
           return;
         }
       }
       botLog('warn', `Grotto: HP ${hpPct}% low → Waiting for regeneration`);
-      setTimeout(() => { loadState(st => { loadSettings(se => { grottoTick(st, se); }); }); }, randomDelay(30000, 60000));
+      botSetTimeout(() => { loadState(st => { loadSettings(se => { grottoTick(st, se); }); }); }, randomDelay(30000, 60000));
       return;
     }
 
@@ -2663,7 +2663,7 @@
     if (isGrottoResultPage()) {
       botLog('info', `Grotto: Battle result #${state.grottoCount || 0} → Continuing`);
       // Navigate back to grotto page for next fight
-      setTimeout(() => { window.location.href = BASE + '/city/grotte'; }, getSpeedDelay(settings));
+      botSetTimeout(() => { window.location.href = BASE + '/city/grotte'; }, getSpeedDelay(settings));
       return;
     }
 
@@ -2672,7 +2672,7 @@
       botLog('info', 'Grotto: Navigating → Grotto');
       state.grottoState = 'navigating';
       saveState(state);
-      setTimeout(() => { window.location.href = BASE + '/city/grotte'; }, randomDelay(800, 1500));
+      botSetTimeout(() => { window.location.href = BASE + '/city/grotte'; }, randomDelay(800, 1500));
       return;
     }
 
@@ -2696,10 +2696,10 @@
       saveState(state);
       botLog('info', `Grotto: Demon hunt #${state.grottoCount} (${diffLabel}: "${targetBtn.value}")`);
       updateGrottoUI(settings, state);
-      setTimeout(() => { targetBtn.click(); }, randomDelay(500, 1200));
+      botSetTimeout(() => { targetBtn.click(); }, randomDelay(500, 1200));
     } else {
       botLog('warn', 'Grotto: Difficulty buttons not found on page, waiting...');
-      setTimeout(() => {
+      botSetTimeout(() => {
         loadState(st => { loadSettings(se => { grottoTick(st, se); }); });
       }, randomDelay(5000, 10000));
     }
@@ -2781,14 +2781,14 @@
     // Check HP
     if (hpPct !== null && hpPct < settings.pvpMinHP) {
       botLog('warn', `PvP: HP ${hpPct}% < ${settings.pvpMinHP}% → Waiting`);
-      setTimeout(() => { loadState(st => { loadSettings(se => { pvpTick(st, se); }); }); }, randomDelay(60000, 120000));
+      botSetTimeout(() => { loadState(st => { loadSettings(se => { pvpTick(st, se); }); }); }, randomDelay(60000, 120000));
       return;
     }
 
     // Check AP — need at least 1 AP for PvP
     if (ap.current !== null && ap.current < 1) {
       botLog('warn', `PvP: AP ${ap.current} — not enough AP`);
-      setTimeout(() => { loadState(st => { loadSettings(se => { pvpTick(st, se); }); }); }, randomDelay(60000, 120000));
+      botSetTimeout(() => { loadState(st => { loadSettings(se => { pvpTick(st, se); }); }); }, randomDelay(60000, 120000));
       return;
     }
 
@@ -2796,7 +2796,7 @@
     if (settings.pvpSmartBreak && state.pvpNextAttack > Date.now()) {
       const waitMs = state.pvpNextAttack - Date.now();
       botLog('info', `PvP: Smart break – Next attack in ${Math.ceil(waitMs/60000)} min`);
-      setTimeout(() => { loadState(st => { loadSettings(se => { pvpTick(st, se); }); }); }, Math.min(waitMs + 1000, 300000));
+      botSetTimeout(() => { loadState(st => { loadSettings(se => { pvpTick(st, se); }); }); }, Math.min(waitMs + 1000, 300000));
       return;
     }
 
@@ -2826,7 +2826,7 @@
       updatePvPUI(settings, state);
 
       // Navigate back to PvP page for next search
-      setTimeout(() => { window.location.href = BASE + '/robbery/index'; }, getSpeedDelay(settings));
+      botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, getSpeedDelay(settings));
       return;
     }
 
@@ -2845,7 +2845,7 @@
           const playerName = (document.querySelector('.reportTable td b, h2, .username, #profileName') || {}).textContent || '';
           if (playerName && wl.includes(playerName.trim().toLowerCase())) {
             botLog('info', `PvP: Player "${playerName.trim()}" is whitelisted → searching for another`);
-            setTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
+            botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
             return;
           }
         }
@@ -2855,20 +2855,20 @@
         state.pvpState = 'attacking';
         saveState(state);
         botLog('info', 'PvP: Found opponent → Attacking!');
-        setTimeout(() => { attackLink.click(); }, randomDelay(500, 1200));
+        botSetTimeout(() => { attackLink.click(); }, randomDelay(500, 1200));
         return;
       }
       if (attackBtn) {
         state.pvpState = 'attacking';
         saveState(state);
         botLog('info', 'PvP: Found opponent → Attacking!');
-        setTimeout(() => { attackBtn.click(); }, randomDelay(500, 1200));
+        botSetTimeout(() => { attackBtn.click(); }, randomDelay(500, 1200));
         return;
       }
 
       // No attack button found — maybe no suitable opponent, go back
       botLog('warn', 'PvP: Attack button not found → searching again');
-      setTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1500, 3000));
+      botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1500, 3000));
       return;
     }
 
@@ -2888,7 +2888,7 @@
               state.pvpState = 'hunting';
               saveState(state);
               botLog('info', `PvP: Searching for player "${targetName}" (namesearch)`);
-              setTimeout(() => {
+              botSetTimeout(() => {
                 const submitBtn = nameForm.querySelector('input[name="namesearch"][type="submit"], input[type="submit"], button[type="submit"]');
                 if (submitBtn) submitBtn.click();
                 else nameForm.submit();
@@ -2920,7 +2920,7 @@
           state.pvpState = 'hunting';
           saveState(state);
           botLog('info', `PvP: Searching by BV ${fromInput?.value || '?'}–${toInput?.value || '?'} (levelsearch)`);
-          setTimeout(() => {
+          botSetTimeout(() => {
             const submitBtn = levelForm.querySelector('input[name="levelsearch"], input[type="submit"]');
             if (submitBtn) submitBtn.click();
             else levelForm.submit();
@@ -2948,7 +2948,7 @@
         state.pvpState = 'hunting';
         saveState(state);
         botLog('info', `PvP: Searching for opponent (mode ${(settings.pvpMode === 2 || settings.pvpMode === '2') ? 'stronger/equal' : 'normal'}) [optionsearch]`);
-        setTimeout(() => {
+        botSetTimeout(() => {
           const submitBtn = pvpForm.querySelector('input[name="optionsearch"]');
           if (submitBtn) submitBtn.click();
           else pvpForm.submit();
@@ -2964,7 +2964,7 @@
     botLog('info', 'PvP: Navigating → /robbery/index');
     state.pvpState = 'navigating';
     saveState(state);
-    setTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(800, 1500));
+    botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(800, 1500));
   }
 
   // ── SPEED HELPER ────────────────────────────────────────────
@@ -3380,7 +3380,7 @@
     panel.id = 'bf-bot-panel';
     panel.innerHTML = `
       <div id="bf-bot-header">
-        <span>🤖 BF Bot <span style="font-size:0.55rem;opacity:0.4;margin-left:4px">v0.9.3 · ${SERVER_ID}</span></span>
+        <span>🤖 BF Bot <span style="font-size:0.55rem;opacity:0.4;margin-left:4px">v0.9.4 · ${SERVER_ID}</span></span>
         <div style="display:flex;gap:4px;align-items:center">
           <span id="bf-player-badge" style="font-size:0.52rem;color:#9a7a5a;opacity:0.7">${PLAYER_ID ? '👤 #' + PLAYER_ID : ''}</span>
           <button id="bf-bot-pin" title="Pin panel (stays open after reload)">📌</button>
@@ -4277,7 +4277,11 @@
       sGet([SK('centralStop')], r => {
         const wasEngaged = r[SK('centralStop')] === true;
         const newState = !wasEngaged;
-        _centralStopActive = newState; // sync cache
+        _centralStopActive = newState; // sync cache IMMEDIATELY
+        if (newState) {
+          // Cancel ALL pending bot timers/intervals RIGHT NOW before async write
+          cancelAllBotTimers();
+        }
         sSet({ [SK('centralStop')]: newState }, () => {
           centralStopBtn.classList.toggle('engaged', newState);
           if (newState) {
@@ -4287,7 +4291,7 @@
             // Re-trigger botTick to resume where left off
             loadState(st => { loadSettings(se => {
               updateStatusDot(se, st);
-              setTimeout(() => botTick(st, se), randomDelay(500, 1500));
+              botSetTimeout(() => botTick(st, se), randomDelay(500, 1500));
             }); });
           }
           updateStatusDot();
@@ -4402,7 +4406,7 @@
               // Kick off ruins if enabled (cooperative mode)
               if (settings.ruinsEnabled && state.ruinsState !== 'done') {
                 botLog('info', 'Hunt on cooldown → Starting Ruins');
-                setTimeout(() => {
+                botSetTimeout(() => {
                   loadState(st => { loadSettings(se => {
                     if (se.ruinsEnabled && st.ruinsState !== 'done') ruinsTick(st, se);
                   }); });
@@ -4416,7 +4420,7 @@
             botLog('ok', 'Hunt Bot STARTED');
             updateHuntUI(settings, state);
             // Start tick
-            setTimeout(() => botTick(state, settings), randomDelay(500, 1500));
+            botSetTimeout(() => botTick(state, settings), randomDelay(500, 1500));
           });
         } else {
           loadState((state) => {
@@ -4459,7 +4463,7 @@
             saveState(state);
             botLog('ok', `Ruins Bot STARTED (${settings.ruinsLevels.length} levels, ${settings.ruinsCadence})`);
             updateRuinsUI(settings, state);
-            setTimeout(() => botTick(state, settings), randomDelay(500, 1500));
+            botSetTimeout(() => botTick(state, settings), randomDelay(500, 1500));
           });
         } else {
           loadState((state) => {
@@ -4798,7 +4802,7 @@
             saveState(state);
             botLog('ok', `Story Bot STARTED (priority: ${settings.storyPriority})`);
             updateStoryUI(settings, state);
-            setTimeout(() => botTick(state, settings), randomDelay(500, 1500));
+            botSetTimeout(() => botTick(state, settings), randomDelay(500, 1500));
           });
         } else {
           loadState((state) => {
@@ -4832,7 +4836,7 @@
             saveState(state);
             botLog('ok', 'Grotto Bot STARTED');
             updateGrottoUI(settings, state);
-            setTimeout(() => botTick(state, settings), randomDelay(500, 1500));
+            botSetTimeout(() => botTick(state, settings), randomDelay(500, 1500));
           });
         } else {
           loadState((state) => {
@@ -4866,7 +4870,7 @@
             saveState(state);
             botLog('ok', 'PvP Bot STARTED');
             updatePvPUI(settings, state);
-            setTimeout(() => botTick(state, settings), randomDelay(500, 1500));
+            botSetTimeout(() => botTick(state, settings), randomDelay(500, 1500));
           });
         } else {
           loadState((state) => {
@@ -4903,7 +4907,7 @@
             state.giftsPurpleOpened = 0;
             saveState(state);
             botLog('ok', 'Gifts Bot STARTED');
-            setTimeout(() => botTick(state, settings), randomDelay(500, 1500));
+            botSetTimeout(() => botTick(state, settings), randomDelay(500, 1500));
           }
           updateGiftsUI(settings, state);
         });
@@ -4979,35 +4983,46 @@
         applyGlobalSettingsToUI(settings);
         updateInfoBadges();
 
-        // Auto-resume if any bot was running
-        const huntActive = settings.huntEnabled && state.huntState !== 'idle';
-        const ruinsActive = settings.ruinsEnabled && state.ruinsState !== 'idle' && state.ruinsState !== 'done';
-        const storyActive = settings.storyEnabled && state.storyState !== 'idle' && state.storyState !== 'done';
-        const grottoActive = settings.grottoEnabled && state.grottoState !== 'idle' && state.grottoState !== 'done';
-        const pvpActive = settings.pvpEnabled && state.pvpState !== 'idle' && state.pvpState !== 'done';
-        const giftsActive = state.giftsState === 'running' || settings.giftsAutoDBG;
-        const globalActive = settings.goldMode > 0 || settings.graveyardEnabled;
-
-        if (huntActive || ruinsActive || storyActive || grottoActive || pvpActive || giftsActive || globalActive) {
-          const parts = [];
-          if (huntActive) parts.push('Hunt' + (state.huntState === 'waiting_orb' ? ' (cooldown)' : ''));
-          if (ruinsActive) parts.push('Ruins');
-          if (storyActive) parts.push('Story');
-          if (grottoActive) parts.push('Grotto');
-          if (pvpActive) parts.push('PvP');
-          if (giftsActive) parts.push('Gifts');
-          if (globalActive) parts.push('Global');
-          botLog('info', `Bot resumed after reload: ${parts.join(' + ')}`);
-          updateStatusDot(settings, state);
-
-          // Start cooldown ticker if hunt is on cooldown
-          if (huntActive && state.huntState === 'waiting_orb') {
-            startCooldownTicker(settings, state);
+        // ── Wait for Central STOP check BEFORE auto-resume ──
+        initCentralStop((stopped) => {
+          // Sync UI with central stop state
+          if (stopped) {
+            centralStopBtn.classList.add('engaged');
+            updateStatusDot(settings, state);
+            botLog('info', 'Central STOP is engaged — auto-resume blocked');
+            return; // Do NOT resume any bots
           }
 
-          // Single botTick call handles priority routing
-          setTimeout(() => botTick(state, settings), randomDelay(1500, 3000));
-        }
+          // Auto-resume if any bot was running
+          const huntActive = settings.huntEnabled && state.huntState !== 'idle';
+          const ruinsActive = settings.ruinsEnabled && state.ruinsState !== 'idle' && state.ruinsState !== 'done';
+          const storyActive = settings.storyEnabled && state.storyState !== 'idle' && state.storyState !== 'done';
+          const grottoActive = settings.grottoEnabled && state.grottoState !== 'idle' && state.grottoState !== 'done';
+          const pvpActive = settings.pvpEnabled && state.pvpState !== 'idle' && state.pvpState !== 'done';
+          const giftsActive = state.giftsState === 'running' || settings.giftsAutoDBG;
+          const globalActive = settings.goldMode > 0 || settings.graveyardEnabled;
+
+          if (huntActive || ruinsActive || storyActive || grottoActive || pvpActive || giftsActive || globalActive) {
+            const parts = [];
+            if (huntActive) parts.push('Hunt' + (state.huntState === 'waiting_orb' ? ' (cooldown)' : ''));
+            if (ruinsActive) parts.push('Ruins');
+            if (storyActive) parts.push('Story');
+            if (grottoActive) parts.push('Grotto');
+            if (pvpActive) parts.push('PvP');
+            if (giftsActive) parts.push('Gifts');
+            if (globalActive) parts.push('Global');
+            botLog('info', `Bot resumed after reload: ${parts.join(' + ')}`);
+            updateStatusDot(settings, state);
+
+            // Start cooldown ticker if hunt is on cooldown
+            if (huntActive && state.huntState === 'waiting_orb') {
+              startCooldownTicker(settings, state);
+            }
+
+            // Single botTick call handles priority routing
+            botSetTimeout(() => botTick(state, settings), randomDelay(1500, 3000));
+          }
+        });
       });
     });
   }
@@ -5015,10 +5030,54 @@
   // ── CENTRAL STOP CHECK ──────────────────────────────────────
   // Cached flag — updated by central stop button and on init
   let _centralStopActive = false;
-  function initCentralStop() {
-    sGet([SK('centralStop')], r => { _centralStopActive = r[SK('centralStop')] === true; });
+  // Track whether initCentralStop has resolved (prevent auto-resume race)
+  let _centralStopReady = false;
+
+  // ── TIMER REGISTRY — all bot setTimeout/setInterval go through these ──
+  const _botTimers = new Set();
+  const _botIntervals = new Set();
+
+  function botSetTimeout(fn, delay) {
+    const id = setTimeout(() => {
+      _botTimers.delete(id);
+      // Re-check central stop before every scheduled callback fires
+      if (_centralStopActive) return;
+      fn();
+    }, delay);
+    _botTimers.add(id);
+    return id;
   }
-  initCentralStop();
+
+  function botSetInterval(fn, delay) {
+    const id = setInterval(() => {
+      if (_centralStopActive) {
+        clearInterval(id);
+        _botIntervals.delete(id);
+        return;
+      }
+      fn();
+    }, delay);
+    _botIntervals.add(id);
+    return id;
+  }
+
+  function cancelAllBotTimers() {
+    _botTimers.forEach(id => clearTimeout(id));
+    _botTimers.clear();
+    _botIntervals.forEach(id => clearInterval(id));
+    _botIntervals.clear();
+    // Also kill the cooldown ticker
+    stopCooldownTicker();
+  }
+
+  function initCentralStop(cb) {
+    sGet([SK('centralStop')], r => {
+      _centralStopActive = r[SK('centralStop')] === true;
+      _centralStopReady = true;
+      if (cb) cb(_centralStopActive);
+    });
+  }
+  // NOTE: initCentralStop is called at boot — see createBotPanel auto-resume
   function isCentralStopped(cb) {
     if (cb) { cb(_centralStopActive); return; }
     return _centralStopActive;
@@ -5160,7 +5219,7 @@
     const remainNow = Math.max(0, until - Date.now());
     const totalMs = Math.max(fallbackTotal, remainNow);
 
-    _cooldownInterval = setInterval(() => {
+    _cooldownInterval = botSetInterval(() => {
       const now = Date.now();
       const until = state.orbWaitUntil || 0;
       const remainMs = Math.max(0, until - now);
@@ -5205,7 +5264,7 @@
               st.extractionsThisSession = 0;
               saveState(st);
               // Navigate to hunt page
-              setTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 3000));
+              botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 3000));
             }
           });
         });
@@ -5216,6 +5275,7 @@
   function stopCooldownTicker() {
     if (_cooldownInterval) {
       clearInterval(_cooldownInterval);
+      _botIntervals.delete(_cooldownInterval);
       _cooldownInterval = null;
     }
     const container = document.getElementById('bf-hunt-cooldown');
