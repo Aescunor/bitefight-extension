@@ -10,6 +10,12 @@ window.addEventListener('message', (event) => {
   if (!event.data || event.data.type !== 'BF_GAME_STATE') return;
   const s = event.data.state;
 
+  // Cache latest power limit from any source (ancestral/show via ally,
+  // ancestral/index via enemy layer difficulty) so the simulator's
+  // quick-import button can grab it without re-importing the army.
+  const pl = (s.ally && s.ally.powerLimit) || (s.enemy && s.enemy.powerLimit) || null;
+  if (pl) window._bf_lastPowerLimit = pl;
+
   updateGameBar(s);
 
   // s.ally  = { units: [{id,name,owned,selected,power}], powerLimit, source }
@@ -220,3 +226,4 @@ window.addEventListener('load', () => {
     window.parent.postMessage({ type: 'BF_PANEL_READY' }, '*');
   }
 });
+
