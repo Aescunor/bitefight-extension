@@ -4,8 +4,8 @@
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArLJ+xyqpNJ3xY9uyGo7R74LUXiLbIWzMuy/dIPANh9GvIT3Hry8b6MjlDYEQwllYxRq6xW1XosTWezkL8aErta7k8SSY1RyhCYkzbnhGECBDwjsHmqevo1yr7RRhZ4coJxOPzjtOgXAa8nra2lWdJTa1Gs0G/8Jt+P3dhE33558doEBEtLDjfEjp2dRyfyU9up/HW9XytTOTTas5d8YmaI5HGpkf1ngMmbgN1IqkeuvJHKWQztk8hNUQ0Ft6N5EcCZAYNc7UxCGP8PGwqB/s5IXcryvEZq8rnJm+2jTyALjQ4jcxoOmHhPeKdbyqlq/zzB0Dph6VbG1EicCfIB2r5wIDAQAB",
   "name": "Bitefight \u2013 Battle Simulator",
   "short_name": "BF Simulator",
-  "description": "Battle simulator and bot assistant for Bitefight. Story Bot, Hunt Bot, Ruins Farming, Grotto, PvP, Gifts, Global settings, formation simulator.",
-  "version": "0.9.5",
+  "description": "Battle simulator and bot assistant for Bitefight. Story Bot, Hunt Bot, Ruins Farming, Grotto, PvP, Gifts, Global settings, formation simulator. Includes full T1-T8 and E1-E10 unit simulation with all abilities. Parallel WebWorker optimizer and smart per-layer presets for fast formation search.",
+  "version": "1.6.14",
   "icons": {
     "16": "img/icon-16.png",
     "48": "img/icon-48.png",
@@ -27,6 +27,8 @@
       ],
       "js": [
         "js/content.js",
+        "js/sim_engine.js",
+        "js/level_presets.js",
         "js/bot.js"
       ],
       "css": [
@@ -44,7 +46,10 @@
       ],
       "resources": [
         "html/panel.html",
+        "js/sim_engine.js",
+        "js/level_presets.js",
         "js/simulator.js",
+        "js/optimizer_worker.js",
         "js/bridge.js",
         "css/panel.css",
         "img/*"
