@@ -262,6 +262,10 @@
   word-wrap: break-word;
 }
 .bf-bot-checkbox input { accent-color: #4caf50; cursor: pointer; flex-shrink: 0; margin-top: 2px; }
+/* v1.6.11 — text-span child must be shrinkable; without flex:1/min-width:0
+   a long inline description can blow past `.bf-bot-group { overflow:hidden }`
+   and clip sibling rows (e.g. the Background Refresh "Interval" input). */
+.bf-bot-checkbox > span { flex: 1 1 auto; min-width: 0; word-break: break-word; }
 .bf-bot-row .bf-bot-checkbox { margin-bottom: 0; flex-shrink: 0; }
 
 /* ── Buttons ────────────────────────────────────────────────── */
@@ -331,27 +335,39 @@
 /* ── Ruins Level List ───────────────────────────────────────── */
 .bf-ruins-levels {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 3px;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 2px;
   margin: 6px 0;
+  /* v1.6.0 — prevent native scrolling/zoom during touch-drag selection */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .bf-ruins-lvl {
   background: #0c0e08;
   border: 1px solid #1a3a1a;
   border-radius: 2px;
-  padding: 3px 2px;
+  padding: 2px 1px;
   text-align: center;
-  font-size: 0.62rem;
+  font-size: 0.56rem;
   color: #5a7a4a;
   cursor: pointer;
-  transition: all 0.12s;
+  transition: background 0.08s, border-color 0.08s, color 0.08s;
   user-select: none;
+  -webkit-user-select: none;
+  min-width: 0;
 }
 .bf-ruins-lvl:hover { border-color: #4caf50; color: #4caf50; }
 .bf-ruins-lvl.selected {
   background: rgba(46,204,113,0.15);
   border-color: #4caf50;
   color: #4caf50;
+}
+/* v1.6.0 — Lock state disables interaction on the level grid */
+.bf-ruins-levels.locked {
+  opacity: 0.55;
+  pointer-events: none;
+  filter: grayscale(0.5);
 }
 
 /* ── Hunt Quality Badges ────────────────────────────────────── */
@@ -637,3 +653,148 @@
   margin: 1px 0;
 }
 .bf-bl-entry-bot { color: #888; }
+
+/* v1.6.2 — Inline help hint badge (hover for tooltip via title attribute) */
+.bf-help-hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: rgba(224, 160, 48, 0.18);
+  color: #e0a030;
+  border: 1px solid rgba(224, 160, 48, 0.5);
+  font-size: 0.55rem;
+  font-weight: bold;
+  cursor: help;
+  margin-left: 4px;
+  font-family: serif;
+  user-select: none;
+  vertical-align: middle;
+}
+.bf-help-hint:hover {
+  background: rgba(224, 160, 48, 0.35);
+  color: #fff;
+}
+
+/* ── Schedule slot list (v1.6.7) ─────────────────────────────── */
+.bf-sch-slot {
+  background: rgba(0,0,0,0.30);
+  border: 1px solid #1a3a1a;
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin-bottom: 5px;
+  font-size: 0.6rem;
+}
+.bf-sch-row1 {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.bf-sch-row1 .bf-bot-checkbox { margin-bottom: 0; gap: 0; }
+.bf-sch-lbl {
+  color: #7a9a6a;
+  font-size: 0.58rem;
+  margin-left: 2px;
+}
+.bf-sch-slot .bf-bot-input[type="number"] {
+  width: 30px !important;
+  flex: none;
+  padding: 2px 3px;
+  font-size: 0.58rem;
+  text-align: center;
+}
+.bf-sch-del {
+  margin-left: auto;
+  background: #3a0a0a;
+  border: 1px solid #5a1a1a;
+  color: #e74c3c;
+  font-family: 'Cinzel', serif;
+  font-size: 0.7rem;
+  padding: 1px 7px;
+  border-radius: 3px;
+  cursor: pointer;
+  line-height: 1;
+}
+.bf-sch-del:hover { background: #5a1a1a; color: #fff; }
+.bf-sch-row2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 4px;
+  border-top: 1px dashed #1a3a1a;
+}
+.bf-sch-actions-lbl {
+  color: #7a9a6a;
+  font-size: 0.58rem;
+}
+.bf-sch-act {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+  color: #b8c9a0;
+  font-size: 0.58rem;
+}
+.bf-sch-act input {
+  accent-color: #4caf50;
+  cursor: pointer;
+  margin: 0;
+}
+
+/* ── Schedule layout bar (v1.6.8) ────────────────────────────── */
+.bf-layout-bar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 8px;
+  padding: 5px 6px;
+  background: rgba(0,0,0,0.30);
+  border: 1px solid #1a3a1a;
+  border-radius: 3px;
+  font-size: 0.6rem;
+  flex-wrap: wrap;
+}
+.bf-layout-lbl {
+  color: #7a9a6a;
+  font-weight: bold;
+  font-size: 0.6rem;
+}
+.bf-layout-sel {
+  flex: 1 1 90px;
+  min-width: 90px;
+  font-size: 0.58rem !important;
+  padding: 2px 4px !important;
+}
+.bf-layout-btn {
+  flex: none;
+  width: auto;
+  padding: 2px 7px;
+  font-size: 0.7rem;
+  font-family: 'Cinzel', serif;
+  background: linear-gradient(135deg, #0a3a0a, #1a5a1a);
+  border: 1px solid #2ecc71;
+  color: #4caf50;
+  border-radius: 3px;
+  cursor: pointer;
+  line-height: 1.2;
+  transition: all 0.15s;
+}
+.bf-layout-btn:hover {
+  background: linear-gradient(135deg, #1a5a1a, #2a7a2a);
+}
+.bf-layout-btn.danger {
+  background: linear-gradient(135deg, #3a0a0a, #5a1a1a);
+  border-color: #e74c3c;
+  color: #e74c3c;
+}
+.bf-layout-btn.danger:hover {
+  background: linear-gradient(135deg, #5a1a1a, #7a2a2a);
+}
+.bf-layout-btn:disabled {
+  cursor: not-allowed;
+}
