@@ -270,7 +270,7 @@
     container.style.display = 'none';
     container.innerHTML = `
       <div id="bf-sim-header">
-        <span>⚔ BF Simulator <span style="font-size:0.6rem;opacity:0.4;margin-left:4px">β v0.9.5 · ${SERVER_ID}${PLAYER_ID ? ' · #' + PLAYER_ID : ''}</span></span>
+        <span>⚔ BF Simulator <span style="font-size:0.6rem;opacity:0.4;margin-left:4px">v1.6.10 · ${SERVER_ID}${PLAYER_ID ? ' · #' + PLAYER_ID : ''}</span></span>
         <div style="display:flex;gap:6px;align-items:center">
           <span id="bf-ap-badge"  class="bf-badge">AP: –</span>
           <span id="bf-be-badge"  class="bf-badge bf-badge-blood">BE: –</span>
@@ -398,3 +398,4 @@
   }
 
 })();
+
