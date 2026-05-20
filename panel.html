@@ -643,22 +643,26 @@
 <div class="app">
   <h1>⚔ Bitefight</h1>
   <p class="subtitle">Battle Simulator
-    <span style="font-family:Cinzel,serif;font-size:0.6rem;color:#7a5a4a;vertical-align:middle;margin-left:8px;border:1px solid #3a2020;padding:1px 7px;border-radius:10px;background:rgba(0,0,0,0.3)">v0.8.0</span>
+    <span style="font-family:Cinzel,serif;font-size:0.6rem;color:#7a5a4a;vertical-align:middle;margin-left:8px;border:1px solid #3a2020;padding:1px 7px;border-radius:10px;background:rgba(0,0,0,0.3)">v1.6.10</span>
     <span class="skill-icon" style="margin-left:8px;width:18px;height:18px;line-height:16px;font-size:0.7rem;vertical-align:middle">?
       <span class="tooltip" style="width:300px;font-style:normal;left:auto;right:-10px;transform:none;top:calc(100% + 6px);bottom:auto">
         <strong style="font-family:Cinzel,serif;font-size:0.7rem;color:var(--gold)">📖 About Simulator</strong><br><br>
         This tool simulates battles in Bitefight based on game rules — attack order, unit types, tier special abilities and damage calculation. It helps build and test formations before real combat, as well as auto-optimize army composition.<br><br>
-        <span style="color:#c0392b">⚠ Simulation is not 100% accurate — results may differ from actual battle outcomes in game. Simulator is not responsible for higher unit or Blood Essence losses than simulated. We recommend verifying results with a small test before deploying large armies.</span>
+        <span style="color:#2ecc71">✓ ~99% accurate from layer 60 onward — validated against live battle reports.</span><br><br>
+        <span style="color:#e0a030">⚠ Lower layers may diverge slightly. Simulator is not liable for higher unit or Blood Essence losses than predicted. We recommend verifying with a small test before deploying large armies.</span>
       </span>
     </span>
     <span class="skill-icon" style="margin-left:4px;width:18px;height:18px;line-height:16px;font-size:0.6rem;vertical-align:middle;border-color:#8e44ad;background:rgba(142,68,173,0.15);color:#9b59b6">🔔
       <span class="tooltip" style="width:260px;font-style:normal;left:auto;right:-10px;transform:none;top:calc(100% + 6px);bottom:auto;border-color:#8e44ad">
-        <strong style="font-family:Cinzel,serif;font-size:0.7rem;color:#9b59b6">🔔 Coming Soon</strong><br><br>
-        <span style="color:var(--text)">Upcoming simulator updates:</span><br><br>
-        <span style="color:#2ecc71">✓ Enemy Tier e6 — Specter (added)</span><br>
-        <span style="color:#9b59b6">• Enemy Tier e7, e8, e9 — coming soon</span><br>
-        <span style="color:#9b59b6">• Ally Tier 5, 6... — coming soon</span><br>
-        <span style="color:var(--text-dim);font-size:0.65rem;font-style:italic">More tiers and features will be added gradually.</span>
+        <strong style="font-family:Cinzel,serif;font-size:0.7rem;color:#9b59b6">🔔 Recent Updates</strong><br><br>
+        <span style="color:#2ecc71">✓ Full tier coverage: T1–T8 and E1–E10</span><br>
+        <span style="color:#2ecc71">✓ Engine accuracy ~99% from layer 60+</span><br>
+        <span style="color:#2ecc71">✓ Parallel WebWorker optimizer</span><br>
+        <span style="color:#2ecc71">✓ Per-layer smart presets</span><br><br>
+        <span style="color:var(--text)">On the horizon:</span><br>
+        <span style="color:#9b59b6">• Lower-layer accuracy refinement</span><br>
+        <span style="color:#9b59b6">• Battle report parser (auto-import live)</span><br>
+        <span style="color:var(--text-dim);font-size:0.65rem;font-style:italic">More features will be added gradually.</span>
       </span>
     </span>
   </p>
@@ -674,6 +678,8 @@
           Power Limit:
           <input type="number" id="power-limit-input-el" value="20" min="1" max="999"
             style="width:52px;background:var(--dark);border:1px solid var(--border);color:var(--gold);font-family:'Cinzel',serif;font-size:0.78rem;padding:2px 5px;border-radius:2px;text-align:center">
+          <button id="btn-quick-import-pl" title="Quick import from current game page"
+            style="background:rgba(155,89,182,0.15);border:1px solid #8e44ad;color:#9b59b6;font-family:Cinzel,serif;font-size:0.6rem;padding:2px 6px;border-radius:2px;cursor:pointer;line-height:1.1">⬇ Live</button>
         </label>
       </div>
       <div id="ally-unlock-bar" style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px;padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid #2a1218;border-radius:3px;align-items:center">
@@ -711,6 +717,23 @@
     <button class="btn danger" id="btn-reset-battle"><span>↺ Reset</span></button>
   </div>
 
+  <!-- AUTO-PLAY SPEED CONTROL — discrete 0.5× / 1× / 2× / 4× selector for the
+       Auto button. Selection is persisted in localStorage. Changing speed
+       during an active Auto run restarts the interval immediately. -->
+  <div id="speed-control-bar" style="display:flex;align-items:center;justify-content:center;gap:8px;margin:-0.4rem 0 0.6rem;padding:5px 8px;background:rgba(0,0,0,0.15);border:1px solid #2a1218;border-radius:3px">
+    <span style="font-family:Cinzel,serif;font-size:0.62rem;color:var(--text-dim);letter-spacing:.1em">⏩ AUTO SPEED:</span>
+    <div id="speed-buttons" style="display:flex;gap:4px"></div>
+  </div>
+
+  <!-- RECENT SIMULATIONS (last 3 manual simulations) -->
+  <div id="sim-history-panel" style="margin:0.8rem 0 1rem;padding:0.6rem 0.8rem;background:rgba(0,0,0,0.25);border:1px solid #2a1218;border-radius:3px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <span style="font-family:Cinzel,serif;font-size:0.7rem;color:var(--text-dim);letter-spacing:.1em">📜 RECENT SIMULATIONS</span>
+      <button id="btn-clear-history" title="Clear history" style="background:none;border:none;color:var(--text-dim);font-size:0.65rem;cursor:pointer;font-family:Cinzel,serif">✕ clear</button>
+    </div>
+    <div id="sim-history-list" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+  </div>
+
   <!-- BATTLEFIELD -->
   <div class="battlefield">
     <div class="bf-title">— Battlefield —</div>
@@ -724,7 +747,15 @@
 
   <!-- LOG -->
   <div class="log-panel">
-    <div class="log-title">📜 Battle Log</div>
+    <div class="log-title" style="display:flex;align-items:center;justify-content:space-between">
+      <span>📜 Battle Log</span>
+      <span style="display:flex;gap:4px">
+        <button id="btn-copy-log" title="Copy log to clipboard (plain text with battle metadata)"
+          style="background:rgba(155,89,182,0.1);border:1px solid #5a3a78;color:#9b59b6;font-family:Cinzel,serif;font-size:0.58rem;padding:2px 7px;border-radius:2px;cursor:pointer;line-height:1.2">📋 Copy</button>
+        <button id="btn-download-log" title="Download log as .txt file"
+          style="background:rgba(155,89,182,0.1);border:1px solid #5a3a78;color:#9b59b6;font-family:Cinzel,serif;font-size:0.58rem;padding:2px 7px;border-radius:2px;cursor:pointer;line-height:1.2">💾 Download</button>
+      </span>
+    </div>
     <div id="log-container"><span style="color:var(--text-dim);font-style:italic">Build your armies and start the battle...</span></div>
   </div>
 </div>
@@ -794,9 +825,55 @@
       </div>
     </div>
 
-    <button id="btn-run-optimizer" class="btn" style="width:100%;border-color:#8e44ad;color:#9b59b6;margin-bottom:1.2rem">
-      <span id="opt-btn-label">⚙ Run Optimizer</span>
-    </button>
+    <!-- Parallel processing -->
+    <div style="margin-bottom:1rem;padding:0.7rem 0.9rem;background:rgba(0,0,0,0.25);border:1px solid #2a1218;border-radius:3px">
+      <div style="font-family:Cinzel,serif;font-size:0.7rem;color:var(--text-dim);letter-spacing:.1em;margin-bottom:8px">🚀 PERFORMANCE</div>
+      <label style="cursor:pointer;display:flex;align-items:flex-start;gap:8px">
+        <input type="checkbox" id="opt-parallel" checked
+          style="margin-top:3px;accent-color:#16a085;cursor:pointer">
+        <span>
+          <span style="font-family:Cinzel,serif;font-size:0.72rem;color:#1abc9c">⚡ Parallel Workers</span>
+          <span id="opt-parallel-info" style="display:block;font-size:0.68rem;color:var(--text-dim);font-style:italic">Split optimizer work across CPU cores. UI stays responsive during search.</span>
+        </span>
+      </label>
+    </div>
+
+    <!-- Smart preset (warm-start) -->
+    <div style="margin-bottom:1rem;padding:0.7rem 0.9rem;background:rgba(0,0,0,0.25);border:1px solid #2a1218;border-radius:3px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div style="font-family:Cinzel,serif;font-size:0.7rem;color:var(--text-dim);letter-spacing:.1em">🎯 SMART PRESET <span style="color:#9b59b6">(warm-start)</span></div>
+        <button id="btn-manage-presets" style="background:rgba(155,89,182,0.15);border:1px solid #8e44ad;color:#9b59b6;font-family:Cinzel,serif;font-size:0.62rem;padding:2px 8px;border-radius:2px;cursor:pointer">Manage…</button>
+      </div>
+      <label style="cursor:pointer;display:flex;align-items:flex-start;gap:8px;margin-bottom:8px">
+        <input type="checkbox" id="opt-preset-enabled"
+          style="margin-top:3px;accent-color:#9b59b6;cursor:pointer">
+        <span style="flex:1">
+          <span style="font-family:Cinzel,serif;font-size:0.72rem;color:#9b59b6">🎯 Use preset for layer</span>
+          <input type="number" id="opt-preset-level" min="1" max="100" value="27"
+            style="width:48px;background:var(--dark);border:1px solid var(--border);color:var(--text);font-family:Cinzel,serif;font-size:0.72rem;padding:2px 4px;margin:0 6px;border-radius:2px;text-align:center">
+          <span id="opt-preset-confidence" style="font-size:0.65rem;padding:1px 6px;border-radius:8px;background:rgba(231,76,60,0.2);color:#e74c3c">🔴 no data</span>
+          <span id="opt-preset-info-line" style="display:block;font-size:0.65rem;color:var(--text-dim);font-style:italic;margin-top:3px">Narrows search to ±N units around the preset values.</span>
+        </span>
+      </label>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span style="font-family:Cinzel,serif;font-size:0.65rem;color:var(--text-dim)">Range:</span>
+        <input type="range" id="opt-preset-range" min="5" max="30" value="15" step="1"
+          style="flex:1;accent-color:#9b59b6">
+        <span id="opt-preset-range-val" style="font-family:Cinzel,serif;font-size:0.7rem;color:#9b59b6;min-width:32px;text-align:right">±15</span>
+      </div>
+      <div id="opt-preset-preview" style="background:rgba(0,0,0,0.35);border:1px dashed #2a1218;border-radius:2px;padding:6px 8px;font-family:Cinzel,serif;font-size:0.66rem;color:var(--text-dim);min-height:20px">
+        Set a level and enable to see preview…
+      </div>
+    </div>
+
+    <div style="display:flex;gap:6px;margin-bottom:1.2rem">
+      <button id="btn-run-optimizer" class="btn" style="flex:1;border-color:#8e44ad;color:#9b59b6">
+        <span id="opt-btn-label">⚙ Run Optimizer</span>
+      </button>
+      <button id="btn-cancel-optimizer" class="btn" style="display:none;flex:0 0 120px;border-color:#c0392b;color:#e74c3c">
+        <span>⏹ Cancel</span>
+      </button>
+    </div>
 
     <div id="opt-progress" style="display:none;margin-bottom:1rem">
       <div style="font-size:0.72rem;color:var(--text-dim);margin-bottom:4px;font-family:Cinzel,serif;letter-spacing:.08em" id="opt-progress-label">Testing combinations...</div>
@@ -824,6 +901,73 @@
   </div>
 </div>
 
+<!-- PRESET MANAGER MODAL -->
+<div id="preset-manager-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.88);z-index:250;overflow-y:auto;padding:2rem 1rem">
+  <div style="max-width:560px;margin:0 auto;background:var(--bg);border:2px solid #8e44ad;border-radius:6px;padding:1.5rem;position:relative;box-shadow:0 0 40px rgba(155,89,182,0.3)">
+    <button id="btn-close-preset-mgr" style="position:absolute;top:0.8rem;right:0.8rem;background:none;border:none;color:var(--text-dim);font-size:1.2rem;cursor:pointer">✕</button>
+    <h2 style="font-family:Cinzel,serif;color:#9b59b6;text-align:center;letter-spacing:.18em;font-size:1rem;margin-bottom:0.4rem">🎯 SMART PRESET MANAGER</h2>
+    <div style="text-align:center;color:var(--text-dim);font-size:0.7rem;margin-bottom:1.2rem;font-style:italic">Per-layer formation hints for warm-start optimization</div>
+
+    <!-- Add / edit row -->
+    <div style="background:rgba(0,0,0,0.3);border:1px solid #2a1218;border-radius:4px;padding:0.8rem;margin-bottom:1rem">
+      <div style="font-family:Cinzel,serif;font-size:0.7rem;color:var(--text-dim);letter-spacing:.1em;margin-bottom:8px">➕ ADD / UPDATE</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;align-items:flex-end">
+        <div style="display:flex;flex-direction:column;min-width:56px">
+          <label style="font-family:Cinzel,serif;font-size:0.62rem;color:var(--gold-light)">Level</label>
+          <input type="number" id="pmgr-level" min="1" max="100"
+            style="width:54px;background:var(--dark);border:1px solid var(--border);color:var(--text);font-family:Cinzel,serif;font-size:0.75rem;padding:3px 5px;border-radius:2px;text-align:center">
+        </div>
+        <div id="pmgr-tier-inputs" style="display:flex;gap:4px;flex-wrap:wrap;flex:1"></div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <label style="font-family:Cinzel,serif;font-size:0.62rem;color:var(--gold-light)">Confidence:</label>
+        <label style="cursor:pointer;display:flex;align-items:center;gap:3px;font-size:0.7rem"><input type="radio" name="pmgr-conf" value="red" style="accent-color:#e74c3c"><span style="color:#e74c3c">🔴 None</span></label>
+        <label style="cursor:pointer;display:flex;align-items:center;gap:3px;font-size:0.7rem"><input type="radio" name="pmgr-conf" value="yellow" checked style="accent-color:#f39c12"><span style="color:#f39c12">🟡 Limited</span></label>
+        <label style="cursor:pointer;display:flex;align-items:center;gap:3px;font-size:0.7rem"><input type="radio" name="pmgr-conf" value="green" style="accent-color:#2ecc71"><span style="color:#2ecc71">🟢 Verified</span></label>
+      </div>
+      <input type="text" id="pmgr-note" placeholder="Optional note..." maxlength="100"
+        style="width:100%;margin-top:6px;background:var(--dark);border:1px solid var(--border);color:var(--text);font-family:Cinzel,serif;font-size:0.7rem;padding:4px 6px;border-radius:2px;box-sizing:border-box">
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button id="pmgr-save" style="flex:1;background:rgba(46,204,113,0.15);border:1px solid #27ae60;color:#2ecc71;font-family:Cinzel,serif;font-size:0.7rem;padding:5px 10px;border-radius:2px;cursor:pointer">💾 Save</button>
+        <button id="pmgr-clear" style="background:rgba(189,195,199,0.15);border:1px solid #7f8c8d;color:#95a5a6;font-family:Cinzel,serif;font-size:0.7rem;padding:5px 10px;border-radius:2px;cursor:pointer">Clear form</button>
+      </div>
+      <div id="pmgr-save-status" style="font-size:0.65rem;color:#2ecc71;margin-top:4px;display:none"></div>
+    </div>
+
+    <!-- Table of saved presets -->
+    <div style="background:rgba(0,0,0,0.3);border:1px solid #2a1218;border-radius:4px;padding:0.8rem;margin-bottom:1rem">
+      <div style="font-family:Cinzel,serif;font-size:0.7rem;color:var(--text-dim);letter-spacing:.1em;margin-bottom:8px">📋 SAVED PRESETS</div>
+      <div id="pmgr-table" style="max-height:260px;overflow-y:auto"></div>
+    </div>
+
+    <!-- Import / Export -->
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button id="pmgr-export" style="flex:1;background:rgba(52,152,219,0.15);border:1px solid #2980b9;color:#3498db;font-family:Cinzel,serif;font-size:0.65rem;padding:5px 10px;border-radius:2px;cursor:pointer;min-width:100px">📤 Export JSON</button>
+      <button id="pmgr-import-btn" style="flex:1;background:rgba(52,152,219,0.15);border:1px solid #2980b9;color:#3498db;font-family:Cinzel,serif;font-size:0.65rem;padding:5px 10px;border-radius:2px;cursor:pointer;min-width:100px">📥 Import JSON</button>
+      <input type="file" id="pmgr-import-file" accept=".json,.txt" style="display:none">
+    </div>
+    <div id="pmgr-import-status" style="font-size:0.65rem;color:#e0a030;margin-top:6px;display:none"></div>
+  </div>
+</div>
+
+<!-- ========================================================================
+     COMPARE MODAL — side-by-side diff of two history entries
+     Triggered by the ↔ Compare button that appears below the history list
+     when exactly 2 cards are checkbox-selected. Renders entirely from
+     localStorage; no engine re-simulation, no state mutations.
+     ======================================================================== -->
+<div id="compare-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:20000;overflow-y:auto;padding:2rem">
+  <div style="max-width:760px;margin:0 auto;background:var(--card);border:1px solid var(--gold);border-radius:4px;padding:1.2rem 1.4rem">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;padding-bottom:8px;border-bottom:1px solid var(--border)">
+      <h3 style="font-family:Cinzel,serif;color:var(--gold);margin:0;font-size:1.1rem;letter-spacing:.06em">↔ Compare simulations</h3>
+      <button id="btn-close-compare" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-family:Cinzel,serif;font-size:0.7rem;padding:4px 12px;border-radius:2px;cursor:pointer">✕ Close</button>
+    </div>
+    <div id="compare-body" style="font-size:0.72rem;color:var(--text)"></div>
+  </div>
+</div>
+
+<script src="../js/level_presets.js"></script>
+<script src="../js/sim_engine.js"></script>
 <script src="../js/simulator.js"></script>
 <script src="../js/bridge.js"></script>
 </body>
