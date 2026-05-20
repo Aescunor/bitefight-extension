@@ -396,134 +396,45 @@
     return best || allowed[0];
   }
 
-  // ── INLINE BATTLE SIMULATOR (for Ruins Bot) ────────────────
-  // Compact version of simulator.js battle engine for use in content script
-  const BOT_ALLY_TIERS = [
-    { id: 'T1', dmg: 8, hp: 2, spd: 5, power: 2, pos: 'Rearguard', skillId: 'T1_FIRST_ROUND_DMG' },
-    { id: 'T2', dmg: 3, hp: 5, spd: 2, power: 3, pos: 'Vanguard',  skillId: 'T2_REDUCE_DMG' },
-    { id: 'T3', dmg: 6, hp: 6, spd: 4, power: 4, pos: 'Vanguard',  skillId: 'T3_VS_SLOW' },
-    { id: 'T4', dmg: 7, hp: 4, spd: 4, power: 7, pos: 'Rearguard', skillId: 'T4_REARGUARD_DEBUFF' },
-  ];
-  const BOT_ENEMY_TIERS = [
-    { id: 'E1', dmg: 3, hp: 4, spd: 3, pos: 'Vanguard',  skillId: null },
-    { id: 'E2', dmg: 2, hp: 7, spd: 2, pos: 'Vanguard',  skillId: 'E2_REVIVE' },
-    { id: 'E3', dmg: 5, hp: 1, spd: 1, pos: 'Rearguard', skillId: 'E3_BUFF_ALLY' },
-    { id: 'E4', dmg: 6, hp: 3, spd: 4, pos: 'Rearguard', skillId: 'E4_REARGUARD_FIRST' },
-    { id: 'E5', dmg: 1, hp: 10,spd: 1, pos: 'Vanguard',  skillId: 'E5_DEATH_THORNS' },
-    { id: 'E6', dmg: 7, hp: 2, spd: 4, pos: 'Vanguard',  skillId: 'E6_DOUBLE_BONUS' },
-  ];
-  // data-id on page → tier mapping
-  const SLIDER_TO_TIER = { '1': 'T1', '2': 'T2', '3': 'T3', '4': 'T4' };
-  const ENEMY_IMG_TO_TIER = { '1': 'E1', '2': 'E2', '3': 'E3', '4': 'E4', '5': 'E5', '6': 'E6' };
+  // ── BATTLE SIMULATOR (delegates to shared BFEngine) ────────
+  // No more inline duplication: bot.js, simulator.js (UI), and the optimizer
+  // all run the same math via window.BFEngine. Single source of truth.
+  // (sim_engine.js is loaded BEFORE bot.js by the manifest content_scripts list.)
+  //
+  // Slider/image data-id → tier mapping. Universal across all server languages
+  // (data-id is set by game DOM, language-independent).
+  const SLIDER_TO_TIER    = { '1':'T1', '2':'T2', '3':'T3', '4':'T4', '5':'T5', '6':'T6', '7':'T7', '8':'T8' };
+  const ENEMY_IMG_TO_TIER = { '1':'E1', '2':'E2', '3':'E3', '4':'E4', '5':'E5', '6':'E6',
+                              '7':'E7', '8':'E8', '9':'E9', '10':'E10' };
 
   function qtyToString(obj) {
     return Object.entries(obj).filter(([,v]) => v > 0).sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) => `${k}:${v}`).join(', ');
   }
 
-  function botBuildGroups(side, tierDefs, qtys) {
-    return tierDefs.filter(t => (qtys[t.id] || 0) > 0).map(t => {
-      const q = qtys[t.id];
-      return { id: t.id, tier: t, qty: q, maxHp: t.hp * q, currentHp: t.hp * q,
-        aliveUnits: q, alive: true, side, revived: false, revivedThisRound: false,
-        damageBuff: 1.0, debuffed: false, debuffRounds: 0, attackedThisRound: false };
-    });
-  }
-
-  function botPickTarget(atk, enemies) {
-    const alive = enemies.filter(g => g.alive);
-    if (!alive.length) return null;
-    // T4/E4 target rearguard
-    if (atk.tier.skillId === 'T4_REARGUARD_DEBUFF' || atk.tier.skillId === 'E4_REARGUARD_FIRST') {
-      const rear = alive.filter(g => g.tier.pos === 'Rearguard');
-      if (rear.length) return rear[0];
-    }
-    // Default: vanguard first, then rearguard
-    const van = alive.filter(g => g.tier.pos === 'Vanguard');
-    return van.length ? van[0] : alive[0];
-  }
-
-  function botAttack(atk, tgt, bs) {
-    let dmg = atk.tier.dmg * atk.aliveUnits * atk.damageBuff;
-    // T1 first round +25%
-    if (atk.tier.skillId === 'T1_FIRST_ROUND_DMG' && bs.firstRound) dmg *= 1.25;
-    // T3 vs slow
-    if (atk.tier.skillId === 'T3_VS_SLOW' && tgt.tier.spd < 3) dmg *= 1.33;
-    // E4 first attacker +20%
-    if (atk.tier.skillId === 'E4_REARGUARD_FIRST' && bs.firstAttacker === atk.id) dmg *= 1.2;
-    // E6 double bonus
-    if (atk.tier.skillId === 'E6_DOUBLE_BONUS' && tgt.aliveUnits >= atk.aliveUnits * 2) dmg *= 1.5;
-    // T2 reduce incoming
-    if (tgt.tier.skillId === 'T2_REDUCE_DMG') dmg *= 0.5;
-    // T4 debuff target
-    if (atk.tier.skillId === 'T4_REARGUARD_DEBUFF' && !tgt.debuffed) {
-      tgt.debuffed = true; tgt.debuffRounds = 2;
-    }
-    if (tgt.debuffed && atk.id !== tgt.id) dmg *= 0.75; // debuffed targets take less? No — debuff reduces THEIR damage
-    // Actually T4 debuff reduces target's damage by 25%, not incoming. Fix:
-    // The debuff tracking is on the target — we apply it when the debuffed unit attacks
-    // Remove the dmg*0.75 here, apply it in attack calculation of debuffed unit
-    dmg = Math.floor(dmg);
-    tgt.currentHp -= dmg;
-    if (tgt.currentHp <= 0) {
-      // E5 death thorns
-      if (tgt.tier.skillId === 'E5_DEATH_THORNS') {
-        const thorns = Math.floor(tgt.tier.hp * tgt.qty * 0.2);
-        atk.currentHp -= thorns;
-        atk.aliveUnits = Math.max(0, Math.ceil(atk.currentHp / atk.tier.hp));
-        if (atk.aliveUnits <= 0) { atk.alive = false; atk.aliveUnits = 0; atk.currentHp = 0; }
-      }
-      // E2 revive
-      if (tgt.tier.skillId === 'E2_REVIVE' && !tgt.revived) {
-        tgt.revived = true; tgt.currentHp = 1; tgt.aliveUnits = 1; tgt.alive = true;
-        return;
-      }
-      tgt.alive = false; tgt.aliveUnits = 0; tgt.currentHp = 0;
-    } else {
-      tgt.aliveUnits = Math.ceil(tgt.currentHp / tgt.tier.hp);
-    }
-  }
-
+  // Wrapper to keep the call sites in bot.js unchanged.
+  // Returns the same shape as before (victory, surviving, rounds) plus the new
+  // engineResult for callers that want details.
   function botSimulate(allyQtys, enemyQtys) {
-    const allies = botBuildGroups('ally', BOT_ALLY_TIERS, allyQtys);
-    const enemies = botBuildGroups('enemy', BOT_ENEMY_TIERS, enemyQtys);
-    if (!allies.length || !enemies.length) return null;
-    const bs = { allies, enemies, round: 0, done: false, firstRound: true, firstAttacker: null };
-    for (let r = 0; r < 50 && !bs.done; r++) {
-      bs.round++;
-      const all = [...bs.allies, ...bs.enemies].filter(g => g.alive);
-      all.forEach(g => { g.attackedThisRound = false; if (g.debuffRounds > 0) { g.debuffRounds--; if (!g.debuffRounds) g.debuffed = false; }});
-      bs.firstAttacker = null;
-      const order = [...all].sort((a, b) => {
-        if (b.tier.spd !== a.tier.spd) return b.tier.spd - a.tier.spd;
-        const ps = g => g.tier.pos === 'Rearguard' ? 1 : 0;
-        if (ps(b) !== ps(a)) return ps(b) - ps(a);
-        return a.side === 'ally' ? -1 : 1;
-      });
-      for (const atk of order) {
-        if (!atk.alive) continue;
-        if (!bs.firstAttacker) bs.firstAttacker = atk.id;
-        // Apply debuff to attacker's damage
-        let origBuff = atk.damageBuff;
-        if (atk.debuffed) atk.damageBuff *= 0.75;
-        const side = atk.side === 'ally' ? bs.enemies : bs.allies;
-        const tgt = botPickTarget(atk, side);
-        if (tgt) botAttack(atk, tgt, bs);
-        atk.damageBuff = origBuff;
-      }
-      // E3 buff
-      bs.enemies.filter(g => g.alive && g.tier.skillId === 'E3_BUFF_ALLY').forEach(e3 => {
-        const fr = bs.enemies.filter(g => g.alive && g.id !== e3.id);
-        if (fr.length) {
-          const t = fr.reduce((b, g) => g.tier.dmg * g.aliveUnits > b.tier.dmg * b.aliveUnits ? g : b);
-          t.damageBuff = +(t.damageBuff + 0.1).toFixed(2);
-        }
-      });
-      bs.firstRound = false;
-      if (!bs.allies.some(g => g.alive) || !bs.enemies.some(g => g.alive)) bs.done = true;
+    if (!window.BFEngine) {
+      console.error('[bitefight bot] BFEngine not loaded — sim_engine.js missing?');
+      return null;
     }
-    const victory = bs.allies.some(g => g.alive) && !bs.enemies.some(g => g.alive);
-    const surviving = bs.allies.filter(g => g.alive).reduce((s, g) => s + g.aliveUnits, 0);
-    return { victory, surviving, rounds: bs.round };
+    const r = window.BFEngine.simulate(allyQtys, enemyQtys, {
+      randomTarget: false,  // deterministic for pre-validation
+      collectLog: false,    // fast path
+      maxRounds: 50,
+    });
+    if (!r) return null;
+    return {
+      victory: r.victory,
+      surviving: r.unitsSurvived,
+      rounds: r.rounds,
+      // additional fields available if needed:
+      essenceLost: r.essenceLost,
+      unitsLost: r.unitsLost,
+      draw: r.draw,
+      e3KilledRound1: r.e3KilledRound1,
+    };
   }
 
   // ── PARSE RUINS SHOW PAGE ─────────────────────────────────
@@ -562,82 +473,285 @@
     return 250; // fallback
   }
 
-  // ── GREEDY OPTIMIZER ──────────────────────────────────────
-  function findBestFormation(enemyQtys, maxUnits, powerLimit) {
-    const tiers = BOT_ALLY_TIERS.filter(t => (maxUnits[t.id] || 0) > 0);
+  // ── OPTIMIZER (single-thread, n-tier capable) ─────────────────
+  // v1.5.8 — replaces previous 4-tier hardcoded loop that referenced
+  // an undefined BOT_ALLY_TIERS global (latent bug). Now uses BFEngine
+  // tier definitions, honors a caller-supplied unlockedAllyIds list and
+  // properly enumerates up to T8.
+  //
+  // Caller-supplied opts:
+  //   unlockedAllyIds: ['T1','T3','T6',...]  (required)
+  //   mode: 'deep' | 'fast'                   (default 'deep')
+  //   stratKillE3: bool                       (default false)
+  //   warmStart: {minPerTier, maxPerTier}     (optional)
+  //   maxTested: int                          (safety cap, default 50000)
+  function findBestFormation(enemyQtys, maxUnits, powerLimit, opts) {
+    opts = opts || {};
+    if (!window.BFEngine) return null;
+    const ALL_ALLY = window.BFEngine.ALLY_TIERS;
+    const unlocked = Array.isArray(opts.unlockedAllyIds) && opts.unlockedAllyIds.length
+      ? opts.unlockedAllyIds
+      : ALL_ALLY.map(t => t.id);
+    const tiers = ALL_ALLY.filter(t => unlocked.indexOf(t.id) >= 0 && (maxUnits[t.id] || 0) > 0);
     if (!tiers.length) return null;
+
+    const mode = opts.mode === 'fast' ? 'fast' : 'deep';
+    const stratKillE3 = !!opts.stratKillE3;
+    const maxTested = opts.maxTested || 50000;
+
+    const maxByTier = {};
+    const minByTier = {};
+    tiers.forEach(t => {
+      maxByTier[t.id] = Math.min(maxUnits[t.id] || 0, Math.floor(powerLimit / t.power));
+      minByTier[t.id] = 0;
+    });
+    if (opts.warmStart) {
+      Object.keys(opts.warmStart.minPerTier || {}).forEach(tid => {
+        if (maxByTier[tid] != null) minByTier[tid] = Math.min(maxByTier[tid], opts.warmStart.minPerTier[tid]);
+      });
+      Object.keys(opts.warmStart.maxPerTier || {}).forEach(tid => {
+        if (maxByTier[tid] != null) maxByTier[tid] = Math.min(maxByTier[tid], opts.warmStart.maxPerTier[tid]);
+      });
+    }
 
     let bestResult = null;
     let bestQtys = null;
+    let bestE3Kill = null;
+    let bestE3KillQtys = null;
     let tested = 0;
+    let stopFlag = false;
 
-    // Generate combinations using bounded iteration
-    // Start with max power and work down
-    const maxByTier = {};
-    tiers.forEach(t => {
-      maxByTier[t.id] = Math.min(maxUnits[t.id], Math.floor(powerLimit / t.power));
-    });
-
-    // Iterate all reasonable combos (capped at 50k to avoid freezing)
-    const ids = tiers.map(t => t.id);
-    const powers = tiers.map(t => t.power);
-    const maxes = ids.map(id => maxByTier[id]);
-
-    // 4 tiers max → nested loops are fine
-    const m0 = maxes[0] || 0, m1 = maxes[1] || 0, m2 = maxes[2] || 0, m3 = maxes[3] || 0;
-    const p0 = powers[0] || 99, p1 = powers[1] || 99, p2 = powers[2] || 99, p3 = powers[3] || 99;
-
-    for (let q0 = m0; q0 >= 0; q0--) {
-      const pw0 = q0 * p0;
-      if (pw0 > powerLimit) continue;
-      for (let q1 = Math.min(m1, Math.floor((powerLimit - pw0) / p1)); q1 >= 0; q1--) {
-        const pw01 = pw0 + q1 * p1;
-        if (ids.length <= 2) {
-          // Only 2 tiers
-          if (q0 === 0 && q1 === 0) continue;
-          const qtys = {}; if (q0) qtys[ids[0]] = q0; if (q1) qtys[ids[1]] = q1;
-          const r = botSimulate(qtys, enemyQtys);
-          tested++;
-          if (r && r.victory && (!bestResult || r.surviving > bestResult.surviving || (r.surviving === bestResult.surviving && r.rounds < bestResult.rounds))) {
-            bestResult = r; bestQtys = qtys;
-          }
-          if (tested > 50000) break;
-          continue;
-        }
-        for (let q2 = Math.min(m2, Math.floor((powerLimit - pw01) / p2)); q2 >= 0; q2--) {
-          const pw012 = pw01 + q2 * p2;
-          if (ids.length <= 3) {
-            if (q0 === 0 && q1 === 0 && q2 === 0) continue;
-            const qtys = {}; if (q0) qtys[ids[0]] = q0; if (q1) qtys[ids[1]] = q1; if (q2) qtys[ids[2]] = q2;
-            const r = botSimulate(qtys, enemyQtys);
-            tested++;
-            if (r && r.victory && (!bestResult || r.surviving > bestResult.surviving || (r.surviving === bestResult.surviving && r.rounds < bestResult.rounds))) {
-              bestResult = r; bestQtys = qtys;
-            }
-            if (tested > 50000) break;
-            continue;
-          }
-          for (let q3 = Math.min(m3, Math.floor((powerLimit - pw012) / p3)); q3 >= 0; q3--) {
-            if (q0 === 0 && q1 === 0 && q2 === 0 && q3 === 0) continue;
-            const qtys = {};
-            if (q0) qtys[ids[0]] = q0; if (q1) qtys[ids[1]] = q1;
-            if (q2) qtys[ids[2]] = q2; if (q3) qtys[ids[3]] = q3;
-            const r = botSimulate(qtys, enemyQtys);
-            tested++;
-            if (r && r.victory && (!bestResult || r.surviving > bestResult.surviving || (r.surviving === bestResult.surviving && r.rounds < bestResult.rounds))) {
-              bestResult = r; bestQtys = qtys;
-            }
-            if (tested > 50000) break;
-          }
-          if (tested > 50000) break;
-        }
-        if (tested > 50000) break;
+    function consider(qtys, r) {
+      tested++;
+      if (!r || !r.victory) return;
+      const better = !bestResult
+        || r.surviving > bestResult.surviving
+        || (r.surviving === bestResult.surviving && r.rounds < bestResult.rounds);
+      if (better) { bestResult = r; bestQtys = { ...qtys }; }
+      if (stratKillE3 && r.e3KilledRound1) {
+        const e3Better = !bestE3Kill
+          || r.surviving > bestE3Kill.surviving
+          || (r.surviving === bestE3Kill.surviving && r.rounds < bestE3Kill.rounds);
+        if (e3Better) { bestE3Kill = r; bestE3KillQtys = { ...qtys }; }
       }
-      if (tested > 50000) break;
     }
 
-    botLog('info', `Optimizer: ${tested} formations tested, ${bestResult ? 'winner found' : 'no victory'}`);
-    return bestQtys;
+    // Recursive combination generator — works for any tier count up to T8.
+    // Iterates high → low so "strongest first" candidates land earliest.
+    const tierIds = tiers.map(t => t.id);
+    function recurse(idx, remaining, current) {
+      if (stopFlag || tested >= maxTested) { stopFlag = true; return; }
+      if (idx === tiers.length) {
+        if (Object.keys(current).length === 0) return; // skip empty formation
+        const r = botSimulate(current, enemyQtys);
+        consider(current, r);
+        if (mode === 'fast' && bestResult && tested >= 200) stopFlag = true;
+        return;
+      }
+      const tier = tiers[idx];
+      const hardMax = Math.floor(remaining / tier.power);
+      const lo = minByTier[tier.id] || 0;
+      const hi = Math.min(maxByTier[tier.id] || 0, hardMax);
+      for (let q = hi; q >= lo; q--) {
+        if (stopFlag) return;
+        if (q > 0) current[tier.id] = q;
+        else delete current[tier.id];
+        recurse(idx + 1, remaining - q * tier.power, current);
+      }
+      delete current[tier.id];
+    }
+
+    recurse(0, powerLimit, {});
+
+    // Prefer E3-killing formation when strategy is on AND we found one;
+    // otherwise fall back to overall best winner (don't fail the run).
+    const chosen = (stratKillE3 && bestE3KillQtys) ? bestE3KillQtys : bestQtys;
+    const winnerLabel = !chosen ? 'no victory'
+      : (stratKillE3 && bestE3KillQtys) ? 'winner found (E3 killed R1)'
+      : (stratKillE3 ? 'winner found (NO E3 kill)' : 'winner found');
+    botLog('info', `Optimizer [${mode}/${tierIds.join(',')}]: ${tested} tested, ${winnerLabel}`);
+    return chosen;
+  }
+
+  // ── PARALLEL OPTIMIZER (Web Workers) ──────────────────────────
+  // v1.5.8 — replicates simulator.js's runParallelOptimizer protocol
+  // for the bot's content-script context. Mirrors split logic on
+  // the chosen split tier (T1 if unlocked, else cheapest unlocked tier).
+  // cb is called with (qtysOrNull, source) on completion or fallback.
+  function findBestFormationParallel(enemyQtys, maxUnits, powerLimit, opts, cb) {
+    opts = opts || {};
+    const fallback = () => {
+      const r = findBestFormation(enemyQtys, maxUnits, powerLimit, opts);
+      cb(r, opts.mode === 'fast' ? 'FAST-ST' : 'DEEP-ST');
+    };
+
+    if (typeof Worker === 'undefined' || !chrome || !chrome.runtime || typeof chrome.runtime.getURL !== 'function') {
+      botLog('warn', 'Optimizer: Workers unavailable, single-thread fallback');
+      fallback();
+      return;
+    }
+    if (!window.BFEngine) { fallback(); return; }
+
+    const ALL_ALLY = window.BFEngine.ALLY_TIERS;
+    const unlocked = Array.isArray(opts.unlockedAllyIds) && opts.unlockedAllyIds.length
+      ? opts.unlockedAllyIds
+      : ALL_ALLY.map(t => t.id);
+    const tiers = ALL_ALLY.filter(t => unlocked.indexOf(t.id) >= 0 && (maxUnits[t.id] || 0) > 0);
+    if (!tiers.length) { cb(null, 'NONE'); return; }
+
+    const mode = opts.mode === 'fast' ? 'fast' : 'deep';
+    const stratKillE3 = !!opts.stratKillE3;
+
+    const maxPerTier = {};
+    let minPerTier = null;
+    tiers.forEach(t => {
+      maxPerTier[t.id] = Math.min(maxUnits[t.id] || 0, Math.floor(powerLimit / t.power));
+    });
+    if (opts.warmStart) {
+      if (opts.warmStart.minPerTier) {
+        minPerTier = {};
+        Object.keys(opts.warmStart.minPerTier).forEach(tid => {
+          if (maxPerTier[tid] != null) minPerTier[tid] = Math.min(maxPerTier[tid], opts.warmStart.minPerTier[tid]);
+        });
+      }
+      Object.keys(opts.warmStart.maxPerTier || {}).forEach(tid => {
+        if (maxPerTier[tid] != null) maxPerTier[tid] = Math.min(maxPerTier[tid], opts.warmStart.maxPerTier[tid]);
+      });
+    }
+
+    // Pick split tier: T1 if available, else cheapest unlocked tier
+    let splitTier = tiers.find(t => t.id === 'T1');
+    if (!splitTier) splitTier = tiers.slice().sort((a, b) => a.power - b.power)[0];
+    const splitMaxAll = maxPerTier[splitTier.id] || 0;
+    const splitMinAll = (minPerTier && minPerTier[splitTier.id] != null) ? minPerTier[splitTier.id] : 0;
+    if (splitMaxAll < splitMinAll) { fallback(); return; }
+
+    const hw = (navigator && navigator.hardwareConcurrency) || 4;
+    const workerCount = Math.max(1, Math.min(8, hw, splitMaxAll - splitMinAll + 1));
+
+    // Partition [splitMinAll..splitMaxAll] across workers
+    const ranges = [];
+    const totalRange = splitMaxAll - splitMinAll + 1;
+    const base = Math.floor(totalRange / workerCount);
+    const rem  = totalRange % workerCount;
+    let cursor = splitMinAll;
+    for (let i = 0; i < workerCount; i++) {
+      const size = base + (i < rem ? 1 : 0);
+      if (size <= 0) continue;
+      ranges.push([cursor, cursor + size - 1]);
+      cursor += size;
+    }
+
+    const workerUrl = chrome.runtime.getURL('js/optimizer_worker.js');
+    const engineUrl = chrome.runtime.getURL('js/sim_engine.js');
+    const workers = [];
+    const done = new Array(ranges.length).fill(false);
+    let aggregated = [];
+    let totalTested = 0;
+    let cancelled = false;
+
+    function cleanup() {
+      workers.forEach(w => { try { w.terminate(); } catch (_) {} });
+    }
+
+    function finalize() {
+      cleanup();
+      if (cancelled) return;
+      let pool = aggregated.filter(r => r.victory);
+      if (stratKillE3) {
+        const e3Kills = pool.filter(r => r.e3KilledRound1);
+        if (e3Kills.length) pool = e3Kills;
+      }
+      if (!pool.length) {
+        botLog('info', `Parallel optimizer [${mode}]: ${totalTested} tested, no victory`);
+        cb(null, mode === 'fast' ? 'FAST-PAR' : 'DEEP-PAR');
+        return;
+      }
+      pool.sort((a, b) => {
+        if (b.unitsSurvived !== a.unitsSurvived) return b.unitsSurvived - a.unitsSurvived;
+        if (a.rounds !== b.rounds) return a.rounds - b.rounds;
+        return (a.essenceLost || 0) - (b.essenceLost || 0);
+      });
+      botLog('info', `Parallel optimizer [${mode}]: ${totalTested} tested, ${pool.length} winners → ${qtyToString(pool[0].allyQtys)}`);
+      cb(pool[0].allyQtys, mode === 'fast' ? 'FAST-PAR' : 'DEEP-PAR');
+    }
+
+    // Safety timeout: if any worker hangs for 30s we fallback.
+    const safety = botSetTimeout(() => {
+      if (cancelled) return;
+      cancelled = true;
+      cleanup();
+      botLog('warn', 'Parallel optimizer timeout (30s), single-thread fallback');
+      fallback();
+    }, 30000);
+
+    ranges.forEach((range, idx) => {
+      let w;
+      try { w = new Worker(workerUrl); }
+      catch (err) {
+        if (!cancelled) { cancelled = true; clearTimeout(safety); cleanup(); fallback(); }
+        return;
+      }
+      workers.push(w);
+      w.onerror = function () {
+        if (cancelled) return;
+        cancelled = true; clearTimeout(safety); cleanup();
+        botLog('warn', 'Parallel optimizer worker error, single-thread fallback');
+        fallback();
+      };
+      w.onmessage = function (ev) {
+        const msg = ev.data;
+        if (!msg) return;
+        if (msg.type === 'ready') {
+          w.postMessage({
+            type: 'run', mode: mode, powerLimit: powerLimit,
+            maxPerTier: maxPerTier, minPerTier: minPerTier,
+            unlockedAllyIds: tiers.map(t => t.id),
+            splitTierId: splitTier.id, splitMin: range[0], splitMax: range[1],
+            enemyQtys: enemyQtys, stratKillE3: stratKillE3,
+            targetWinners: 60, maxCandidates: 200000, progressEveryMs: 250,
+          });
+        } else if (msg.type === 'done') {
+          aggregated = aggregated.concat(msg.results || []);
+          totalTested += msg.tested || 0;
+          done[idx] = true;
+          if (done.every(Boolean)) { clearTimeout(safety); finalize(); }
+        } else if (msg.type === 'error') {
+          if (cancelled) return;
+          cancelled = true; clearTimeout(safety); cleanup();
+          botLog('warn', `Parallel optimizer: worker ${idx} error (${msg.message || '?'}), single-thread fallback`);
+          fallback();
+        }
+      };
+      w.postMessage({ type: 'init', enginePath: engineUrl });
+    });
+  }
+
+  // ── HELPER: find ANY preset for a given layer (for warm-start) ───
+  // Per user spec (v1.5.8), layer match is strict — no cross-layer fallback.
+  function findAnyRuinsPresetForLayer(presets, level) {
+    const arr = presets[String(level)] || [];
+    return arr.length ? arr[0] : null;
+  }
+
+  // ── HELPER: convert a Ruins preset formation into optimizer ranges ───
+  // The Ruins Preset Formations have concrete counts; convert each count
+  // into a target ± range window. Tiers not in the preset are unconstrained.
+  function buildRangesFromRuinsPreset(presetFormation, range) {
+    const r = range != null ? range : 15;
+    const minPerTier = {};
+    const maxPerTier = {};
+    const computed = {};
+    Object.keys(presetFormation || {}).forEach(tid => {
+      const v = parseInt(presetFormation[tid]) || 0;
+      if (v <= 0) return;
+      const lo = Math.max(0, v - r);
+      const hi = v + r;
+      minPerTier[tid] = lo;
+      maxPerTier[tid] = hi;
+      computed[tid] = { target: v, min: lo, max: hi, mode: 'range' };
+    });
+    return { minPerTier, maxPerTier, computed };
   }
 
   // ── CONSTANTS ────────────────────────────────────────────────
@@ -650,6 +764,11 @@
   ];
 
   const QUALITY_RANKS = ['S', 'A', 'B', 'C', 'D', 'E'];
+
+  // v1.6.4 — Blood-essence cost per unit tier (matches sim_engine ALLY_TIERS).
+  //          Indexed by numeric tier id (1..8); used by Auto Recruitment and UI.
+  const UNIT_COSTS = { 1: 10, 2: 15, 3: 20, 4: 35, 5: 50, 6: 75, 7: 90, 8: 150 };
+  const TIER_ORDER_DEFAULT = ['T4','T3','T2','T1','T5','T6','T7','T8'];
 
   const DEFAULT_SETTINGS = {
     // Hunt bot
@@ -665,25 +784,57 @@
     extractEnabled: true,
     extractAutoRepeat: true,    // repeat after orb cooldown (5h)
     orbCooldownMs: 5 * 60 * 60 * 1000, // 5 hours
-    // Recruit
+    // Recruit (v1.6.4 — rewritten as global tick, supports T1-T8)
     recruitEnabled: false,
-    recruitMode: 'percent',         // 'percent' = % split of BE, 'formation' = fixed formation from simulator
-    recruitFormation: {},            // {1: qty, 2: qty, ...} from simulator (mode: formation)
-    recruitPercent: { 1: 0, 2: 0, 3: 0, 4: 0 },  // % allocation per unit tier (mode: percent)
-    recruitTrigger: 'every',         // 'every' = after every extraction, 'threshold' = when BE >= X
+    recruitTrigger: 'idle',          // 'idle' = run during yellow/white indicator, 'extraction' = after hunt extracts, 'threshold' = when BE >= X, 'continuous' = run every tick
     recruitThreshold: 100,           // BE threshold for trigger mode 'threshold'
+    recruitStrategy: 'priority',     // 'percent' = % split per tier, 'priority' = drain into priority order
+    recruitPercent:  { 1:0, 2:0, 3:0, 4:0, 5:0, 6:0, 7:0, 8:0 },  // % allocation per tier (strategy: percent)
+    recruitEnabledTiers: { 1:false, 2:false, 3:true, 4:true, 5:false, 6:false, 7:false, 8:false }, // checkbox per tier (strategy: priority)
+    recruitPriority: ['T4','T3','T2','T1','T5','T6','T7','T8'], // ordered list (strategy: priority); first enabled = highest priority
+    recruitReserveBE: 0,             // keep this much BE on hand (like Gold "Keep")
+    recruitMode: 'percent',          // LEGACY — kept for back-compat, no longer used
+    recruitFormation: {},            // LEGACY — kept for back-compat
     // Ruins
     ruinsEnabled: false,
     ruinsLevels: Array.from({length: 20}, (_, i) => i + 1), // 1-20
+    ruinsLevelsLocked: false,   // v1.6.0 — UI lock on level selection (drag-paint protect)
     ruinsCadence: 'infinite',   // 'infinite', 'once', 'cycles'
     ruinsCycles: 5,
-    ruinsIntervalMin: 60,       // minutes between attacks per level
+    ruinsIntervalMin: 60,       // minutes between attacks per level (legacy default / fallback)
+    // v1.5.9 — Per-layer-band cooldown intervals (minutes).
+    // Keys: '1-10', '11-20', '21-30', '31-40', '41-50', '51-60',
+    //       '61-70', '71-80', '81-90', '91-100', '101' (and beyond).
+    // The cooldown for a layer is looked up via getRuinsIntervalForLevel().
+    // Missing bands fall back to ruinsIntervalMin.
+    ruinsIntervalBands: {
+      '1-10': 60, '11-20': 90, '21-30': 90, '31-40': 90, '41-50': 90,
+      '51-60': 90, '61-70': 90, '71-80': 90, '81-90': 90, '91-100': 90,
+      '101': 90,
+    },
     ruinsFormation: {},         // {1: qty, 2: qty, ...}
     // Safety stops
     ruinsStopNoWin: true,       // stop if no winning formation found
     ruinsMinUnits: {},          // min units required: {T1: 10, T2: 0, T3: 5, T4: 0}
     ruinsStopMinUnits: false,   // enable min units check
     ruinsStopPresetShort: true, // stop if can't fill preset formation fully
+    ruinsIgnorePresets: false,  // v1.6.2 — always skip preset matching, go straight to optimizer
+    // Ruins — UNLOCKED tiers (which ally tiers the optimizer is allowed to use)
+    // T1..T8; defaults to T1..T6 (player must unlock T7/T8 explicitly)
+    ruinsAllyUnlocks: ['T1','T2','T3','T4','T5','T6'],
+    // Ruins — Optimization settings (used when no exact preset matches)
+    ruinsOptStratKillE3: false,    // require formations that kill all E3 in round 1
+    ruinsOptMode: 'deep',          // 'deep' = simulate all, 'fast' = greedy stop
+    ruinsOptParallel: true,        // use Web Workers (parallel slicing)
+    ruinsWarmStartSource: 'none',  // 'none' | 'smart' | 'preset' (Ruins Preset Formations of same layer)
+    ruinsWarmStartRange: 15,       // ± units around warm-start target
+    // T4 short safety (only relevant when ruinsOptStratKillE3 is on)
+    ruinsT4ShortAction: 'stop',    // 'stop' | 'continue' | 'wait'
+    ruinsT4WaitMin: 10,            // minutes between rechecks when waiting
+    // Auto-import winning "new" formations into preset library
+    ruinsAutoImportNew: false,
+    ruinsAutoImportMaxPerLevel: 3, // max auto-imports per layer (prevents flooding)
+    ruinsAutoImportSmart: false,   // v1.5.9 — also write to simulator's Smart Preset library
     // Story Mode
     storyEnabled: false,
     storyPriority: 'gold',      // 'gold', 'xp', 'health', 'aspects'
@@ -728,6 +879,24 @@
     pvpDelay: 20,           // minutes between attacks
     pvpMargin: 3,           // ± randomizer minutes
     pvpIncludeInactive: true, // include inactive players (totemsearch)
+    // Henchman vs Henchman (v1.6.9, semantics flipped in v1.6.10) — uses the
+    // same /robbery/index page as PvP but a different form. Mutually exclusive
+    // with pvpEnabled. Whitelist/blacklist use INTUITIVE semantics here
+    // (opposite of the PvP convention in this codebase):
+    //   • whitelist = priority targets (mode 2 attacks ONLY these by namesearch)
+    //   • blacklist = players to skip   (mode 1 skips these from random results)
+    henchmanEnabled: false,
+    henchmanMode: 1,           // 1=anyone (random, skip blacklist), 2=whitelist only (target whitelist by namesearch)
+    henchmanWhitelist: '',     // priority targets — attacked in mode 2 (comma-separated)
+    henchmanBlacklist: '',     // players to skip — filtered in mode 1 (comma-separated)
+    henchmanSmartBreak: false, // pause between attacks
+    henchmanDelay: 20,         // minutes between attacks
+    henchmanMargin: 3,         // ± randomizer minutes
+    // v1.6.11 — allow attacking the player's own race. When the game presents
+    // the "this search includes both werewolves and vampires" confirmation
+    // modal (button type="button" with onclick="showModal('confirmModal',...)"),
+    // we confirm it if this is true; otherwise we skip and re-search.
+    henchmanAttackOwnRace: false,
     // Gifts
     giftsAutoDBG: false,        // auto open Dark Blue Gifts
     giftsDBGUnderAP: 5,         // open DBG when AP is under this
@@ -763,15 +932,16 @@
     potionMediumHealing: false,
     potionBlood: false,
     potionAutoBuy: false,
-    // Schedule
+    // Schedule (v1.6.8 — BK-style dynamic slots with multi-layout support)
+    // Slots live inside named layouts; the active layout's slots drive the
+    // schedule. When a slot's window is active, its `actions` flags FULLY
+    // OVERRIDE per-module enabled toggles. Outside all slots → bots paused.
     scheduleEnabled: false,
-    scheduleIntervals: [
-      { enabled: false, start: '08:00', end: '12:00' },
-      { enabled: false, start: '13:00', end: '17:00' },
-      { enabled: false, start: '18:00', end: '22:00' },
-      { enabled: false, start: '', end: '' },
-      { enabled: false, start: '', end: '' },
-    ],
+    scheduleLayouts: [],            // array of { id, name, slots: [...] }
+    scheduleActiveLayoutId: null,   // points into scheduleLayouts; self-healed
+    // Legacy fields kept ONLY for migration; do NOT use directly. See loadSettings.
+    scheduleSlots: undefined,       // v1.6.7 flat slot list
+    scheduleIntervals: undefined,   // pre-v1.6.7 fixed-row format
     // Other global
     autoEnrollClanWar: false,
     hideGameforgeBar: false,
@@ -779,6 +949,23 @@
     hideEventPanel: false,
     backgroundRefresh: false,
     backgroundRefreshInterval: 60, // minutes
+    backgroundRefreshRandomize: 5, // v1.6.10 — ± randomizer minutes
+    // ── Inventory Discard / Cleanup (v1.6.13) ───────────────────
+    // Auto-discards low-level "junk" drop items (Omega items, ruins loot, etc.).
+    // Only items that already have a Zahodiť/Discard button in the game UI are
+    // touched — equipped items and standard non-droppable items never qualify
+    // because they lack the `'feature' : 'discardItem'` onclick marker.
+    // Type whitelist (1=weapon, 3=helmet, 4=armor, 5=item, 6=gloves, 7=boots,
+    // 8=shield) is hardcoded in scanInventoryForDiscardable() so even if the
+    // game adds a discard button to elixirs/gifts/etc., the bot will not touch
+    // them.
+    invDiscardEnabled: false,
+    invDiscardMode: 'manual',        // 'manual' = Run-Now button only, 'auto' = scheduled
+    invDiscardFrequency: 'daily',    // 'daily' | 'weekly' | 'custom'  (when mode='auto')
+    invDiscardCustomHours: 12,       // hours between auto runs when frequency='custom'
+    invDiscardMaxLevel: 1000,        // discard items requiring this level OR LESS
+    invDiscardMinLevel: 0,           // also keep items below this level (optional floor)
+    invDiscardDelayMs: 1500,         // base delay between consecutive discards (±randomized)
   };
 
   // ── STATE MACHINE STATES ─────────────────────────────────────
@@ -871,8 +1058,6 @@
         m = rankText.match(/\b([SABCDE])\b/);
         if (m) result.rank = m[1];
       }
-      // Debug: log what we found
-      console.log(`[BF-Bot] rank-line[0]: "${rankText}" → parsed rank: ${result.rank || 'NULL'}`);
     }
     if (rankLines.length >= 2) {
       result.quality = rankLines[1].textContent.trim();
@@ -958,6 +1143,108 @@
     return PAGE.includes('/ancestral/fight') || (PAGE.includes('/ancestral/') && document.querySelector('.combatResult'));
   }
 
+  // ── PER-LAYER COOLDOWN INTERVAL (v1.5.9) ─────────────────────
+  // Maps a level number to its band key, then looks up the minutes
+  // value in settings.ruinsIntervalBands. Falls back to the legacy
+  // settings.ruinsIntervalMin if a band is missing or invalid.
+  // The 11 supported bands are: '1-10', '11-20', '21-30', '31-40',
+  // '41-50', '51-60', '61-70', '71-80', '81-90', '91-100', '101'.
+  // Layers ≥ 101 all share the '101' band.
+  function getLevelBandKey(level) {
+    const n = parseInt(level);
+    if (!n || n < 1) return '1-10';
+    if (n >= 101) return '101';
+    const lo = Math.floor((n - 1) / 10) * 10 + 1;
+    const hi = lo + 9;
+    return lo + '-' + hi;
+  }
+
+  function getRuinsIntervalForLevel(level, settings) {
+    const fallback = (settings && settings.ruinsIntervalMin) || 60;
+    const bands = settings && settings.ruinsIntervalBands;
+    if (!bands) return fallback;
+    const v = parseInt(bands[getLevelBandKey(level)]);
+    return (v && v > 0) ? v : fallback;
+  }
+
+  // List of all band keys in display order (used by the UI builder).
+  const RUINS_BAND_KEYS = [
+    '1-10','11-20','21-30','31-40','41-50','51-60',
+    '61-70','71-80','81-90','91-100','101',
+  ];
+
+  // ── ARMY (Živné jamy) PAGE DETECTION + PARSING (v1.5.8) ─────
+  // /nourishing/index shows the army by default (tab "Živné jamy").
+  // Distinguish from ancestral by the unit cards container which is
+  // unique to the army view.
+  function isArmyPage() {
+    return PAGE.includes('/nourishing/index')
+      && !!(document.getElementById('units-wrapper') || document.getElementById('units-total-army'));
+  }
+
+  // Parses live army state on the page. Returns:
+  //   { owned: {T1, T2, ...}, cooldown: {T1, ...},
+  //     queue: {T1: {qty, remainingSec, nextReadySec}, ...} }
+  // Uses structural IDs (#owned-N, #inCooldownUnits-N, #in-queue-N,
+  // #queue-end-N data-remaining, #next-ready-N data-remaining). Language
+  // independent — all IDs are server-set, never localized.
+  function parseArmyStateFromDom(doc) {
+    doc = doc || document;
+    const result = { owned: {}, cooldown: {}, queue: {}, totalValue: 0 };
+    for (let n = 1; n <= 8; n++) {
+      const tid = 'T' + n;
+      const ownedEl = doc.getElementById('owned-' + n);
+      const cdEl    = doc.getElementById('inCooldownUnits-' + n);
+      if (ownedEl) result.owned[tid] = parseInt((ownedEl.textContent || '').replace(/[^\d]/g, '')) || 0;
+      if (cdEl)    result.cooldown[tid] = parseInt((cdEl.textContent || '').replace(/[^\d]/g, '')) || 0;
+      const qtyEl  = doc.getElementById('in-queue-' + n);
+      const endEl  = doc.getElementById('queue-end-' + n);
+      const nextEl = doc.getElementById('next-ready-' + n);
+      if (qtyEl) {
+        const qty = parseInt((qtyEl.textContent || '').replace(/[^\d]/g, '')) || 0;
+        if (qty > 0) {
+          result.queue[tid] = {
+            qty: qty,
+            remainingSec: endEl ? parseInt(endEl.getAttribute('data-remaining')) || 0 : 0,
+            nextReadySec: nextEl ? parseInt(nextEl.getAttribute('data-remaining')) || 0 : 0,
+          };
+        }
+      }
+    }
+    // Total army value (from #units-total-army data-unit-values, if present)
+    const totalEl = doc.getElementById('total-value');
+    if (totalEl) result.totalValue = parseInt((totalEl.textContent || '').replace(/[^\d]/g, '')) || 0;
+    return result;
+  }
+
+  // Fetch /nourishing/index in the background (no navigation) and parse
+  // the army state from the response. Caches result for 60s. Used by the
+  // T4-short wait logic to know exact ETA of the next T4 unit.
+  let _armyCache = null;
+  function fetchArmyState(cb) {
+    if (!ctxOk()) { cb(null); return; }
+    const now = Date.now();
+    if (_armyCache && (now - _armyCache.ts) < 60000) { cb(_armyCache.data); return; }
+    if (isArmyPage()) {
+      // Page is already loaded — parse directly, no fetch needed
+      const data = parseArmyStateFromDom(document);
+      _armyCache = { ts: now, data };
+      cb(data);
+      return;
+    }
+    try {
+      fetch(BASE + '/nourishing/index', { credentials: 'include' })
+        .then(resp => resp.text())
+        .then(html => {
+          const doc = new DOMParser().parseFromString(html, 'text/html');
+          const data = parseArmyStateFromDom(doc);
+          _armyCache = { ts: now, data };
+          cb(data);
+        })
+        .catch(() => cb(null));
+    } catch (e) { cb(null); }
+  }
+
   // ── BOT LOGIC: DECIDE HUNT TYPE ──────────────────────────────
   function decideHuntType(settings) {
     if (settings.huntMode === 'manual') return settings.huntManualType;
@@ -1027,6 +1314,24 @@
         });
       }, randomDelay(2000, 4000));
     }
+
+    // v1.6.5 — Kick off a generic botTick if any GLOBAL module is enabled
+    // (Spend Gold, Auto Recruitment, Graveyard). Without this, those modules
+    // get no chance to fire during orb cooldown when only Hunt is configured —
+    // they live inside _botTickInner and need someone to call botTick. The
+    // periodic re-check is handled by startCooldownTicker (every ~30s).
+    // v1.6.14 — Inventory Cleanup joins this list for the same reason.
+    const globalsEnabled = (settings.goldMode > 0) || !!settings.recruitEnabled || !!settings.graveyardEnabled || !!settings.invDiscardEnabled;
+    if (globalsEnabled) {
+      botLog('info', 'Hunt on cooldown → Will run global modules (Gold / Recruit / Graveyard)');
+      botSetTimeout(() => {
+        loadState(st => {
+          loadSettings(se => {
+            botTick(st, se);
+          });
+        });
+      }, randomDelay(3000, 5000));
+    }
   }
 
   // ── BOT STATE MACHINE TICK ───────────────────────────────────
@@ -1040,6 +1345,11 @@
   }
 
   function _botTickInner(state, settings) {
+    // v1.6.7 — apply schedule mask: when scheduleEnabled is true, the active
+    // slot's `actions` flags fully override per-module enable toggles.
+    // Outside any active slot, all five main bots are forced off.
+    settings = getEffectiveSettings(settings);
+
     const ap = readAP();
     const abPct = getABPercent();
 
@@ -1430,67 +1740,11 @@
       } // end if (!huntWaiting)
     }
 
-    // ── RECRUIT BOT (after extraction) ─────────────────────────
-    if (settings.recruitEnabled && (state.huntState === 'done' || state.huntState === 'waiting_orb' || state.huntState === 'extracting')) {
-      // Determine if we should trigger recruit
-      const shouldRecruit = (() => {
-        if (settings.recruitTrigger === 'threshold') {
-          const be = readBE();
-          return be !== null && be >= (settings.recruitThreshold || 100);
-        }
-        // 'every' — trigger after any extraction (extractionsThisSession > 0)
-        return state.extractionsThisSession > 0 && !state.recruitDoneThisExtraction;
-      })();
-
-      if (shouldRecruit) {
-        if (!PAGE.includes('/nourishing/')) {
-          botLog('info', 'Recruit: Navigating to Crimson Sanctuary for recruitment');
-          botSetTimeout(() => { window.location.href = BASE + '/nourishing/index'; }, randomDelay(1000, 2000));
-          return;
-        }
-        // On nourishing page — trigger recruitment
-        if (PAGE.includes('/nourishing/')) {
-          const be = readBE() || 0;
-          const pct = settings.recruitPercent || {};
-          const totalPct = Object.values(pct).reduce((s, v) => s + (parseInt(v) || 0), 0);
-
-          if (totalPct > 0 && be > 0) {
-            const UNIT_COSTS = { 1: 10, 2: 15, 3: 20, 4: 35 };
-            const formation = {};
-            let spendBE = be;
-
-            // Calculate how many units to buy per tier based on % of available BE
-            for (const unitId of ['1', '2', '3', '4']) {
-              const unitPct = parseInt(pct[unitId]) || 0;
-              if (unitPct <= 0) continue;
-              const allocBE = Math.floor(be * unitPct / 100);
-              const cost = UNIT_COSTS[unitId] || 10;
-              const qty = Math.floor(allocBE / cost);
-              if (qty > 0) formation[unitId] = qty;
-            }
-
-            const keys = Object.keys(formation).filter(k => formation[k] > 0);
-            if (keys.length > 0) {
-              botLog('info', `Recruit: BE=${be}, allocation: ${keys.map(k => 'T' + k + '×' + formation[k]).join(', ')}`);
-              autoRecruit(formation, 0, keys);
-            } else {
-              botLog('warn', 'Recruit: Not enough BE to purchase units');
-            }
-          } else if (totalPct === 0) {
-            // Fallback to old formation-based system
-            const formation = settings.recruitFormation || {};
-            const keys = Object.keys(formation).filter(k => formation[k] > 0);
-            if (keys.length > 0) {
-              botLog('info', 'Recruit: Using formation from simulator');
-              autoRecruit(formation, 0, keys);
-            }
-          }
-          state.recruitDoneThisExtraction = true;
-          state.huntState = 'recruit_done';
-          saveState(state);
-        }
-      }
-    }
+    // ── RECRUIT BOT — moved to globalRecruitTick (v1.6.4) ─────
+    // Recruit now runs as a global tick alongside Gold/Graveyard,
+    // so it works during ANY idle/cooldown period regardless of which
+    // main bot module is enabled. See globalRecruitTick() and the
+    // global pre-check section below.
 
     // ── RUINS BOT (runs when: ruins enabled AND (hunt not active OR hunt on cooldown/done)) ──
     if (ruinsEnabled && (huntDoneOrWaiting || !huntEnabled)) {
@@ -1505,16 +1759,52 @@
     // ══════════════════════════════════════════════════════════
     // ── GLOBAL PRE-CHECK: Gold spending has PRIORITY ─────────
     // Before any main bot action, check if we should spend gold first.
-    // This only triggers navigation when no other bot is actively navigating.
+    // Normally only triggers when no other bot is actively navigating, BUT
+    // v1.6.2 — if Donate-to-clan mode is on AND gold is at/above the configured
+    // threshold, donation PREEMPTS other navigation (anti-raid protection:
+    // gold above threshold is a raid magnet and cannot sit).
     // ══════════════════════════════════════════════════════════
     const anyBotActivelyNavigating = 
       (huntEnabled && !huntWaiting && state.huntState === 'navigating') ||
       (ruinsEnabled && state.ruinsState === 'navigating') ||
       (settings.storyEnabled && state.storyState === 'navigating');
 
-    if (settings.goldMode > 0 && !anyBotActivelyNavigating) {
+    let goldUrgent = false;
+    if (settings.goldMode === 2) {
+      const _gold = readGold();
+      const _min = settings.goldDonateMin || 10000;
+      if (_gold !== null && _gold >= _min) goldUrgent = true;
+    }
+
+    if (settings.goldMode > 0 && (goldUrgent || !anyBotActivelyNavigating)) {
+      if (goldUrgent && anyBotActivelyNavigating) {
+        botLog('info', '💰 Gold: Threshold reached — preempting other modules');
+      }
       const goldHandled = globalGoldTick(state, settings);
       if (goldHandled) return; // Gold tick took action (navigation or click), wait for reload
+    }
+
+    // ── GLOBAL PRE-CHECK: Auto Recruitment (v1.6.4) ───────────
+    // Like Gold spending, recruit runs as a global tick so it works
+    // during ANY idle/cooldown period (yellow/white indicator) regardless
+    // of which main bot module is enabled. The "extraction" trigger still
+    // honors the hunt-tied behaviour; the "idle"/"threshold"/"continuous"
+    // triggers run independent of any specific module.
+    if (settings.recruitEnabled && !anyBotActivelyNavigating) {
+      const recruitHandled = globalRecruitTick(state, settings);
+      if (recruitHandled) return;
+    }
+
+    // ── GLOBAL PRE-CHECK: Inventory Discard (v1.6.13) ─────────
+    // Runs during ANY idle/cooldown period (yellow/white indicator state).
+    // In MANUAL mode, only fires when the user pressed "Run Now" (state flag
+    // invDiscardManualPending). In AUTO mode, the schedule gate in
+    // inventoryDiscardTick decides whether the interval has elapsed.
+    // Always gated by !anyBotActivelyNavigating so it never preempts a
+    // mid-flight battle/extraction sequence (non-urgent feature).
+    if (settings.invDiscardEnabled && !anyBotActivelyNavigating) {
+      const invHandled = inventoryDiscardTick(state, settings);
+      if (invHandled) return;
     }
 
     // ══════════════════════════════════════════════════════════
@@ -1532,13 +1822,20 @@
       pvpTick(state, settings);
     }
 
+    // ── HENCHMAN VS HENCHMAN BOT (v1.6.9) ───────────────────────
+    // Mutually exclusive with PvP — only runs when PvP is disabled.
+    if (settings.henchmanEnabled && !settings.pvpEnabled && state.henchmanState !== 'done') {
+      henchmanTick(state, settings);
+    }
+
     // ══════════════════════════════════════════════════════════
     // ── COOLDOWN PHASE: Gifts & Graveyard ────────────────────
     // These run when main bots are idle/cooldown/done.
     // ══════════════════════════════════════════════════════════
     const mainBotsBusy = (huntEnabled && !huntWaiting && state.huntState !== 'done' && state.huntState !== 'idle') ||
                          (settings.grottoEnabled && state.grottoState === 'fighting') ||
-                         (settings.pvpEnabled && state.pvpState === 'hunting');
+                         (settings.pvpEnabled && state.pvpState === 'hunting') ||
+                         (settings.henchmanEnabled && state.henchmanState === 'hunting');
 
     // ── GIFTS BOT (auto-open gifts during cooldowns/idle) ────
     if ((settings.giftsAutoDBG || state.giftsState === 'running') && !mainBotsBusy) {
@@ -1720,7 +2017,6 @@
     }
 
     const now = Date.now();
-    const intervalMs = (settings.ruinsIntervalMin || 60) * 60 * 1000;
 
     // Init state
     if (!state.ruinsCurrentIdx) state.ruinsCurrentIdx = 0;
@@ -1730,13 +2026,16 @@
     const level = levels[state.ruinsCurrentIdx];
 
     // Check cooldown for current level — scan all remaining levels for next available
-    // Find the first level that is NOT on cooldown
+    // Find the first level that is NOT on cooldown.
+    // v1.5.9: cooldown is per-LEVEL (looks up the band-specific interval),
+    // so each layer can have a different wait time.
     let foundReady = false;
     for (let scanOffset = 0; scanOffset < levels.length; scanOffset++) {
       const scanIdx = (state.ruinsCurrentIdx + scanOffset) % levels.length;
       const scanLevel = levels[scanIdx];
       const scanLast = state.ruinsAttackTimes[scanLevel] || 0;
-      if (now - scanLast >= intervalMs) {
+      const scanIntervalMs = getRuinsIntervalForLevel(scanLevel, settings) * 60 * 1000;
+      if (now - scanLast >= scanIntervalMs) {
         // Found a level ready to attack — advance index to it
         if (scanOffset > 0) {
           state.ruinsCurrentIdx = scanIdx;
@@ -1752,7 +2051,8 @@
       let minWait = Infinity;
       for (const lvl of levels) {
         const last = state.ruinsAttackTimes[lvl] || 0;
-        const remaining = intervalMs - (now - last);
+        const lvlIntervalMs = getRuinsIntervalForLevel(lvl, settings) * 60 * 1000;
+        const remaining = lvlIntervalMs - (now - last);
         if (remaining > 0 && remaining < minWait) minWait = remaining;
       }
       const waitMs = Math.max(minWait, 30000); // at least 30s
@@ -1770,7 +2070,8 @@
     }
 
     const lastAttack = state.ruinsAttackTimes[level] || 0;
-    if (now - lastAttack < intervalMs) {
+    const levelIntervalMs = getRuinsIntervalForLevel(level, settings) * 60 * 1000;
+    if (now - lastAttack < levelIntervalMs) {
       // Current level still on cooldown after scan (shouldn't happen, but safety)
       saveState(state);
       botSetTimeout(() => ruinsTick(state, settings), 100);
@@ -1803,6 +2104,13 @@
 
     // On the correct ruins show page — analyze enemy, check presets, simulate, fight
     if (isRuinsShowPage()) {
+      // Save current layer for simulator (smart preset pre-fill)
+      try {
+        if (chrome && chrome.storage && chrome.storage.local) {
+          chrome.storage.local.set({ 'bf_current_layer': { layer: level, ts: Date.now() } });
+        }
+      } catch (_) {}
+
       // 1. Parse enemy units
       const enemyQtys = parseRuinsEnemies();
       const enemyStr = Object.entries(enemyQtys).map(([k,v]) => `${k}:${v}`).join(', ');
@@ -1836,80 +2144,20 @@
       // 3. Check presets first, then fall back to simulation
       const fp = Object.entries(enemyQtys).filter(([,v]) => v > 0).sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) => `${k}:${v}`).join(',');
 
-      sGet([SK('ruinsPresets')], r => {
-        const presets = r[SK('ruinsPresets')] || {};
-        const levelPresets = presets[String(level)] || [];
-        const match = levelPresets.find(p => p.enemy === fp);
-
-        let useQtys = null;
-        let source = '';
-
-        if (match) {
-          // Preset found — use it (cap to max available)
-          useQtys = {};
-          let presetShort = false;
-          for (const [tid, qty] of Object.entries(match.formation)) {
-            const avail = maxUnits[tid] || 0;
-            useQtys[tid] = Math.min(qty, avail);
-            if (avail < qty) presetShort = true;
-          }
-
-          // ── SAFETY CHECK: Can't fill preset fully ──
-          if (presetShort && settings.ruinsStopPresetShort) {
-            const needed = Object.entries(match.formation).map(([k,v]) => `${k}:${v}`).join(', ');
-            const have = Object.entries(match.formation).map(([k,v]) => `${k}:${maxUnits[k]||0}`).join(', ');
-            botLog('warn', `⛔ STOP — Preset requires [${needed}] but you have [${have}]`);
-            botLog('warn', 'Ruins Bot stopped — not enough for preset. Replenish units and restart.');
-            settings.ruinsEnabled = false;
-            saveSettings(settings);
-            state.ruinsState = 'done';
-            saveState(state);
-            updateRuinsUI(settings, state);
-            return;
-          }
-
-          source = 'PRESET';
-          botLog('ok', `Preset found for layer ${level}: ${qtyToString(useQtys)}`);
-        } else {
-          // No preset — simulate
-          const maxStr = Object.entries(maxUnits).filter(([,v]) => v > 0).map(([k,v]) => `${k}:${v}`).join(', ');
-          botLog('info', `No preset for layer ${level} (${fp}), simulating... [${maxStr}] PL:${powerLimit}`);
-          useQtys = findBestFormation(enemyQtys, maxUnits, powerLimit);
-          source = 'SIM';
-        }
-
-        // ── SAFETY CHECK: No winning formation ──
-        if (!useQtys) {
-          if (settings.ruinsStopNoWin) {
-            botLog('warn', `⛔ STOP — Layer ${level}: no winning formation!`);
-            botLog('warn', 'Ruins Bot stopped. Replenish units or add preset.');
-            settings.ruinsEnabled = false;
-            saveSettings(settings);
-            state.ruinsState = 'done';
-            saveState(state);
-            updateRuinsUI(settings, state);
-          } else {
-            botLog('warn', `Layer ${level}: No formation found, skipping`);
-            state.ruinsCurrentIdx++;
-            saveState(state);
-            botSetTimeout(() => botTick(state, settings), randomDelay(1000, 2000));
-          }
-          return;
-        }
-
+      // ── Slider sequence + fight (shared by preset hit + optimizer paths) ──
+      function proceedWithFormation(useQtys, source) {
         const fmtStr = Object.entries(useQtys).filter(([,v]) => v > 0).map(([k,v]) => `${k}:${v}`).join(', ');
         botLog('ok', `Formation [${source}]: ${fmtStr}`);
 
         // 4. Set sliders via realistic button clicks (+10, +1)
         function clickSliderTo(tierId, targetQty) {
-          const TIER_TO_DATA_ID = { 'T1': '1', 'T2': '2', 'T3': '3', 'T4': '4' };
+          const TIER_TO_DATA_ID = { 'T1':'1', 'T2':'2', 'T3':'3', 'T4':'4', 'T5':'5', 'T6':'6', 'T7':'7', 'T8':'8' };
           const dataId = TIER_TO_DATA_ID[tierId];
           if (!dataId || !targetQty || targetQty <= 0) return Promise.resolve();
 
           const plus10 = document.querySelector(`.stepBtn.btnPlus10[data-id="${dataId}"]`);
           const plus1 = document.querySelector(`.stepBtn.btnPlus1[data-id="${dataId}"]`);
           if (!plus10 && !plus1) {
-            // Fallback: set slider directly if buttons not found
             const slider = document.getElementById('playerArmy' + dataId);
             if (slider) { slider.value = targetQty; slider.dispatchEvent(new Event('input', { bubbles: true })); }
             return Promise.resolve();
@@ -1926,7 +2174,7 @@
               if (i >= clicks.length) { resolve(); return; }
               clicks[i].click();
               i++;
-              botSetTimeout(nextClick, 80 + Math.floor(Math.random() * 120)); // 80-200ms per click
+              botSetTimeout(nextClick, 80 + Math.floor(Math.random() * 120));
             }
             nextClick();
           });
@@ -1936,14 +2184,13 @@
         let sliderIdx = 0;
         function setNextSlider() {
           if (sliderIdx >= tierOrder.length) {
-            // All sliders set — wait for fightBtn unlock
             botSetTimeout(doFight, 400 + Math.floor(Math.random() * 400));
             return;
           }
           const [tid, qty] = tierOrder[sliderIdx];
           sliderIdx++;
           clickSliderTo(tid, qty).then(() => {
-            botSetTimeout(setNextSlider, 200 + Math.floor(Math.random() * 500)); // pause between tiers
+            botSetTimeout(setNextSlider, 200 + Math.floor(Math.random() * 500));
           });
         }
 
@@ -1953,14 +2200,9 @@
             botLog('info', `Ruins: Attacking layer ${level}`);
             state.ruinsAttackTimes[level] = now;
             state.ruinsState = 'fighting';
-            // Save pre-battle snapshot for battle log
             state.ruinsLastBattle = {
-              level: level,
-              enemy: enemyQtys,
-              formation: { ...useQtys },
-              source: source,
-              timestamp: now,
-              maxUnitsBeforeFight: { ...maxUnits },
+              level: level, enemy: enemyQtys, formation: { ...useQtys },
+              source: source, timestamp: now, maxUnitsBeforeFight: { ...maxUnits },
             };
             saveState(state);
             botSetTimeout(() => { fightBtn.click(); }, randomDelay(300, 800));
@@ -1972,8 +2214,180 @@
           }
         }
 
-        // Start realistic slider sequence
         setNextSlider();
+      }
+
+      // ── Bail out: no winner found ──
+      function handleNoWinner() {
+        if (settings.ruinsStopNoWin) {
+          botLog('warn', `⛔ STOP — Layer ${level}: no winning formation!`);
+          botLog('warn', 'Ruins Bot stopped. Replenish units or add preset.');
+          settings.ruinsEnabled = false;
+          saveSettings(settings);
+          state.ruinsState = 'done';
+          saveState(state);
+          updateRuinsUI(settings, state);
+        } else {
+          botLog('warn', `Layer ${level}: No formation found, skipping`);
+          state.ruinsCurrentIdx++;
+          saveState(state);
+          botSetTimeout(() => botTick(state, settings), randomDelay(1000, 2000));
+        }
+      }
+
+      sGet([SK('ruinsPresets')], r => {
+        const presets = r[SK('ruinsPresets')] || {};
+        const levelPresets = presets[String(level)] || [];
+        const match = levelPresets.find(p => p.enemy === fp);
+
+        // v1.6.2 — Manual override: ignore presets, always use optimizer
+        if (match && settings.ruinsIgnorePresets) {
+          botLog('info', `Preset match for layer ${level} ignored (Ignore-Presets is ON) → optimizer`);
+        }
+
+        // v1.6.2 — Auto-fallback: if preset uses a tier the player has NOT unlocked,
+        //         skip the preset and let the optimizer find a workable formation.
+        //         Stopping here makes no sense — the player physically cannot have
+        //         those units. Common case: imported/shared preset references T6+.
+        let lockedTierInPreset = false;
+        if (match && !settings.ruinsIgnorePresets) {
+          const unlockedList = (settings.ruinsAllyUnlocks && settings.ruinsAllyUnlocks.length)
+            ? settings.ruinsAllyUnlocks : ['T1','T2','T3','T4','T5','T6'];
+          const lockedTiers = Object.keys(match.formation).filter(tid => unlockedList.indexOf(tid) < 0);
+          if (lockedTiers.length) {
+            lockedTierInPreset = true;
+            botLog('warn', `Preset for layer ${level} requires locked tier(s) [${lockedTiers.join(',')}] → skipping preset, using optimizer`);
+          }
+        }
+
+        // ── Path A: exact preset match — original behaviour ──
+        if (match && !settings.ruinsIgnorePresets && !lockedTierInPreset) {
+          const useQtys = {};
+          let presetShort = false;
+          for (const [tid, qty] of Object.entries(match.formation)) {
+            const avail = maxUnits[tid] || 0;
+            useQtys[tid] = Math.min(qty, avail);
+            if (avail < qty) presetShort = true;
+          }
+          if (presetShort && settings.ruinsStopPresetShort) {
+            const needed = Object.entries(match.formation).map(([k,v]) => `${k}:${v}`).join(', ');
+            const have = Object.entries(match.formation).map(([k,v]) => `${k}:${maxUnits[k]||0}`).join(', ');
+            botLog('warn', `⛔ STOP — Preset requires [${needed}] but you have [${have}]`);
+            botLog('warn', 'Ruins Bot stopped — not enough for preset. Replenish units and restart.');
+            settings.ruinsEnabled = false;
+            saveSettings(settings);
+            state.ruinsState = 'done';
+            saveState(state);
+            updateRuinsUI(settings, state);
+            return;
+          }
+          botLog('ok', `Preset found for layer ${level}: ${qtyToString(useQtys)}`);
+          proceedWithFormation(useQtys, 'PRESET');
+          return;
+        }
+
+        // ── Path B: optimizer (no exact match) ──
+        // 1) Resolve Kill E3 R1 T4-short safety
+        let useKillE3 = !!settings.ruinsOptStratKillE3;
+        const unlocked = (settings.ruinsAllyUnlocks && settings.ruinsAllyUnlocks.length)
+          ? settings.ruinsAllyUnlocks : ['T1','T2','T3','T4','T5','T6'];
+        if (useKillE3) {
+          if (unlocked.indexOf('T4') < 0) {
+            botLog('warn', 'Kill E3 R1 requested but T4 is locked → disabling for this battle');
+            useKillE3 = false;
+          } else {
+            const minT4 = (window.BFPresets && typeof window.BFPresets.calculateAutoT4 === 'function')
+              ? window.BFPresets.calculateAutoT4(enemyQtys)
+              : 0;
+            const haveT4 = maxUnits['T4'] || 0;
+            if (haveT4 < minT4) {
+              const action = settings.ruinsT4ShortAction || 'stop';
+              botLog('warn', `T4 short for Kill E3 R1: need ≥${minT4}, have ${haveT4} → action=${action}`);
+              if (action === 'stop') {
+                botLog('warn', `⛔ STOP — T4 short for Kill E3 R1 (need ${minT4}, have ${haveT4}). Train T4 and restart.`);
+                settings.ruinsEnabled = false;
+                saveSettings(settings);
+                state.ruinsState = 'done';
+                saveState(state);
+                updateRuinsUI(settings, state);
+                return;
+              } else if (action === 'wait') {
+                const waitMin = settings.ruinsT4WaitMin || 10;
+                botLog('info', `⏱ Waiting ${waitMin} min for T4 training (need ${minT4}, have ${haveT4})…`);
+                state.ruinsState = 'waiting_training';
+                saveState(state);
+                updateRuinsUI(settings, state);
+                // Fetch army state for log visibility (best-effort)
+                fetchArmyState(() => {});
+                // Schedule reload of same ruins page so slider maxes refresh
+                botSetTimeout(() => {
+                  if (_centralStopActive) return;
+                  window.location.href = BASE + '/ancestral/show/' + level;
+                }, waitMin * 60 * 1000);
+                return;
+              } else {
+                // 'continue' — drop strategy for this battle only
+                useKillE3 = false;
+              }
+            }
+          }
+        }
+
+        // 2) Build warm-start ranges based on settings
+        const wsSource = settings.ruinsWarmStartSource || 'none';
+        const wsRange  = settings.ruinsWarmStartRange || 15;
+        let warmStart = null;
+        let warmStartLabel = '';
+        try {
+          if (wsSource === 'smart' && window.BFPresets) {
+            const smartCache = window.BFPresets.getCached();
+            if (smartCache) {
+              const smartPreset = smartCache[String(level)];
+              if (smartPreset) {
+                const ranges = window.BFPresets.buildRangesFromPreset(smartPreset, {
+                  range: wsRange, enemyQtys: enemyQtys, stratKillE3: useKillE3,
+                });
+                warmStart = ranges;
+                warmStartLabel = ' [warm: smart]';
+              }
+            }
+          } else if (wsSource === 'preset') {
+            // Strict layer match — any preset for this exact level becomes the warm-start template.
+            const anyPreset = findAnyRuinsPresetForLayer(presets, level);
+            if (anyPreset) {
+              warmStart = buildRangesFromRuinsPreset(anyPreset.formation, wsRange);
+              warmStartLabel = ' [warm: preset L' + level + ']';
+            }
+          }
+        } catch (e) {
+          botLog('warn', 'Warm-start build error: ' + (e && e.message ? e.message : e));
+          warmStart = null;
+        }
+
+        const maxStr = Object.entries(maxUnits).filter(([,v]) => v > 0).map(([k,v]) => `${k}:${v}`).join(', ');
+        const modeLabel = (settings.ruinsOptMode === 'fast' ? 'fast' : 'deep')
+          + (settings.ruinsOptParallel ? '/parallel' : '/single');
+        botLog('info', `No exact preset for L${level} (${fp}), simulating${warmStartLabel} mode=${modeLabel}… [${maxStr}] PL:${powerLimit}`);
+
+        const optOpts = {
+          unlockedAllyIds: unlocked,
+          mode: settings.ruinsOptMode === 'fast' ? 'fast' : 'deep',
+          stratKillE3: useKillE3,
+          warmStart: warmStart,
+        };
+
+        function onOptimizerResult(useQtys, source) {
+          if (!useQtys) { handleNoWinner(); return; }
+          const finalSource = warmStart ? (source + '+WARM') : source;
+          proceedWithFormation(useQtys, finalSource);
+        }
+
+        if (settings.ruinsOptParallel !== false) {
+          findBestFormationParallel(enemyQtys, maxUnits, powerLimit, optOpts, onOptimizerResult);
+        } else {
+          const r = findBestFormation(enemyQtys, maxUnits, powerLimit, optOpts);
+          onOptimizerResult(r, optOpts.mode === 'fast' ? 'FAST-ST' : 'DEEP-ST');
+        }
       });
       return;
     }
@@ -2219,6 +2633,9 @@
   }
 
   // ── AUTO RECRUIT ─────────────────────────────────────────────
+  // v1.6.4 — Tally the percent split and update the small "Total: X%" label.
+  //          Accepts any % value 0..100; total may legitimately be < 100 if
+  //          the user wants to leave some BE unspent.
   function updateRecruitTotal() {
     let total = 0;
     document.querySelectorAll('.bf-recruit-pct').forEach(inp => {
@@ -2226,15 +2643,131 @@
     });
     const el = document.getElementById('bf-recruit-total');
     if (el) {
-      const ok = total === 100;
-      el.textContent = `Total: ${total}%` + (ok ? ' ✓' : ' (must be 100%)');
-      el.style.color = ok ? '#2ecc71' : '#e0a030';
+      let msg, color;
+      if (total === 100)      { msg = `Total: 100% ✓`;                              color = '#2ecc71'; }
+      else if (total > 100)   { msg = `Total: ${total}% — over 100%, will overspend`; color = '#e74c3c'; }
+      else if (total === 0)   { msg = `Total: 0% — set at least one tier`;            color = '#e0a030'; }
+      else                    { msg = `Total: ${total}% — under 100%, leftover BE saved`; color = '#e0a030'; }
+      el.textContent = msg;
+      el.style.color = color;
     }
   }
 
-  function autoRecruit(formation, idx, keys) {
+  // v1.6.4 — Render live BE + per-tier queue/cooldown status inside the
+  //          Auto Recruitment panel (separate from the Ruins-tab Army Status).
+  //          Called after recruit ticks and from the Refresh button.
+  function renderRecruitLiveStatus(army, beValue) {
+    const el = document.getElementById('bf-recruit-live-status');
+    if (!el) return;
+    const be = (beValue !== null && beValue !== undefined) ? beValue : (readBE() || 0);
+    if (!army) {
+      el.innerHTML = `<div style="color:#5a7a4a">BE: <b style="color:#e74c3c">${be}</b> · <em>Army data unavailable</em></div>`;
+      return;
+    }
+    const rows = [];
+    rows.push(`<div style="color:#5a7a4a">BE: <b style="color:#e74c3c">${be.toLocaleString()}</b></div>`);
+    let anyTier = false;
+    for (let n = 1; n <= 8; n++) {
+      const tid = 'T' + n;
+      const owned = army.owned[tid];
+      const cd    = army.cooldown[tid] || 0;
+      const queue = army.queue[tid];
+      if (owned == null && !queue && !cd) continue;
+      anyTier = true;
+      const queuePart = queue
+        ? ` <span style="color:#9b59b6">+${queue.qty} ⏳</span>` +
+          (queue.nextReadySec > 0 ? `<span style="color:#5a7a4a">(${formatSeconds(queue.nextReadySec)})</span>` : '')
+        : '';
+      const cdPart = cd > 0 ? ` <span style="color:#c0392b">${cd} ⏱</span>` : '';
+      rows.push(`<div style="color:#aaa"><b style="color:#e0c068">${tid}</b>: ${owned || 0}${cdPart}${queuePart}</div>`);
+    }
+    if (!anyTier) rows.push(`<div style="color:#5a7a4a"><em>No tiers trained yet.</em></div>`);
+    el.innerHTML = rows.join('');
+  }
+
+  // v1.6.4 — Refresh just the live-status block by fetching army state.
+  function refreshRecruitLiveStatus() {
+    const el = document.getElementById('bf-recruit-live-status');
+    if (el) el.innerHTML = '<em style="color:#5a7a4a">Loading…</em>';
+    _armyCache = null;
+    fetchArmyState((data) => renderRecruitLiveStatus(data, readBE()));
+  }
+
+  // v1.6.4 — Build tier rows for the priority strategy. Each row has an
+  //          enable checkbox + up/down reorder buttons. The order is held
+  //          in settings.recruitPriority and edited via the reorder buttons
+  //          (drag-and-drop is unreliable inside iframe-embedded panels).
+  function renderRecruitPriorityRows(order, enabled) {
+    const container = document.getElementById('bf-recruit-priority-list');
+    if (!container) return;
+    order = (order && order.length) ? order : TIER_ORDER_DEFAULT.slice();
+    enabled = enabled || {};
+    const html = order.map((tid, idx) => {
+      const n = parseInt(String(tid).replace(/[^\d]/g, ''));
+      if (!n || n < 1 || n > 8) return '';
+      const cost = UNIT_COSTS[n] || 0;
+      const checked = enabled[n] ? 'checked' : '';
+      return `
+        <div class="bf-recruit-prio-row" data-tier="${n}" style="display:flex;align-items:center;gap:6px;margin:2px 0;padding:2px 4px;background:rgba(60,40,40,0.2);border-radius:3px">
+          <span style="color:#5a7a4a;font-size:0.55rem;min-width:14px;text-align:right">${idx + 1}.</span>
+          <label class="bf-bot-checkbox" style="flex:1;margin:0">
+            <input type="checkbox" class="bf-recruit-prio-en" data-tier="${n}" ${checked}>
+            <span style="color:#e0c068;font-weight:bold">T${n}</span>
+            <span style="color:#5a7a4a;font-size:0.55rem">(${cost} BE)</span>
+          </label>
+          <button class="bf-recruit-prio-up" data-idx="${idx}" title="Move up" style="background:none;border:1px solid #3a3a3a;color:#888;cursor:pointer;width:18px;height:18px;font-size:0.6rem;border-radius:2px">▲</button>
+          <button class="bf-recruit-prio-dn" data-idx="${idx}" title="Move down" style="background:none;border:1px solid #3a3a3a;color:#888;cursor:pointer;width:18px;height:18px;font-size:0.6rem;border-radius:2px">▼</button>
+        </div>`;
+    }).join('');
+    container.innerHTML = html;
+
+    // Wire reorder buttons
+    container.querySelectorAll('.bf-recruit-prio-up').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const i = parseInt(btn.dataset.idx);
+        if (i <= 0) return;
+        const arr = readPriorityOrderFromDOM();
+        [arr[i - 1], arr[i]] = [arr[i], arr[i - 1]];
+        const en = readEnabledTiersFromDOM();
+        renderRecruitPriorityRows(arr, en);
+      });
+    });
+    container.querySelectorAll('.bf-recruit-prio-dn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const i = parseInt(btn.dataset.idx);
+        const arr = readPriorityOrderFromDOM();
+        if (i >= arr.length - 1) return;
+        [arr[i + 1], arr[i]] = [arr[i], arr[i + 1]];
+        const en = readEnabledTiersFromDOM();
+        renderRecruitPriorityRows(arr, en);
+      });
+    });
+  }
+
+  function readPriorityOrderFromDOM() {
+    const rows = document.querySelectorAll('#bf-recruit-priority-list .bf-recruit-prio-row');
+    const arr = [];
+    rows.forEach(r => { const t = r.dataset.tier; if (t) arr.push('T' + t); });
+    return arr.length ? arr : TIER_ORDER_DEFAULT.slice();
+  }
+
+  function readEnabledTiersFromDOM() {
+    const en = {};
+    document.querySelectorAll('.bf-recruit-prio-en').forEach(cb => {
+      const t = parseInt(cb.dataset.tier);
+      if (t) en[t] = !!cb.checked;
+    });
+    return en;
+  }
+
+  // v1.6.4 — Recruits unit batches in 10× then 1× clicks on /nourishing/index.
+  //          When a recruit-N-AMOUNT button is .disabled (queue full / not
+  //          enough BE), we skip that batch and continue. Optional `onDone`
+  //          callback fires once all keys have been processed.
+  function autoRecruit(formation, idx, keys, onDone) {
     if (idx >= keys.length) {
-      botLog('ok', 'Recruitment complete');
+      botLog('ok', '⚔ Recruitment complete');
+      if (typeof onDone === 'function') onDone();
       return;
     }
     const unitId = keys[idx];
@@ -2249,7 +2782,7 @@
 
     function doNext(ci) {
       if (ci >= calls.length) {
-        botSetTimeout(() => autoRecruit(formation, idx + 1, keys), 500);
+        botSetTimeout(() => autoRecruit(formation, idx + 1, keys, onDone), 500);
         return;
       }
       const c = calls[ci];
@@ -2258,8 +2791,10 @@
         btn.click();
         botSetTimeout(() => doNext(ci + 1), randomDelay(300, 600));
       } else {
-        botLog('warn', `Recruit T${c.unitId} x${c.amount} — button disabled`);
-        botSetTimeout(() => autoRecruit(formation, idx + 1, keys), 300);
+        // v1.6.4 — Button disabled likely means queue full OR BE was just spent
+        // on the previous batch. Move to the next tier rather than spamming.
+        botLog('warn', `⚔ Recruit T${c.unitId} x${c.amount} — button disabled (queue full / not enough BE)`);
+        botSetTimeout(() => autoRecruit(formation, idx + 1, keys, onDone), 300);
       }
     }
     doNext(0);
@@ -2324,8 +2859,17 @@
         pvpNextAttack: 0,
         pvpKills: 0,
         pvpDeaths: 0,
+        // Henchman vs Henchman (v1.6.9)
+        henchmanState: 'idle',
+        henchmanNextAttack: 0,
+        henchmanKills: 0,
+        henchmanDeaths: 0,
         // Recruit
         recruitDoneThisExtraction: false,
+        recruitLastCycle: 0,        // v1.6.4 — last time globalRecruitTick fired (ms)
+        recruitNavigating: false,   // v1.6.5 — mid-cycle navigation flag (clears on /nourishing/ arrival)
+        recruitLastNoTiersLog: 0,   // v1.6.5 — throttle for "no tiers enabled" warning
+        recruitLastLowBeLog: 0,     // v1.6.5 — throttle for "BE too low" info log
         // Gifts
         giftsState: 'idle',
         giftsDBGOpened: 0,
@@ -2335,6 +2879,13 @@
         goldLastSpend: 0,
         graveyardWorking: false,
         graveyardWorkUntil: 0,
+        // Inventory Discard (v1.6.13)
+        invDiscardLastRun: 0,        // ms timestamp of last full scan cycle
+        invDiscardLastAction: 0,     // ms timestamp of last discard click (anti-spam)
+        invDiscardNavigating: false, // navigation flag (cleared on /profile arrival)
+        invDiscardManualPending: false, // set true by "Run Now" button; one-shot bypass of schedule gate
+        invDiscardTotalCount: 0,     // lifetime number of items discarded
+        invDiscardSessionCount: 0,   // count for current manual run (reset on each manual trigger)
       });
     });
   }
@@ -2342,12 +2893,427 @@
   function loadSettings(cb) {
     sGet([SK('settings')], (r) => {
       const s = r[SK('settings')] || {};
-      cb(Object.assign({}, DEFAULT_SETTINGS, s));
+      const merged = Object.assign({}, DEFAULT_SETTINGS, s);
+      // ── Migration step 1 (v1.6.7) — legacy scheduleIntervals → scheduleSlots
+      if (Array.isArray(merged.scheduleIntervals) && (!Array.isArray(merged.scheduleSlots) || merged.scheduleSlots.length === 0)) {
+        merged.scheduleSlots = merged.scheduleIntervals
+          .filter(it => it && it.start && it.end)
+          .map(it => {
+            const [sh, sm] = String(it.start).split(':').map(n => parseInt(n) || 0);
+            const [eh, em] = String(it.end).split(':').map(n => parseInt(n) || 0);
+            return {
+              id: newScheduleSlotId(),
+              enabled: !!it.enabled,
+              startH: sh|0, startM: sm|0,
+              endH: eh|0, endM: em|0,
+              actions: { hunt:false, story:false, pvp:false, henchman:false, ruins:false, grotto:false, invdisc:false }
+            };
+          });
+        merged.scheduleIntervals = undefined;
+      }
+      // ── Migration step 2 (v1.6.8) — flat scheduleSlots → scheduleLayouts
+      if (!Array.isArray(merged.scheduleLayouts) || merged.scheduleLayouts.length === 0) {
+        const defaultLayout = {
+          id: newScheduleLayoutId(),
+          name: 'Default',
+          slots: Array.isArray(merged.scheduleSlots) ? merged.scheduleSlots : []
+        };
+        merged.scheduleLayouts = [defaultLayout];
+        merged.scheduleActiveLayoutId = defaultLayout.id;
+        merged.scheduleSlots = undefined; // archived inside the layout
+      } else if (Array.isArray(merged.scheduleSlots) && merged.scheduleSlots.length > 0) {
+        // Defensive: layouts already exist but a stray scheduleSlots remained.
+        // Don't lose those slots — append them to the first layout, then clear.
+        if (!Array.isArray(merged.scheduleLayouts[0].slots)) merged.scheduleLayouts[0].slots = [];
+        merged.scheduleLayouts[0].slots.push(...merged.scheduleSlots);
+        merged.scheduleSlots = undefined;
+      }
+      // Self-heal active layout id
+      if (!merged.scheduleActiveLayoutId || !merged.scheduleLayouts.some(l => l.id === merged.scheduleActiveLayoutId)) {
+        merged.scheduleActiveLayoutId = merged.scheduleLayouts[0]?.id || null;
+      }
+      // Defensive defaults for layout shape
+      merged.scheduleLayouts.forEach(l => {
+        if (!Array.isArray(l.slots)) l.slots = [];
+        if (typeof l.name !== 'string' || !l.name) l.name = 'Layout';
+      });
+
+      // ── Migration step 3 (v1.6.14) — extend slot `actions` with `henchman`
+      // and `invdisc`. For backward compatibility:
+      //   • `henchman` defaults to the current `pvp` flag (preserves pre-v1.6.14
+      //     behaviour where Henchman implicitly piggy-backed on the pvp slot).
+      //   • `invdisc`  defaults to false (opt-in for new schedule integration).
+      // Idempotent: only fills in undefined keys, never overwrites existing ones.
+      merged.scheduleLayouts.forEach(l => {
+        l.slots.forEach(sl => {
+          if (!sl.actions || typeof sl.actions !== 'object') {
+            sl.actions = { hunt:false, story:false, pvp:false, henchman:false, ruins:false, grotto:false, invdisc:false };
+            return;
+          }
+          if (typeof sl.actions.henchman === 'undefined') sl.actions.henchman = !!sl.actions.pvp;
+          if (typeof sl.actions.invdisc  === 'undefined') sl.actions.invdisc  = false;
+        });
+      });
+
+      cb(merged);
     });
   }
 
   function saveSettings(settings) {
     sSet({ [SK('settings')]: settings });
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // SCHEDULE ENGINE (v1.6.7) — BK-style dynamic slots with actions
+  // v1.6.14 — Added `henchman` (decoupled from pvp) and `invdisc` actions
+  // ═══════════════════════════════════════════════════════════════
+  // Slot shape:
+  //   { id, enabled, startH, startM, endH, endM,
+  //     actions: { hunt, story, pvp, henchman, ruins, grotto, invdisc } }
+  //
+  // Semantics:
+  //   - scheduleEnabled = false → no effect (per-module toggles apply).
+  //   - scheduleEnabled = true  → slot's `actions` flags FULLY OVERRIDE
+  //     huntEnabled/storyEnabled/pvpEnabled/henchmanEnabled/ruinsEnabled/
+  //     grottoEnabled/invDiscardEnabled during the slot's active window.
+  //     Outside all slots → all seven OFF.
+  //   - Overnight spans supported (e.g. 22:00 → 06:00).
+  //   - startMin === endMin → 24h "always active" block.
+  // ═══════════════════════════════════════════════════════════════
+
+  function newScheduleSlotId() {
+    return 'sch_' + Date.now().toString(36) + '_' + Math.floor(Math.random() * 1000);
+  }
+
+  function newScheduleLayoutId() {
+    return 'lay_' + Date.now().toString(36) + '_' + Math.floor(Math.random() * 1000);
+  }
+
+  // ── LAYOUT HELPERS (v1.6.8) ─────────────────────────────────────
+  // Slots are nested inside the active layout, so all read/write paths
+  // go through these accessors.
+
+  function getActiveScheduleLayout(settings) {
+    if (!settings || !Array.isArray(settings.scheduleLayouts) || settings.scheduleLayouts.length === 0) return null;
+    const id = settings.scheduleActiveLayoutId;
+    return settings.scheduleLayouts.find(l => l.id === id) || settings.scheduleLayouts[0] || null;
+  }
+
+  function getActiveScheduleSlots(settings) {
+    const lay = getActiveScheduleLayout(settings);
+    return (lay && Array.isArray(lay.slots)) ? lay.slots : [];
+  }
+
+  function findActiveScheduleSlot(settings) {
+    if (!settings || !settings.scheduleEnabled) return null;
+    const slots = getActiveScheduleSlots(settings);
+    const now = new Date();
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+    for (const slot of slots) {
+      if (!slot || !slot.enabled) continue;
+      const startMin = (slot.startH|0) * 60 + (slot.startM|0);
+      const endMin   = (slot.endH|0)   * 60 + (slot.endM|0);
+      if (startMin < endMin) {
+        if (nowMin >= startMin && nowMin < endMin) return slot;
+      } else if (startMin > endMin) {
+        // Overnight wrap, e.g. 22:00 → 06:00
+        if (nowMin >= startMin || nowMin < endMin) return slot;
+      } else {
+        // Equal → 24h block, always active
+        return slot;
+      }
+    }
+    return null;
+  }
+
+  // Returns a SHALLOW-CLONED settings with module-enable flags masked by
+  // the currently-active schedule slot (or all-off if outside all slots).
+  // When scheduleEnabled is false, returns the input unchanged.
+  // v1.6.14 — Henchman now has its OWN slot action `a.henchman` (decoupled
+  // from `a.pvp`). Existing slots are migrated so that `a.henchman` mirrors
+  // `a.pvp` (preserving pre-v1.6.14 behavior). Inventory Cleanup is also
+  // schedulable now via `a.invdisc`.
+  //
+  // PvP and Henchman remain mutually exclusive AT RUNTIME (henchman ticks
+  // only when settings.pvpEnabled is false — see line ~1826). So a slot
+  // with both pvp:true AND henchman:true → PvP wins, henchman is dormant.
+  // Users wanting Henchman should uncheck pvp on that slot.
+  function getEffectiveSettings(settings) {
+    if (!settings || !settings.scheduleEnabled) return settings;
+    const slot = findActiveScheduleSlot(settings);
+    const eff = Object.assign({}, settings);
+    if (!slot) {
+      eff.huntEnabled       = false;
+      eff.storyEnabled      = false;
+      eff.pvpEnabled        = false;
+      eff.henchmanEnabled   = false;
+      eff.ruinsEnabled      = false;
+      eff.grottoEnabled     = false;
+      eff.invDiscardEnabled = false;
+      eff._scheduleActiveSlotId = null;
+    } else {
+      const a = slot.actions || {};
+      eff.huntEnabled       = !!a.hunt;
+      eff.storyEnabled      = !!a.story;
+      eff.pvpEnabled        = !!a.pvp;
+      // Master toggle gate preserved: user must enable Henchman in main
+      // panel; slot picks WHEN it runs.
+      eff.henchmanEnabled   = !!a.henchman && !!settings.henchmanEnabled;
+      eff.ruinsEnabled      = !!a.ruins;
+      eff.grottoEnabled     = !!a.grotto;
+      // Same gating model for Inventory Cleanup: master toggle + slot picker.
+      eff.invDiscardEnabled = !!a.invdisc && !!settings.invDiscardEnabled;
+      eff._scheduleActiveSlotId = slot.id;
+    }
+    return eff;
+  }
+
+  // ── SCHEDULE WATCHER — detects slot transitions and triggers botTick ──
+  let _scheduleWatcherId = null;
+  let _lastScheduleSlotId = '__init__'; // sentinel so first run logs current state
+
+  function runScheduleCheck(reason) {
+    if (_centralStopActive) return;
+    loadSettings(se => {
+      if (!se.scheduleEnabled) {
+        if (_lastScheduleSlotId !== null) {
+          _lastScheduleSlotId = null;
+          renderScheduleStatus(se);
+          updateStatusDot();
+        }
+        return;
+      }
+      const slot = findActiveScheduleSlot(se);
+      const newId = slot ? slot.id : null;
+      if (newId !== _lastScheduleSlotId) {
+        const prevId = _lastScheduleSlotId;
+        _lastScheduleSlotId = newId;
+        if (newId) {
+          const a = slot.actions || {};
+          const labels = [];
+          if (a.hunt)     labels.push('Hunt');
+          if (a.story)    labels.push('Story');
+          if (a.pvp)      labels.push('PvP');
+          if (a.henchman) labels.push('Henchman');
+          if (a.ruins)    labels.push('Ruins');
+          if (a.grotto)   labels.push('Grotto');
+          if (a.invdisc)  labels.push('Inv-Cleanup');
+          botLog('info', `📅 Schedule: slot active → ${labels.length ? labels.join(' + ') : '(no actions selected)'}`);
+          // When a slot becomes active, reset 'done' module states to 'idle'
+          // so they restart fresh inside the new window.
+          loadState(st => {
+            let dirty = false;
+            if (a.hunt     && st.huntState     === 'done') { st.huntState     = 'idle'; dirty = true; }
+            if (a.ruins    && st.ruinsState    === 'done') { st.ruinsState    = 'idle'; dirty = true; }
+            if (a.story    && st.storyState    === 'done') { st.storyState    = 'idle'; dirty = true; }
+            if (a.grotto   && st.grottoState   === 'done') { st.grottoState   = 'idle'; dirty = true; }
+            if (a.pvp      && st.pvpState      === 'done') { st.pvpState      = 'idle'; dirty = true; }
+            // v1.6.14 — Henchman now has its own slot action (was: shared a.pvp)
+            if (a.henchman && st.henchmanState === 'done') { st.henchmanState = 'idle'; dirty = true; }
+            // a.invdisc has no 'done' state to reset — it's tick-based
+            // with its own daily/weekly/custom interval gate.
+            const kick = () => {
+              renderScheduleStatus(se);
+              updateStatusDot();
+              botSetTimeout(() => {
+                loadState(st2 => { loadSettings(se2 => { botTick(st2, se2); }); });
+              }, randomDelay(800, 1800));
+            };
+            if (dirty) saveState(st, kick); else kick();
+          });
+        } else if (prevId !== '__init__') {
+          botLog('info', '📅 Schedule: outside all slots — bots paused');
+          renderScheduleStatus(se);
+          updateStatusDot();
+        } else {
+          renderScheduleStatus(se);
+          updateStatusDot();
+        }
+      } else {
+        // Same slot, but refresh status text every tick anyway (cheap)
+        renderScheduleStatus(se);
+      }
+    });
+  }
+
+  function startScheduleWatcher() {
+    if (_scheduleWatcherId !== null) return; // already running
+    // Re-run check every 30s. botSetInterval auto-cancels on Central STOP.
+    _scheduleWatcherId = botSetInterval(() => runScheduleCheck('tick'), 30000);
+    // Also run once immediately so status updates without waiting 30s.
+    runScheduleCheck('start');
+  }
+  // expose so Central STOP release can re-arm if needed
+  // (cancelAllBotTimers clears all timer IDs but the registry below tracks them)
+
+  // ── UI: LAYOUT BAR ──────────────────────────────────────────────
+  function renderLayoutBar(settings) {
+    const sel = document.getElementById('bf-layout-sel');
+    const delBtn = document.getElementById('bf-layout-del');
+    if (!sel) return;
+    const layouts = Array.isArray(settings.scheduleLayouts) ? settings.scheduleLayouts : [];
+    const activeId = settings.scheduleActiveLayoutId;
+    // Rebuild dropdown — escape angle brackets in names to be safe
+    sel.innerHTML = layouts.map(l => {
+      const safeName = String(l.name || '').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return `<option value="${l.id}"${l.id === activeId ? ' selected' : ''}>${safeName}</option>`;
+    }).join('');
+    if (delBtn) {
+      const onlyOne = layouts.length <= 1;
+      delBtn.disabled = onlyOne;
+      delBtn.style.opacity = onlyOne ? '0.4' : '1';
+      delBtn.style.cursor = onlyOne ? 'not-allowed' : 'pointer';
+    }
+  }
+
+  // ── UI: SCHEDULE STATUS LINE ────────────────────────────────────
+  function renderScheduleStatus(settings) {
+    const el = document.getElementById('bf-schedule-status');
+    if (!el) return;
+    if (!settings || !settings.scheduleEnabled) {
+      el.textContent = '--';
+      el.style.color = '#7a9a6a';
+      return;
+    }
+    const slot = findActiveScheduleSlot(settings);
+    if (!slot) {
+      el.innerHTML = '<span style="color:#888">○ Idle (no active slot)</span>';
+      return;
+    }
+    const a = slot.actions || {};
+    const labels = [];
+    if (a.hunt)     labels.push('Hunt');
+    if (a.story)    labels.push('Story');
+    if (a.pvp)      labels.push('PvP');
+    if (a.henchman) labels.push('Henchman');
+    if (a.ruins)    labels.push('Ruins');
+    if (a.grotto)   labels.push('Grotto');
+    if (a.invdisc)  labels.push('Inv-Cleanup');
+    const txt = labels.length ? labels.join(' + ') : '(none)';
+    el.innerHTML = `<span style="color:#2ecc71">● Now: ${txt}</span>`;
+  }
+
+  // ── UI: SCHEDULE LIST RENDERER ──────────────────────────────────
+  function renderScheduleList() {
+    const list = document.getElementById('bf-schedule-list');
+    if (!list) return;
+    loadSettings(settings => {
+      // Always refresh the layout bar in sync with the slot list — it may
+      // have changed (add/delete/rename) and the dropdown needs to follow.
+      renderLayoutBar(settings);
+      const slots = getActiveScheduleSlots(settings);
+      const active = findActiveScheduleSlot(settings);
+      if (!slots.length) {
+        list.innerHTML = '<div style="color:#7a9a6a;font-size:0.6rem;font-style:italic;padding:4px 0">No schedule slots — click "+ Add slot" below.</div>';
+        renderScheduleStatus(settings);
+        return;
+      }
+      const pad2 = n => String(n|0).padStart(2,'0');
+      list.innerHTML = slots.map((slot, i) => {
+        const isActive = settings.scheduleEnabled && active && active.id === slot.id;
+        const borderColor = isActive ? '#2ecc71' : '#1a3a1a';
+        const a = slot.actions || {};
+        return `<div class="bf-sch-slot" data-idx="${i}" style="border:1px solid ${borderColor}">
+          <div class="bf-sch-row1">
+            <label class="bf-bot-checkbox" style="margin-bottom:0">
+              <input type="checkbox" class="bf-sch-enabled" ${slot.enabled?'checked':''}>
+            </label>
+            <span class="bf-sch-lbl">Start</span>
+            <input type="number" class="bf-bot-input bf-sch-sh" value="${pad2(slot.startH)}" min="0" max="23">
+            <span>:</span>
+            <input type="number" class="bf-bot-input bf-sch-sm" value="${pad2(slot.startM)}" min="0" max="59">
+            <span class="bf-sch-lbl">End</span>
+            <input type="number" class="bf-bot-input bf-sch-eh" value="${pad2(slot.endH)}" min="0" max="23">
+            <span>:</span>
+            <input type="number" class="bf-bot-input bf-sch-em" value="${pad2(slot.endM)}" min="0" max="59">
+            <button type="button" class="bf-sch-del" title="Remove slot">✕</button>
+          </div>
+          <div class="bf-sch-row2">
+            <span class="bf-sch-actions-lbl">Actions:</span>
+            <label class="bf-sch-act"><input type="checkbox" class="bf-sch-a" data-act="hunt"     ${a.hunt    ?'checked':''}> Hunt</label>
+            <label class="bf-sch-act"><input type="checkbox" class="bf-sch-a" data-act="story"    ${a.story   ?'checked':''}> Story</label>
+            <label class="bf-sch-act"><input type="checkbox" class="bf-sch-a" data-act="pvp"      ${a.pvp     ?'checked':''}> PvP</label>
+            <label class="bf-sch-act"><input type="checkbox" class="bf-sch-a" data-act="henchman" ${a.henchman?'checked':''} title="Henchman vs Henchman — runs only when PvP is unchecked on this slot (mutually exclusive at runtime)."> Henchman</label>
+            <label class="bf-sch-act"><input type="checkbox" class="bf-sch-a" data-act="ruins"    ${a.ruins   ?'checked':''}> Ruins</label>
+            <label class="bf-sch-act"><input type="checkbox" class="bf-sch-a" data-act="grotto"   ${a.grotto  ?'checked':''}> Grotto</label>
+            <label class="bf-sch-act"><input type="checkbox" class="bf-sch-a" data-act="invdisc"  ${a.invdisc ?'checked':''} title="Inventory Cleanup — discards low-level drop items during this slot. Master toggle must be on."> Inv-Cleanup</label>
+          </div>
+        </div>`;
+      }).join('');
+
+      // Wire events per slot — load-modify-save on every edit so we always
+      // win the race against the blanket global-panel `change` listener
+      // (which fires saveGlobalSettings on any input change, including ours).
+      list.querySelectorAll('.bf-sch-slot').forEach(el => {
+        const idx = parseInt(el.dataset.idx, 10);
+
+        const patchSlot = (mutator) => {
+          loadSettings(fresh => {
+            const layout = getActiveScheduleLayout(fresh);
+            if (!layout || !Array.isArray(layout.slots)) return;
+            const sl = layout.slots[idx];
+            if (!sl) return;
+            mutator(sl);
+            saveSettings(fresh);
+            runScheduleCheck('edit');
+          });
+        };
+
+        el.querySelector('.bf-sch-enabled')?.addEventListener('change', (e) => {
+          e.stopPropagation();
+          patchSlot(sl => { sl.enabled = e.target.checked; });
+          // Re-render to update active-slot border highlighting
+          setTimeout(renderScheduleList, 50);
+        });
+        const clampH = v => Math.max(0, Math.min(23, parseInt(v) || 0));
+        const clampM = v => Math.max(0, Math.min(59, parseInt(v) || 0));
+        el.querySelector('.bf-sch-sh')?.addEventListener('change', e => {
+          e.stopPropagation();
+          const v = clampH(e.target.value); e.target.value = String(v).padStart(2,'0');
+          patchSlot(sl => { sl.startH = v; });
+        });
+        el.querySelector('.bf-sch-sm')?.addEventListener('change', e => {
+          e.stopPropagation();
+          const v = clampM(e.target.value); e.target.value = String(v).padStart(2,'0');
+          patchSlot(sl => { sl.startM = v; });
+        });
+        el.querySelector('.bf-sch-eh')?.addEventListener('change', e => {
+          e.stopPropagation();
+          const v = clampH(e.target.value); e.target.value = String(v).padStart(2,'0');
+          patchSlot(sl => { sl.endH = v; });
+        });
+        el.querySelector('.bf-sch-em')?.addEventListener('change', e => {
+          e.stopPropagation();
+          const v = clampM(e.target.value); e.target.value = String(v).padStart(2,'0');
+          patchSlot(sl => { sl.endM = v; });
+        });
+
+        el.querySelectorAll('.bf-sch-a').forEach(cb => {
+          cb.addEventListener('change', (e) => {
+            e.stopPropagation();
+            const actName = cb.dataset.act;
+            patchSlot(sl => {
+              if (!sl.actions) sl.actions = { hunt:false, story:false, pvp:false, henchman:false, ruins:false, grotto:false, invdisc:false };
+              sl.actions[actName] = e.target.checked;
+            });
+          });
+        });
+
+        el.querySelector('.bf-sch-del')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          loadSettings(fresh => {
+            const layout = getActiveScheduleLayout(fresh);
+            if (!layout || !Array.isArray(layout.slots)) return;
+            layout.slots.splice(idx, 1);
+            saveSettings(fresh);
+            runScheduleCheck('delete');
+            renderScheduleList();
+          });
+        });
+      });
+
+      renderScheduleStatus(settings);
+    });
   }
 
   // ── GLOBAL: GOLD SPENDING TICK ──────────────────────────────
@@ -2416,15 +3382,24 @@
     // MODE 2: Donate to clan
     if (settings.goldMode === 2) {
       const minDonate = settings.goldDonateMin || 10000;
-      if (spendable < minDonate && !settings.goldDonateAll) return false;
+      // v1.6.2 — Trigger rules:
+      //   • Threshold trigger: when gold >= minDonate → donate (anti-raid protection)
+      //   • Donate-all: when ON → donate regardless of threshold (aggressive idle mode)
+      // Either way, the AMOUNT donated is always `spendable` (= gold - keep).
+      // The min is a TRIGGER, not an amount cap.
+      const thresholdMet = gold >= minDonate;
+      const donateAll = !!settings.goldDonateAll;
+      if (!thresholdMet && !donateAll) return false;
 
       if (isClanPage()) {
         const donateInput = document.querySelector('input[name="donation"]');
         const donateBtn = document.querySelector('input[name="donate"]');
         if (donateInput && donateBtn) {
-          const amount = settings.goldDonateAll ? spendable : Math.min(spendable, minDonate);
+          const amount = spendable; // ALWAYS donate everything above Keep
+          if (amount <= 0) return false;
           donateInput.value = String(amount);
-          botLog('info', `💰 Gold: Darujem ${amount.toLocaleString()} zlata klanu`);
+          const reason = thresholdMet ? `≥${minDonate.toLocaleString()} threshold` : 'donate-all mode';
+          botLog('info', `💰 Gold: Donating ${amount.toLocaleString()} to clan (${reason})`);
           state.goldLastSpend = Date.now();
           state.goldNavigating = false;
           saveState(state);
@@ -2436,7 +3411,7 @@
 
       // Navigate to clan page
       if (!state.goldNavigating) {
-        botLog('info', '💰 Gold: Navigating to clan for donation');
+        botLog('info', `💰 Gold: Navigating to clan for donation (${gold.toLocaleString()} on hand)`);
         state.goldNavigating = true;
         saveState(state);
         botSetTimeout(() => { window.location.href = BASE + '/clan'; }, randomDelay(1000, 2000));
@@ -2446,6 +3421,237 @@
     }
 
     return false;
+  }
+
+  // ── GLOBAL: AUTO RECRUITMENT TICK (v1.6.5) ────────────────────
+  // Returns TRUE if it took an action (navigation/click), FALSE if no action.
+  //
+  // v1.6.5 split this into two halves so a single recruit "cycle" can survive
+  // a page navigation (a known bug in v1.6.4 — the cooldown was set BEFORE
+  // navigating, so after the /nourishing/index reload the next tick was blocked
+  // by the 60-second cooldown and the actual recruit step never ran).
+  //
+  // Flow:
+  //   1. globalRecruitTick(state, settings) does all gating (cooldown, trigger,
+  //      busy check). Decides whether to navigate or execute.
+  //   2. recruitExecuteOnNourishingPage(state, settings, opts) does the actual
+  //      parse/allocate/click work on the army page.
+  //   3. When we initiate a navigation, we set state.recruitNavigating=true.
+  //      On the next tick we see we're on /nourishing/index with that flag set,
+  //      we clear it and execute *bypassing* the cooldown (it's the same cycle).
+  //   4. Train-now manual button calls globalRecruitTick with skipGate=true so
+  //      both the cooldown and the trigger checks are bypassed for that cycle.
+  let _recruitRunning = false; // Re-entrancy guard while clicking buttons
+  function globalRecruitTick(state, settings, opts) {
+    opts = opts || {};
+    if (_centralStopActive) return false;
+    if (!ctxOk()) return false;
+    if (_recruitRunning) return false;
+
+    const now = Date.now();
+    const minCycleMs = 60 * 1000;
+
+    // ── Mid-cycle continuation ──────────────────────────────
+    // If we initiated a navigation and arrived on /nourishing/index, this
+    // is the *same* recruit cycle — execute the work without re-running gates.
+    if (state.recruitNavigating && PAGE.includes('/nourishing/index')) {
+      botLog('info', '⚔ Recruit: Arrived at Crimson Sanctuary — executing training');
+      state.recruitNavigating = false;
+      saveState(state);
+      return recruitExecuteOnNourishingPage(state, settings, { trigger: settings.recruitTrigger });
+    }
+
+    // ── Gating (skipped on manual override) ────────────────
+    if (!opts.skipGate) {
+      // 60s cycle cooldown
+      if (state.recruitLastCycle && (now - state.recruitLastCycle) < minCycleMs) return false;
+
+      // v1.6.4 migration: legacy value 'every' is now called 'extraction'.
+      let trigger = settings.recruitTrigger || 'idle';
+      if (trigger === 'every') trigger = 'extraction';
+
+      // Check if any main bot is "actively running" (not waiting/idle).
+      const huntEnabled = !!settings.huntEnabled;
+      const huntBusy = huntEnabled && state.huntState && state.huntState !== 'idle' && state.huntState !== 'done' && state.huntState !== 'waiting_orb';
+      const ruinsBusy = !!settings.ruinsEnabled && state.ruinsState && state.ruinsState !== 'idle' && state.ruinsState !== 'done' && state.ruinsState !== 'waiting_training';
+      const storyBusy = !!settings.storyEnabled && state.storyState && state.storyState !== 'idle' && state.storyState !== 'done' && state.storyState !== 'waiting_ap' && !state.storyRecovering;
+      const grottoBusy = !!settings.grottoEnabled && state.grottoState && state.grottoState !== 'idle' && state.grottoState !== 'done';
+      const pvpBusy = !!settings.pvpEnabled && state.pvpState && state.pvpState !== 'idle' && state.pvpState !== 'done' && state.pvpState !== 'waiting';
+      const henchmanBusy = !!settings.henchmanEnabled && state.henchmanState && state.henchmanState !== 'idle' && state.henchmanState !== 'done' && state.henchmanState !== 'waiting';
+      const anythingBusy = huntBusy || ruinsBusy || storyBusy || grottoBusy || pvpBusy || henchmanBusy;
+
+      const be = readBE();
+      let shouldRun = false;
+      if (trigger === 'idle') {
+        shouldRun = !anythingBusy;
+      } else if (trigger === 'extraction') {
+        shouldRun = !!state.extractionsThisSession && !state.recruitDoneThisExtraction;
+      } else if (trigger === 'threshold') {
+        const th = settings.recruitThreshold || 100;
+        shouldRun = (be !== null && be >= th) || PAGE.includes('/nourishing/index');
+      } else if (trigger === 'continuous') {
+        shouldRun = true;
+      }
+      if (!shouldRun) return false;
+
+      // Sanity: do we have any tiers enabled at all? Bail loudly if not so
+      // the user knows why nothing is happening.
+      const minTierCost = computeMinAffordableTierCost(settings);
+      if (minTierCost === null) {
+        // Log once per 5 minutes max to avoid spam
+        if (!state.recruitLastNoTiersLog || (now - state.recruitLastNoTiersLog) > 5*60*1000) {
+          botLog('warn', `⚔ Recruit: No tiers enabled (strategy=${settings.recruitStrategy || 'priority'}) — open the Hunt tab and check at least one tier`);
+          state.recruitLastNoTiersLog = now;
+          saveState(state);
+        }
+        return false;
+      }
+
+      // If we know BE and it's below the cheapest affordable tier (after reserve),
+      // don't even bother navigating.
+      if (be !== null) {
+        const reserve = parseInt(settings.recruitReserveBE) || 0;
+        if ((be - reserve) < minTierCost) {
+          // Quiet bail — this happens often during normal play; only log occasionally.
+          if (!state.recruitLastLowBeLog || (now - state.recruitLastLowBeLog) > 5*60*1000) {
+            botLog('info', `⚔ Recruit: BE=${be}, reserve=${reserve}, cheapest tier costs ${minTierCost} — waiting for more BE`);
+            state.recruitLastLowBeLog = now;
+            saveState(state);
+          }
+          return false;
+        }
+      }
+    }
+
+    // ── On /nourishing/index already — execute directly ────
+    if (PAGE.includes('/nourishing/index')) {
+      return recruitExecuteOnNourishingPage(state, settings, { trigger: settings.recruitTrigger, manual: !!opts.skipGate });
+    }
+
+    // ── Else: initiate navigation. Mark cycle so the cooldown
+    //    applies even if the navigation somehow fails. The
+    //    arriving tick will see recruitNavigating=true and skip
+    //    the cooldown to execute the work.
+    botLog('info', '⚔ Recruit: Navigating to Crimson Sanctuary');
+    state.recruitNavigating = true;
+    state.recruitLastCycle = now;
+    saveState(state);
+    botSetTimeout(() => { window.location.href = BASE + '/nourishing/index'; }, randomDelay(1000, 2000));
+    return true;
+  }
+
+  // Does the actual parse + allocate + click work on the /nourishing/index page.
+  // Caller has already decided we should run; this function does not re-check
+  // gates (the trigger / cooldown). It DOES update state.recruitLastCycle so
+  // the next cycle is throttled.
+  function recruitExecuteOnNourishingPage(state, settings, opts) {
+    opts = opts || {};
+    if (!isArmyPage()) {
+      botLog('warn', '⚔ Recruit: Page is /nourishing/index but army view not detected — skipping');
+      return false;
+    }
+
+    const now = Date.now();
+    const be = readBE();
+    const army = parseArmyStateFromDom(document);
+    _armyCache = { ts: now, data: army };
+    renderArmyStatus(army);
+    renderRecruitLiveStatus(army, be);
+
+    const beNow = (be !== null) ? be : 0;
+    const reserve = parseInt(settings.recruitReserveBE) || 0;
+    const spendBE = Math.max(0, beNow - reserve);
+    if (spendBE <= 0) {
+      botLog('info', `⚔ Recruit: BE=${beNow}, reserve=${reserve} — nothing to spend`);
+      state.recruitLastCycle = now;
+      saveState(state);
+      return false;
+    }
+
+    const allocation = computeRecruitAllocation(settings, spendBE);
+    const keys = Object.keys(allocation).filter(k => allocation[k] > 0);
+    if (keys.length === 0) {
+      botLog('warn', `⚔ Recruit: BE=${beNow} but allocation is empty — check strategy (${settings.recruitStrategy || 'priority'}) and tier checkboxes`);
+      state.recruitLastCycle = now;
+      saveState(state);
+      return false;
+    }
+
+    botLog('ok', `⚔ Recruit: BE=${beNow} → ${keys.map(k => 'T' + k + '×' + allocation[k]).join(', ')}`);
+    state.recruitLastCycle = now;
+    if (opts.trigger === 'extraction' || opts.trigger === 'every') {
+      state.recruitDoneThisExtraction = true;
+    }
+    saveState(state);
+    _recruitRunning = true;
+    autoRecruit(allocation, 0, keys, () => {
+      _recruitRunning = false;
+      // After clicking, refresh the army-status panel from live DOM.
+      botSetTimeout(() => {
+        const fresh = parseArmyStateFromDom(document);
+        _armyCache = { ts: Date.now(), data: fresh };
+        renderArmyStatus(fresh);
+        renderRecruitLiveStatus(fresh, readBE());
+      }, 500);
+    });
+    return true;
+  }
+
+  // Compute the cheapest BE cost across all enabled tiers in user's strategy.
+  // Returns null if no tiers are enabled.
+  function computeMinAffordableTierCost(settings) {
+    const strat = settings.recruitStrategy || 'priority';
+    let enabledTierIds = [];
+    if (strat === 'percent') {
+      const pct = settings.recruitPercent || {};
+      for (let n = 1; n <= 8; n++) if ((parseInt(pct[n]) || 0) > 0) enabledTierIds.push(n);
+    } else {
+      const en = settings.recruitEnabledTiers || {};
+      for (let n = 1; n <= 8; n++) if (en[n]) enabledTierIds.push(n);
+    }
+    if (enabledTierIds.length === 0) return null;
+    return Math.min.apply(null, enabledTierIds.map(n => UNIT_COSTS[n] || 99999));
+  }
+
+  // Given spendable BE and user settings, return formation = { '1': qty, ... }.
+  function computeRecruitAllocation(settings, spendBE) {
+    const strat = settings.recruitStrategy || 'priority';
+    const formation = {};
+
+    if (strat === 'percent') {
+      const pct = settings.recruitPercent || {};
+      const totalPct = Object.values(pct).reduce((s, v) => s + (parseInt(v) || 0), 0);
+      if (totalPct <= 0) return formation;
+      for (let n = 1; n <= 8; n++) {
+        const p = parseInt(pct[n]) || 0;
+        if (p <= 0) continue;
+        const allocBE = Math.floor(spendBE * p / 100);
+        const cost = UNIT_COSTS[n];
+        const qty = Math.floor(allocBE / cost);
+        if (qty > 0) formation[String(n)] = qty;
+      }
+      return formation;
+    }
+
+    // Priority strategy: drain BE into priority order, only enabled tiers.
+    const enabled = settings.recruitEnabledTiers || {};
+    const orderArr = (settings.recruitPriority && settings.recruitPriority.length)
+      ? settings.recruitPriority
+      : TIER_ORDER_DEFAULT;
+    let remaining = spendBE;
+    for (const tid of orderArr) {
+      const n = parseInt(String(tid).replace(/[^\d]/g, ''));
+      if (!n || n < 1 || n > 8) continue;
+      if (!enabled[n]) continue;
+      const cost = UNIT_COSTS[n];
+      if (remaining < cost) continue;
+      const qty = Math.floor(remaining / cost);
+      if (qty > 0) {
+        formation[String(n)] = qty;
+        remaining -= qty * cost;
+      }
+    }
+    return formation;
   }
 
   // ── GLOBAL: GRAVEYARD TICK ─────────────────────────────────
@@ -2499,6 +3705,241 @@
         botSetTimeout(() => { window.location.href = BASE + '/city/graveyard'; }, randomDelay(1000, 2000));
       }
     }
+  }
+
+  // ════════════════════════════════════════════════════════════════
+  // ── INVENTORY DISCARD TICK (v1.6.13, schedule integration v1.6.14) ─
+  // Auto-cleans the player's inventory by following the URL embedded in
+  // each item's "Zahodiť/Discard" button onclick attribute. Detection is
+  // language-independent: the marker is the literal string `discardItem`
+  // inside the onclick (it's the JS feature key, not translated text).
+  //
+  // Schedule integration (v1.6.14): When scheduleEnabled is true, this
+  // module respects the slot's `invdisc` action. `getEffectiveSettings`
+  // masks `invDiscardEnabled` to false outside windows where invdisc is
+  // checked, so this tick simply bails at the !settings.invDiscardEnabled
+  // gate — no special-casing needed here.
+  //
+  // Item-level requirement is parsed from the cell's textContent using a
+  // language-independent number-extraction pass that excludes:
+  //   - parenthesized content (the inventory count "1 kus(ov)" etc.)
+  //   - signed numbers (stat bonuses like +49 / -200)
+  //   - numbers that are part of a price (thousands-separator with .)
+  // The remaining bare integers leave exactly the level requirement
+  // ("Predpoklady: úroveň N") in practice, regardless of UI language.
+  //
+  // Hard-coded item-type whitelist guards against the game adding a
+  // discard button to elixirs/gifts in future updates.
+  // ════════════════════════════════════════════════════════════════
+  const INV_DISCARD_TYPES = new Set([1, 3, 4, 5, 6, 7, 8]);
+  // 1=weapon, 3=helmet, 4=armor, 5=item, 6=gloves, 7=boots, 8=shield
+  // EXCLUDED: 2=elixirs/potions, 11=gifts (never discard these even if a
+  // discard button somehow appears on them).
+
+  function _parseInventoryRow(td) {
+    // Returns { name, count, level, discardUrl, itemType, itemId } or null
+    if (!td) return null;
+    const discardBtn = td.querySelector('a.btn[onclick*="discardItem"]');
+    if (!discardBtn) return null;
+    const onclick = discardBtn.getAttribute('onclick') || '';
+    // buttonLeftAction can be quoted with ' or " — match both
+    const urlMatch = onclick.match(/buttonLeftAction\s*:\s*['"]([^'"]+)['"]/);
+    if (!urlMatch) return null;
+    const discardUrl = urlMatch[1];
+    const idMatch = discardUrl.match(/\/discardItem\/(\d+)\/(\d+)/);
+    if (!idMatch) return null;
+    const itemType = parseInt(idMatch[1]);
+    const itemId = parseInt(idMatch[2]);
+    if (!INV_DISCARD_TYPES.has(itemType)) return null; // hard whitelist
+
+    // Name from <strong>
+    const strong = td.querySelector('strong');
+    const name = strong ? strong.textContent.trim() : '?';
+
+    // Get text content for parsing
+    const text = td.textContent || '';
+
+    // Count: first integer inside FIRST parenthesized expression after the name.
+    // Works for Slovak "1 kus(ov)", English "1 piece(s)", German "1 Stück", etc.
+    let count = 1;
+    const countMatch = text.match(/\(([^()]*?(?:\([^)]*\)[^()]*?)?)\)/);
+    if (countMatch) {
+      const inner = countMatch[1];
+      const numMatch = inner.match(/(\d+)/);
+      if (numMatch) count = parseInt(numMatch[1]);
+    }
+
+    // Strip parenthesized content iteratively for level extraction
+    let stripped = text;
+    let prev;
+    do {
+      prev = stripped;
+      stripped = stripped.replace(/\([^()]*\)/g, ' ');
+    } while (stripped !== prev);
+
+    // Bare positive integers not preceded by +/-/. and not followed by .digit
+    // (the lookbehind/lookahead reject signed stats and dot-separated prices).
+    const numbers = [];
+    const re = /(?<![+\-.\d])(\d+)(?!\.\d)/g;
+    let m;
+    while ((m = re.exec(stripped)) !== null) {
+      numbers.push(parseInt(m[1]));
+    }
+    // The LAST bare integer in the cell is the level requirement
+    // ("Predpoklady: úroveň N" comes right before the buttons).
+    const level = numbers.length > 0 ? numbers[numbers.length - 1] : 0;
+
+    return { name, count, level, discardUrl, itemType, itemId };
+  }
+
+  function scanInventoryForDiscardable(maxLevel, minLevel) {
+    // Returns list of parsed rows where level is within [minLevel, maxLevel].
+    // Filters out anything outside the type whitelist (done in _parseInventoryRow).
+    const out = [];
+    const cells = document.querySelectorAll('#accordion td.inactive, #accordion td.active, #items td.inactive, #items td.active');
+    for (const td of cells) {
+      const row = _parseInventoryRow(td);
+      if (!row) continue;
+      if (row.level > maxLevel) continue;
+      if (row.level < (minLevel || 0)) continue;
+      out.push(row);
+    }
+    return out;
+  }
+
+  function _invDiscardIntervalMs(settings) {
+    const freq = settings.invDiscardFrequency || 'daily';
+    if (freq === 'daily')  return 24 * 60 * 60 * 1000;
+    if (freq === 'weekly') return 7 * 24 * 60 * 60 * 1000;
+    if (freq === 'custom') return Math.max(1, settings.invDiscardCustomHours || 12) * 60 * 60 * 1000;
+    return 24 * 60 * 60 * 1000;
+  }
+
+  function _invDiscardExpandAccordion() {
+    // The inventory uses a jQuery accordion (#accordion). Sections may be
+    // collapsed (display:none on the panel). querySelectorAll still finds
+    // collapsed items in the DOM, so we don't STRICTLY need to expand — but
+    // the in-page Discard buttons rely on showModal() which may want the
+    // section visible. We navigate via direct URL so visibility is irrelevant
+    // for the click itself; this is a noop kept for parity with gifts flow.
+  }
+
+  function inventoryDiscardTick(state, settings) {
+    if (_centralStopActive) return false;
+    if (!ctxOk()) return false;
+    if (!settings.invDiscardEnabled) {
+      // If the feature is disabled but a manual-pending flag is somehow set,
+      // clear it (defensive — e.g. user toggled off mid-run).
+      if (state.invDiscardManualPending) {
+        state.invDiscardManualPending = false;
+        saveState(state);
+      }
+      return false;
+    }
+
+    // Clear navigation flag once we arrive on profile
+    if (state.invDiscardNavigating && PAGE.includes('/profile')) {
+      state.invDiscardNavigating = false;
+      saveState(state);
+    }
+
+    const now = Date.now();
+
+    // Anti-spam between consecutive discard clicks (the game also reloads,
+    // so this is mostly belt-and-suspenders against rapid re-ticks).
+    const minSpacing = Math.max(800, settings.invDiscardDelayMs || 1500);
+    if (now - (state.invDiscardLastAction || 0) < minSpacing) return false;
+
+    // Schedule gate
+    const isManualMode = (settings.invDiscardMode || 'manual') === 'manual';
+    const manualPending = !!state.invDiscardManualPending;
+    let scheduleAllowsRun = false;
+    if (manualPending) {
+      // "Run Now" was clicked — bypass schedule
+      scheduleAllowsRun = true;
+    } else if (!isManualMode) {
+      // Auto mode: honor frequency
+      const intervalMs = _invDiscardIntervalMs(settings);
+      const lastRun = state.invDiscardLastRun || 0;
+      if (now - lastRun >= intervalMs) scheduleAllowsRun = true;
+    }
+    if (!scheduleAllowsRun) return false;
+
+    // On profile page — scan and discard
+    if (PAGE.includes('/profile')) {
+      _invDiscardExpandAccordion();
+      const maxLevel = settings.invDiscardMaxLevel || 1000;
+      const minLevel = settings.invDiscardMinLevel || 0;
+      const items = scanInventoryForDiscardable(maxLevel, minLevel);
+      if (items.length === 0) {
+        // Run complete — nothing to discard
+        const sessionN = state.invDiscardSessionCount || 0;
+        if (manualPending) {
+          if (sessionN === 0) {
+            botLog('ok', `🗑 Inventory: Nothing to discard (max lvl ${maxLevel})`);
+          } else {
+            botLog('ok', `🗑 Inventory: Cleanup complete — ${sessionN} item(s) discarded`);
+          }
+          state.invDiscardManualPending = false;
+        } else {
+          if (sessionN > 0) {
+            botLog('ok', `🗑 Inventory: Scheduled cleanup complete — ${sessionN} item(s) discarded`);
+          }
+        }
+        state.invDiscardLastRun = now;
+        state.invDiscardSessionCount = 0;
+        saveState(state);
+        _invDiscardRefreshUI(state, settings);
+        return true; // we did finish a cycle
+      }
+
+      // Discard the first matched item
+      const item = items[0];
+      botLog('info', `🗑 Discarding "${item.name}" (type ${item.itemType}, lvl ${item.level}, ${item.count} pcs left, ${items.length - 1} more queued)`);
+      state.invDiscardLastAction = now;
+      state.invDiscardTotalCount = (state.invDiscardTotalCount || 0) + 1;
+      state.invDiscardSessionCount = (state.invDiscardSessionCount || 0) + 1;
+      saveState(state);
+      _invDiscardRefreshUI(state, settings);
+      const delay = Math.max(800, settings.invDiscardDelayMs || 1500);
+      const jitter = Math.floor(delay * 0.4);
+      botSetTimeout(() => { window.location.href = item.discardUrl; }, randomDelay(delay - jitter, delay + jitter));
+      return true;
+    }
+
+    // Not on profile — navigate
+    if (!state.invDiscardNavigating) {
+      botLog('info', `🗑 Inventory Discard: Navigating to profile (${manualPending ? 'manual run' : 'scheduled'})`);
+      state.invDiscardNavigating = true;
+      saveState(state);
+      botSetTimeout(() => { window.location.href = BASE + '/profile/index'; }, randomDelay(800, 1500));
+      return true;
+    }
+    return false;
+  }
+
+  function _invDiscardRefreshUI(state, settings) {
+    // Updates the small status line under the Inventory Discard group.
+    const el = document.getElementById('bf-invdisc-status');
+    if (!el) return;
+    const total = state.invDiscardTotalCount || 0;
+    const session = state.invDiscardSessionCount || 0;
+    const lastRun = state.invDiscardLastRun || 0;
+    const lastStr = lastRun ? new Date(lastRun).toLocaleString() : 'never';
+    let nextStr = '—';
+    if ((settings.invDiscardMode || 'manual') === 'auto' && lastRun) {
+      const nextAt = lastRun + _invDiscardIntervalMs(settings);
+      nextStr = new Date(nextAt).toLocaleString();
+    }
+    let html = '';
+    html += `<div>Total discarded: <b style="color:#2ecc71">${total}</b>`;
+    if (session > 0) html += ` · this run: <b style="color:#e0a030">${session}</b>`;
+    html += `</div>`;
+    html += `<div>Last cycle: ${lastStr}</div>`;
+    if ((settings.invDiscardMode || 'manual') === 'auto') {
+      html += `<div>Next auto: ${nextStr}</div>`;
+    }
+    el.innerHTML = html;
   }
 
   // ── GIFTS BOT TICK ──────────────────────────────────────────
@@ -2839,11 +4280,13 @@
       const attackBtn = attackForm ? attackForm.querySelector('input[type="submit"], button[type="submit"]') : null;
 
       // Check whitelist — if the found player is whitelisted, skip
+      // v1.6.10 — use token-based matcher so "Tomler" matches "Upír Tomler"
+      // (regardless of server language).
       if (settings.pvpWhitelist) {
         const wl = settings.pvpWhitelist.split(',').map(n => n.trim().toLowerCase()).filter(Boolean);
         if (wl.length > 0) {
           const playerName = (document.querySelector('.reportTable td b, h2, .username, #profileName') || {}).textContent || '';
-          if (playerName && wl.includes(playerName.trim().toLowerCase())) {
+          if (matchPlayerByNameList(playerName, wl)) {
             botLog('info', `PvP: Player "${playerName.trim()}" is whitelisted → searching for another`);
             botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
             return;
@@ -2967,6 +4410,310 @@
     botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(800, 1500));
   }
 
+  // ── HENCHMAN VS HENCHMAN BOT TICK (v1.6.9) ───────────────────
+  // Uses the same /robbery/index page as PvP but submits a DIFFERENT form:
+  //   - Random search:    input[name="henchmanfightsearch"]
+  //   - Specific player:  shared namesearch form (same as PvP mode 3)
+  // On the search-result (player profile) page, clicks the henchman-attack
+  // button instead of the regular PvP "Attack" button. The form is:
+  //   form#henchman_fight  OR  form[action*="henchmanattack"]
+  // Costs 1 AP per fight, same as PvP. No min-HP, no "stronger/equal" mode,
+  // and no "lost souls" toggle (the henchman flow doesn't expose them).
+
+  // Find the random-search button on /robbery/index that triggers a henchman fight.
+  // Language-independent: matched by input name only.
+  function findHenchmanSearchButton() {
+    return document.querySelector('input[name="henchmanfightsearch"][type="submit"]');
+  }
+
+  // Find the henchman-attack form on the search-result (player profile) page.
+  // The page may also expose a regular PvP attack button — we ignore it here
+  // and target only the henchman one (form id "henchman_fight" / action contains
+  // "henchmanattack"). Both selectors are structural & language-independent.
+  function findHenchmanAttackForm() {
+    return document.querySelector('form#henchman_fight, form[action*="henchmanattack"]');
+  }
+
+  // v1.6.12 — Detect the "no victim found" state on the henchman hunt page.
+  // When the search returns nothing the game injects a distinctive bold
+  // status line:
+  //   <strong style="font-size:1.8em; color:#fff">{localized text}</strong>
+  // wrapped in a <div class="tdi">. We match by INLINE-STYLE FINGERPRINT
+  // (font-size:1.8em is reserved for "nothing found"-style status text
+  // across BF), NOT by text — works on any server/language. Without this
+  // check the bot would re-click henchmanfightsearch in an infinite loop,
+  // since the hunt page itself still contains the search button.
+  function hasNoHenchmanOpponentsMsg() {
+    const scope = document.querySelector('.wrap-content') || document.body;
+    const candidates = scope.querySelectorAll('strong[style*="font-size"]');
+    for (const el of candidates) {
+      const style = (el.getAttribute('style') || '').replace(/\s+/g, '').toLowerCase();
+      if (style.includes('font-size:1.8em')) return el;
+    }
+    return null;
+  }
+
+  // v1.6.10 — Language-independent player-name matcher.
+  // The search-result heading typically prefixes the displayed name with a
+  // race/title (e.g. "Upír Tomler" in SK, "Vampire Tomler" in EN), so a strict
+  // equality check on the full heading would never match. We tokenize on
+  // whitespace and check if any whitespace-separated token matches a list
+  // entry (case-insensitive). The user can type just "Tomler" and we'll
+  // match "Upír Tomler", "Vampire Tomler", "Werewolf Tomler", etc.
+  function matchPlayerByNameList(displayedName, list) {
+    if (!displayedName || !Array.isArray(list) || !list.length) return false;
+    const tokens = String(displayedName).trim().toLowerCase().split(/\s+/);
+    if (!tokens.length) return false;
+    for (const raw of list) {
+      const n = String(raw || '').trim().toLowerCase();
+      if (n && tokens.includes(n)) return true;
+    }
+    return false;
+  }
+
+  function henchmanTick(state, settings) {
+    if (_centralStopActive) return;
+    if (!ctxOk() || !settings.henchmanEnabled || state.henchmanState === 'done') return;
+    // Mutual exclusivity safeguard — pvpTick handles PvP; this only runs when PvP is off.
+    if (settings.pvpEnabled) return;
+
+    const ap = readAP();
+
+    // Check AP — need at least 1 AP for a henchman fight
+    if (ap.current !== null && ap.current < 1) {
+      botLog('warn', `Henchman: AP ${ap.current} — not enough AP`);
+      botSetTimeout(() => { loadState(st => { loadSettings(se => { henchmanTick(st, se); }); }); }, randomDelay(60000, 120000));
+      return;
+    }
+
+    // v1.6.12 — Cooldown gate. Honors `henchmanNextAttack` regardless of
+    // the Smart Break checkbox: Smart Break sets it after each fight, AND
+    // the new "no opponents found" guard (in the isPvPHuntPage branch
+    // below) sets it when the search returns empty — so we always need
+    // to respect it, even if Smart Break is off.
+    if (state.henchmanNextAttack && state.henchmanNextAttack > Date.now()) {
+      const waitMs = state.henchmanNextAttack - Date.now();
+      const reason = (state.henchmanState === 'waiting') ? 'No-opponents cooldown' : 'Smart break';
+      botLog('info', `Henchman: ${reason} – Next attack in ${Math.ceil(waitMs/60000)} min`);
+      botSetTimeout(() => { loadState(st => { loadSettings(se => { henchmanTick(st, se); }); }); }, Math.min(waitMs + 1000, 300000));
+      return;
+    }
+    // Cooldown elapsed but state is still 'waiting' — drop back to
+    // 'navigating' so the rest of the tick can proceed.
+    if (state.henchmanState === 'waiting') {
+      state.henchmanState = 'navigating';
+      saveState(state);
+    }
+
+    // ── On battle result page — parse result and go back ──
+    if (isPvPBattleResultPage()) {
+      const reportResult = document.querySelector('#reportResult, .reportResult, .combatResultHeader');
+      const won = reportResult ? (
+        reportResult.classList.contains('resultVictory') ||
+        reportResult.classList.contains('won') ||
+        !!reportResult.querySelector('.victory, img[src*="victory"], img[src*="win"]')
+      ) : false;
+      const wonFallback = !won && !!document.querySelector('.reportTable .winner, .report-winner');
+      const isWin = won || wonFallback;
+      if (isWin) state.henchmanKills = (state.henchmanKills || 0) + 1;
+      else state.henchmanDeaths = (state.henchmanDeaths || 0) + 1;
+
+      if (settings.henchmanSmartBreak) {
+        const delay = (settings.henchmanDelay + (Math.random() * 2 - 1) * settings.henchmanMargin) * 60 * 1000;
+        state.henchmanNextAttack = Date.now() + Math.max(delay, 60000);
+      }
+      saveState(state);
+      botLog(isWin ? 'ok' : 'warn', `Henchman: ${isWin ? 'Win' : 'Loss'} (${state.henchmanKills}W/${state.henchmanDeaths}L)`);
+      updateHenchmanUI(settings, state);
+
+      botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, getSpeedDelay(settings));
+      return;
+    }
+
+    // ── On search-result (player profile) page — click henchman attack ──
+    if (isPvPSearchResultPage()) {
+      // v1.6.10 semantics: BLACKLIST = skip these. Whitelist is NOT used here
+      // because in mode 2 ("Whitelist only") we already used namesearch on a
+      // whitelisted name, so the result IS a whitelisted player by definition.
+      // In mode 1 ("Anyone"), filter out anyone on the blacklist.
+      if (settings.henchmanMode !== 2 && settings.henchmanMode !== '2' &&
+          settings.henchmanBlacklist) {
+        const bl = settings.henchmanBlacklist.split(',').map(n => n.trim().toLowerCase()).filter(Boolean);
+        if (bl.length > 0) {
+          const playerName = (document.querySelector('.reportTable td b, h2, .username, #profileName') || {}).textContent || '';
+          if (matchPlayerByNameList(playerName, bl)) {
+            botLog('info', `Henchman: Player "${playerName.trim()}" is blacklisted → searching for another`);
+            botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
+            return;
+          }
+        }
+      }
+
+      const attackForm = findHenchmanAttackForm();
+      const attackBtn = attackForm ? attackForm.querySelector('button[type="submit"], button[type="button"], input[type="submit"]') : null;
+
+      if (attackBtn) {
+        // v1.6.11 — Detect "own race" / cross-race confirmation flow:
+        // For same-race targets the game replaces the normal submit button
+        // with a `type="button"` whose onclick opens a confirmation modal
+        // (showModal('confirmModal', { buttonLeftAction: $('#henchman_fight').submit() })).
+        // Detection is purely structural — the onclick attribute string
+        // contains "confirmModal" (or "showModal") regardless of UI language.
+        const onclickAttr = attackBtn.getAttribute('onclick') || '';
+        const isOwnRaceBtn =
+          (attackBtn.getAttribute('type') || '').toLowerCase() === 'button' &&
+          /confirmModal|showModal/i.test(onclickAttr);
+
+        if (isOwnRaceBtn && !settings.henchmanAttackOwnRace) {
+          botLog('info', 'Henchman: Same-race target detected → skipping (enable "Attack own race" to fight)');
+          botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
+          return;
+        }
+
+        state.henchmanState = 'attacking';
+        saveState(state);
+
+        if (isOwnRaceBtn) {
+          botLog('info', 'Henchman: Same-race target → Attacking with modal confirm!');
+          botSetTimeout(() => {
+            attackBtn.click();
+            // After the modal renders, click the confirm button. The modal
+            // uses a stable id #confirmModal_buttonLeft (same scheme as the
+            // blood-essence extraction modal we already handle elsewhere).
+            // We retry a few times in case the modal is slow to appear.
+            let tries = 0;
+            const tryConfirm = () => {
+              if (_centralStopActive) return;
+              const confirmBtn = document.getElementById('confirmModal_buttonLeft');
+              if (confirmBtn) {
+                confirmBtn.click();
+                botLog('ok', 'Henchman: Confirmed same-race attack modal');
+              } else if (tries++ < 8) {
+                botSetTimeout(tryConfirm, 250);
+              } else {
+                botLog('warn', 'Henchman: Confirm modal did not appear within timeout');
+              }
+            };
+            botSetTimeout(tryConfirm, 600);
+          }, randomDelay(500, 1200));
+        } else {
+          botLog('info', 'Henchman: Found opponent → Attacking!');
+          botSetTimeout(() => {
+            attackBtn.click();
+            // Safety net: if the game unexpectedly shows a confirm modal
+            // anyway, react according to the user's setting.
+            botSetTimeout(() => {
+              if (_centralStopActive) return;
+              const confirmBtn = document.getElementById('confirmModal_buttonLeft');
+              const closeLink  = document.querySelector('a.close-btn[onclick*="confirmModal"]');
+              if (!confirmBtn && !closeLink) return; // no modal — proceed normally
+              if (settings.henchmanAttackOwnRace) {
+                if (confirmBtn) { confirmBtn.click(); botLog('ok', 'Henchman: Confirmed unexpected modal'); }
+              } else {
+                if (closeLink) closeLink.click();
+                botLog('info', 'Henchman: Unexpected modal closed (own-race attack disabled)');
+                botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(800, 1500));
+              }
+            }, 1200);
+          }, randomDelay(500, 1200));
+        }
+        return;
+      }
+
+      // No henchman attack button — opponent might be on a "search again" page
+      // (e.g. profile shown without a fight option). Re-search.
+      botLog('warn', 'Henchman: Henchman attack button not found → searching again');
+      botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1500, 3000));
+      return;
+    }
+
+    // ── On /robbery/index — submit the correct form for henchman fight ──
+    if (isPvPHuntPage()) {
+      // v1.6.12 — No-opponents guard. Two signals, OR-ed together:
+      //   (a) hasNoHenchmanOpponentsMsg() — the distinctive bold "no victim"
+      //       status text the game shows after an empty search;
+      //   (b) state.henchmanState === 'hunting' — we just clicked the
+      //       search button and landed back on the hunt page (instead of
+      //       navigating to a search-result profile), which structurally
+      //       also indicates no opponents. This is the fallback for cases
+      //       where the indicator markup ever changes.
+      // Either signal → arm a cooldown (using Smart Break delay if enabled,
+      // else 3–5 min default) and bail out, so we don't burn cycles
+      // re-clicking the search button forever.
+      const noOppEl = hasNoHenchmanOpponentsMsg();
+      const stuckInHunt = (state.henchmanState === 'hunting');
+      if (noOppEl || stuckInHunt) {
+        let cooldownMs;
+        if (settings.henchmanSmartBreak) {
+          cooldownMs = (settings.henchmanDelay + (Math.random() * 2 - 1) * settings.henchmanMargin) * 60 * 1000;
+          cooldownMs = Math.max(cooldownMs, 60000);
+        } else {
+          // Default 3–5 min cooldown when Smart Break is off — long enough
+          // not to hammer the server, short enough to resume promptly.
+          cooldownMs = randomDelay(3 * 60 * 1000, 5 * 60 * 1000);
+        }
+        state.henchmanState = 'waiting';
+        state.henchmanNextAttack = Date.now() + cooldownMs;
+        saveState(state);
+        const why = noOppEl ? 'no opponent found' : 'search returned no result';
+        botLog('warn', `Henchman: ${why} — cooldown ${Math.ceil(cooldownMs/60000)} min`);
+        updateHenchmanUI(settings, state);
+        botSetTimeout(() => { loadState(st => { loadSettings(se => { henchmanTick(st, se); }); }); }, Math.min(cooldownMs + 1000, 300000));
+        return;
+      }
+
+      // MODE 2 (v1.6.10): Whitelist only — attack ONLY players from the
+      // whitelist, using the shared namesearch form. Blacklist is ignored
+      // here since the user has explicitly chosen these targets.
+      if (settings.henchmanMode === 2 || settings.henchmanMode === '2') {
+        const names = (settings.henchmanWhitelist || '').split(',').map(n => n.trim()).filter(Boolean);
+        if (names.length > 0) {
+          const nameForm = findPvPNameSearchForm();
+          if (nameForm) {
+            const targetName = names[Math.floor(Math.random() * names.length)];
+            const nameInput = nameForm.querySelector('input[type="text"]');
+            if (nameInput) {
+              nameInput.value = targetName;
+              state.henchmanState = 'hunting';
+              saveState(state);
+              botLog('info', `Henchman: Searching for whitelisted player "${targetName}" (namesearch)`);
+              botSetTimeout(() => {
+                const submitBtn = nameForm.querySelector('input[name="namesearch"][type="submit"], input[type="submit"], button[type="submit"]');
+                if (submitBtn) submitBtn.click();
+                else nameForm.submit();
+              }, randomDelay(500, 1200));
+              return;
+            }
+          }
+          botLog('warn', 'Henchman: Namesearch form not found');
+        } else {
+          botLog('warn', 'Henchman: Whitelist is empty — enter player names to attack');
+        }
+        return;
+      }
+
+      // MODE 1: Random henchman search — click henchmanfightsearch button.
+      // Blacklist filtering happens on the result page above.
+      const searchBtn = findHenchmanSearchButton();
+      if (searchBtn) {
+        state.henchmanState = 'hunting';
+        saveState(state);
+        botLog('info', 'Henchman: Searching for opponent (random) [henchmanfightsearch]');
+        botSetTimeout(() => { searchBtn.click(); }, randomDelay(500, 1200));
+        return;
+      }
+
+      botLog('warn', 'Henchman: henchmanfightsearch button not found on /robbery/index page');
+      return;
+    }
+
+    // Not on hunt page — navigate there
+    botLog('info', 'Henchman: Navigating → /robbery/index');
+    state.henchmanState = 'navigating';
+    saveState(state);
+    botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(800, 1500));
+  }
+
   // ── SPEED HELPER ────────────────────────────────────────────
   function getSpeedDelay(settings) {
     const mode = settings.speedMode || 'normal';
@@ -2999,6 +4746,13 @@
       settings.graveyardMinAP = parseInt(document.getElementById('bf-graveyard-minap')?.value) || 5;
       settings.graveyardWorkTimeHP = parseInt(document.getElementById('bf-graveyard-worktime-hp')?.value) || 2;
       settings.graveyardMinHP = parseInt(document.getElementById('bf-graveyard-minhp')?.value) || 20;
+      // ── Inventory Discard / Cleanup (v1.6.13) ──
+      settings.invDiscardEnabled = document.getElementById('bf-invdisc-enabled')?.checked ?? false;
+      settings.invDiscardMode = document.getElementById('bf-invdisc-mode')?.value || 'manual';
+      settings.invDiscardFrequency = document.getElementById('bf-invdisc-freq')?.value || 'daily';
+      settings.invDiscardCustomHours = Math.max(1, parseInt(document.getElementById('bf-invdisc-custom-hours')?.value) || 12);
+      settings.invDiscardMaxLevel = Math.max(1, parseInt(document.getElementById('bf-invdisc-maxlvl')?.value) || 1000);
+      settings.invDiscardMinLevel = Math.max(0, parseInt(document.getElementById('bf-invdisc-minlvl')?.value) || 0);
       settings.speedMode = document.querySelector('input[name="bf-speed"]:checked')?.value || 'normal';
       settings.speedCustom = parseFloat(document.getElementById('bf-speed-custom-val')?.value) || 2.0;
       settings.speedRandomizer = document.getElementById('bf-speed-randomizer')?.checked ?? false;
@@ -3010,20 +4764,16 @@
       settings.potionBlood = document.getElementById('bf-potion-blood')?.checked ?? false;
       settings.potionAutoBuy = document.getElementById('bf-potion-autobuy')?.checked ?? false;
       settings.scheduleEnabled = document.getElementById('bf-schedule-enabled')?.checked ?? false;
-      settings.scheduleIntervals = [];
-      for (let i = 0; i < 5; i++) {
-        settings.scheduleIntervals.push({
-          enabled: document.querySelector(`.bf-sched-cb[data-si="${i}"]`)?.checked ?? false,
-          start: document.querySelector(`.bf-sched-start[data-si="${i}"]`)?.value || '',
-          end: document.querySelector(`.bf-sched-end[data-si="${i}"]`)?.value || '',
-        });
-      }
+      // scheduleSlots are persisted directly by add/remove/edit handlers (renderScheduleList).
+      // We re-read the current settings to preserve the existing slot list.
+      // (DEFAULT_SETTINGS sets [], but if user has slots configured, we keep them.)
       settings.autoEnrollClanWar = document.getElementById('bf-auto-clan-war')?.checked ?? false;
       settings.hideGameforgeBar = document.getElementById('bf-hide-gf-bar')?.checked ?? false;
       settings.fixedInfobar = document.getElementById('bf-fixed-infobar')?.checked ?? false;
       settings.hideEventPanel = document.getElementById('bf-hide-event')?.checked ?? false;
       settings.backgroundRefresh = document.getElementById('bf-bg-refresh')?.checked ?? false;
       settings.backgroundRefreshInterval = parseInt(document.getElementById('bf-bg-refresh-interval')?.value) || 60;
+      settings.backgroundRefreshRandomize = parseInt(document.getElementById('bf-bg-refresh-rand')?.value) || 0;
       saveSettings(settings);
     });
   }
@@ -3047,6 +4797,19 @@
     const gma = document.getElementById('bf-graveyard-minap'); if (gma) gma.value = settings.graveyardMinAP || 5;
     const gwth = document.getElementById('bf-graveyard-worktime-hp'); if (gwth) gwth.value = settings.graveyardWorkTimeHP || 2;
     const gmh = document.getElementById('bf-graveyard-minhp'); if (gmh) gmh.value = settings.graveyardMinHP || 20;
+    // ── Inventory Discard / Cleanup (v1.6.13) ──
+    const ide = document.getElementById('bf-invdisc-enabled'); if (ide) ide.checked = !!settings.invDiscardEnabled;
+    const idm = document.getElementById('bf-invdisc-mode'); if (idm) idm.value = settings.invDiscardMode || 'manual';
+    const idf = document.getElementById('bf-invdisc-freq'); if (idf) idf.value = settings.invDiscardFrequency || 'daily';
+    const idch = document.getElementById('bf-invdisc-custom-hours'); if (idch) idch.value = settings.invDiscardCustomHours || 12;
+    const idmax = document.getElementById('bf-invdisc-maxlvl'); if (idmax) idmax.value = settings.invDiscardMaxLevel || 1000;
+    const idmin = document.getElementById('bf-invdisc-minlvl'); if (idmin) idmin.value = settings.invDiscardMinLevel || 0;
+    const idPanel = document.getElementById('bf-invdisc-panel');
+    if (idPanel) idPanel.style.display = settings.invDiscardEnabled ? '' : 'none';
+    const idAuto = document.getElementById('bf-invdisc-auto-panel');
+    if (idAuto) idAuto.style.display = (settings.invDiscardMode || 'manual') === 'auto' ? '' : 'none';
+    const idCustom = document.getElementById('bf-invdisc-custom-row');
+    if (idCustom) idCustom.style.display = ((settings.invDiscardMode || 'manual') === 'auto' && (settings.invDiscardFrequency || 'daily') === 'custom') ? '' : 'none';
     // Speed
     const speedRadio = document.getElementById('bf-speed-' + (settings.speedMode || 'normal'));
     if (speedRadio) speedRadio.checked = true;
@@ -3061,20 +4824,18 @@
     const pm = document.getElementById('bf-potion-medium'); if (pm) pm.checked = !!settings.potionMediumHealing;
     const pb = document.getElementById('bf-potion-blood'); if (pb) pb.checked = !!settings.potionBlood;
     const pab = document.getElementById('bf-potion-autobuy'); if (pab) pab.checked = !!settings.potionAutoBuy;
-    // Schedule
+    // Schedule (v1.6.7 — dynamic list)
     const se = document.getElementById('bf-schedule-enabled'); if (se) se.checked = !!settings.scheduleEnabled;
-    (settings.scheduleIntervals || []).forEach((si, i) => {
-      const cb = document.querySelector(`.bf-sched-cb[data-si="${i}"]`); if (cb) cb.checked = !!si.enabled;
-      const st = document.querySelector(`.bf-sched-start[data-si="${i}"]`); if (st) st.value = si.start || '';
-      const en = document.querySelector(`.bf-sched-end[data-si="${i}"]`); if (en) en.value = si.end || '';
-    });
+    renderScheduleList();
     const acw = document.getElementById('bf-auto-clan-war'); if (acw) acw.checked = !!settings.autoEnrollClanWar;
     const hgf = document.getElementById('bf-hide-gf-bar'); if (hgf) hgf.checked = !!settings.hideGameforgeBar;
     const fib = document.getElementById('bf-fixed-infobar'); if (fib) fib.checked = !!settings.fixedInfobar;
     const hep = document.getElementById('bf-hide-event'); if (hep) hep.checked = !!settings.hideEventPanel;
     const bgr = document.getElementById('bf-bg-refresh'); if (bgr) bgr.checked = !!settings.backgroundRefresh;
     const bri = document.getElementById('bf-bg-refresh-interval'); if (bri) bri.value = settings.backgroundRefreshInterval || 60;
-    const brl = document.getElementById('bf-bg-refresh-label'); if (brl) brl.textContent = (settings.backgroundRefreshInterval || 60) + ' min';
+    const brr = document.getElementById('bf-bg-refresh-rand'); if (brr) brr.value = settings.backgroundRefreshRandomize ?? 5;
+    const brPanel = document.getElementById('bf-bg-refresh-panel');
+    if (brPanel) brPanel.style.display = settings.backgroundRefresh ? '' : 'none';
   }
 
   // ── UI UPDATE FUNCTIONS ─────────────────────────────────────
@@ -3121,6 +4882,24 @@
     if (hpEl) hpEl.textContent = hpPct !== null ? `${hpPct}%` : '–';
   }
 
+  // Henchman vs Henchman UI refresh (v1.6.9) — mirrors updatePvPUI for the
+  // separate henchman block. AP/HP cells are shared with PvP at the top of
+  // the tab so we don't refresh them again here.
+  function updateHenchmanUI(settings, state) {
+    const btn = document.getElementById('bf-henchman-toggle');
+    const status = document.getElementById('bf-henchman-status');
+    if (btn) {
+      btn.textContent = settings.henchmanEnabled ? '⏸ Stop Henchman Bot' : '▶ Start Henchman Bot';
+      btn.style.borderColor = settings.henchmanEnabled ? '#e74c3c' : '';
+    }
+    if (status) {
+      status.textContent = settings.henchmanEnabled ? `Active` : 'Disabled';
+      status.style.color = settings.henchmanEnabled ? '#2ecc71' : '';
+    }
+    const winsEl = document.getElementById('bf-henchman-wins'); if (winsEl) winsEl.textContent = state.henchmanKills || 0;
+    const lossEl = document.getElementById('bf-henchman-losses'); if (lossEl) lossEl.textContent = state.henchmanDeaths || 0;
+  }
+
   function updateGiftsUI(settings, state) {
     const btn = document.getElementById('bf-gifts-toggle');
     const status = document.getElementById('bf-gifts-status');
@@ -3154,19 +4933,31 @@
         <button id="bf-bl-close" style="background:none;border:none;cursor:pointer;font-size:0.7rem;color:#777">✕</button>
       </div>
       <div class="bf-bl-tabs">
-        <div class="bf-bl-tab active" data-bltab="ruins">⚔ Ruins</div>
+        <div class="bf-bl-tab active" data-bltab="ruins-preset">⚔ Ruins (preset)</div>
+        <div class="bf-bl-tab" data-bltab="ruins-new">⚔ Ruins (new)</div>
         <div class="bf-bl-tab" data-bltab="essence">🩸 Essence</div>
       </div>
-      <div class="bf-bl-tab-body" id="bf-bl-ruins-body">
+      <div class="bf-bl-tab-body" id="bf-bl-ruins-preset-body">
         <div style="display:flex;gap:4px;padding:4px 6px;align-items:center">
-          <select id="bf-bl-filter" style="background:#111;color:#4caf50;border:1px solid #1a3a1a;font-size:0.56rem;padding:1px 3px;border-radius:3px;flex:1">
+          <select id="bf-bl-filter-preset" style="background:#111;color:#4caf50;border:1px solid #1a3a1a;font-size:0.56rem;padding:1px 3px;border-radius:3px;flex:1">
             <option value="all">All levels</option>
           </select>
-          <button id="bf-bl-export" title="Export CSV" style="background:none;border:none;cursor:pointer;font-size:0.6rem;color:#4caf50">📥</button>
-          <button id="bf-bl-clear" title="Clear" style="background:none;border:none;cursor:pointer;font-size:0.6rem;color:#e74c3c">🗑</button>
+          <button id="bf-bl-export-preset" title="Export CSV" style="background:none;border:none;cursor:pointer;font-size:0.6rem;color:#4caf50">📥</button>
+          <button id="bf-bl-clear-preset" title="Clear" style="background:none;border:none;cursor:pointer;font-size:0.6rem;color:#e74c3c">🗑</button>
         </div>
-        <div id="bf-bl-summary" class="bf-bl-summary"></div>
-        <div id="bf-bl-list" class="bf-bl-list"></div>
+        <div id="bf-bl-summary-preset" class="bf-bl-summary"></div>
+        <div id="bf-bl-list-preset" class="bf-bl-list"></div>
+      </div>
+      <div class="bf-bl-tab-body" id="bf-bl-ruins-new-body" style="display:none">
+        <div style="display:flex;gap:4px;padding:4px 6px;align-items:center">
+          <select id="bf-bl-filter-new" style="background:#111;color:#4caf50;border:1px solid #1a3a1a;font-size:0.56rem;padding:1px 3px;border-radius:3px;flex:1">
+            <option value="all">All levels</option>
+          </select>
+          <button id="bf-bl-export-new" title="Export CSV" style="background:none;border:none;cursor:pointer;font-size:0.6rem;color:#4caf50">📥</button>
+          <button id="bf-bl-clear-new" title="Clear" style="background:none;border:none;cursor:pointer;font-size:0.6rem;color:#e74c3c">🗑</button>
+        </div>
+        <div id="bf-bl-summary-new" class="bf-bl-summary"></div>
+        <div id="bf-bl-list-new" class="bf-bl-list"></div>
       </div>
       <div class="bf-bl-tab-body" id="bf-bl-essence-body" style="display:none">
         <div style="display:flex;gap:4px;padding:4px 6px;align-items:center;justify-content:flex-end">
@@ -3183,7 +4974,7 @@
     toggle.addEventListener('click', () => {
       const open = panel.style.display !== 'none';
       panel.style.display = open ? 'none' : 'flex';
-      if (!open) { renderBattleLog(); renderEssenceLog(); }
+      if (!open) { renderBattleLog('preset'); renderBattleLog('new'); renderEssenceLog(); }
     });
     document.getElementById('bf-bl-close').addEventListener('click', () => { panel.style.display = 'none'; });
 
@@ -3193,38 +4984,38 @@
         panel.querySelectorAll('.bf-bl-tab').forEach(t => t.classList.remove('active'));
         tab.classList.add('active');
         const which = tab.getAttribute('data-bltab');
-        document.getElementById('bf-bl-ruins-body').style.display = which === 'ruins' ? 'flex' : 'none';
-        document.getElementById('bf-bl-essence-body').style.display = which === 'essence' ? 'flex' : 'none';
-        if (which === 'ruins') renderBattleLog();
-        if (which === 'essence') renderEssenceLog();
+        document.getElementById('bf-bl-ruins-preset-body').style.display = which === 'ruins-preset' ? 'flex' : 'none';
+        document.getElementById('bf-bl-ruins-new-body').style.display    = which === 'ruins-new'    ? 'flex' : 'none';
+        document.getElementById('bf-bl-essence-body').style.display      = which === 'essence'      ? 'flex' : 'none';
+        if (which === 'ruins-preset') renderBattleLog('preset');
+        if (which === 'ruins-new')    renderBattleLog('new');
+        if (which === 'essence')      renderEssenceLog();
       });
     });
 
-    // Ruins controls
-    document.getElementById('bf-bl-filter').addEventListener('change', () => renderBattleLog());
-    document.getElementById('bf-bl-clear').addEventListener('click', () => {
-      if (confirm('Clear ruins battle log?')) { sSet({ [SK('ruinsBattleLog')]: [] }); renderBattleLog(); }
-    });
-    document.getElementById('bf-bl-export').addEventListener('click', () => {
-      sGet([SK('ruinsBattleLog')], r => {
-        const log = r[SK('ruinsBattleLog')] || [];
-        if (!log.length) return;
-        const rows = [['Time','Level','Result','Enemy','Formation','Source','Losses','Gold','XP']];
-        log.forEach(e => {
-          rows.push([
-            new Date(e.ts).toLocaleString(), e.level,
-            e.won ? 'Victory' : 'Defeat', qtyToString(e.enemy || {}),
-            qtyToString(e.formation || {}), e.source || '?',
-            qtyToString(e.losses || {}), e.gold || 0, e.xp || 0,
-          ]);
+    // Ruins (preset) controls
+    document.getElementById('bf-bl-filter-preset').addEventListener('change', () => renderBattleLog('preset'));
+    document.getElementById('bf-bl-clear-preset').addEventListener('click', () => {
+      if (confirm('Clear preset battle log?')) {
+        sGet([SK('ruinsBattleLog')], r => {
+          const log = (r[SK('ruinsBattleLog')] || []).filter(e => !isPresetSource(e.source));
+          sSet({ [SK('ruinsBattleLog')]: log }, () => { renderBattleLog('preset'); renderBattleLog('new'); });
         });
-        const csv = rows.map(r => r.join(';')).join('\n');
-        const blob = new Blob([csv], { type: 'text/csv' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a'); a.href = url; a.download = `bf-battlelog-${SERVER_ID}${PLAYER_ID ? '-p' + PLAYER_ID : ''}.csv`; a.click();
-        URL.revokeObjectURL(url);
-      });
+      }
     });
+    document.getElementById('bf-bl-export-preset').addEventListener('click', () => exportBattleLogCsv('preset'));
+
+    // Ruins (new) controls
+    document.getElementById('bf-bl-filter-new').addEventListener('change', () => renderBattleLog('new'));
+    document.getElementById('bf-bl-clear-new').addEventListener('click', () => {
+      if (confirm('Clear new-formation battle log?')) {
+        sGet([SK('ruinsBattleLog')], r => {
+          const log = (r[SK('ruinsBattleLog')] || []).filter(e => isPresetSource(e.source));
+          sSet({ [SK('ruinsBattleLog')]: log }, () => { renderBattleLog('preset'); renderBattleLog('new'); });
+        });
+      }
+    });
+    document.getElementById('bf-bl-export-new').addEventListener('click', () => exportBattleLogCsv('new'));
 
     // Essence controls
     document.getElementById('bf-bl-ess-clear').addEventListener('click', () => {
@@ -3246,26 +5037,131 @@
       });
     });
 
-    // Populate ruins filter
+    // Populate ruins filters (both preset and new tabs)
     sGet([SK('ruinsBattleLog')], r => {
       const log = r[SK('ruinsBattleLog')] || [];
-      const lvls = [...new Set(log.map(e => e.level))].sort((a,b) => a - b);
-      const sel = document.getElementById('bf-bl-filter');
-      lvls.forEach(l => {
-        const opt = document.createElement('option');
-        opt.value = String(l); opt.textContent = `Level ${l}`;
-        sel.appendChild(opt);
+      ['preset', 'new'].forEach(kind => {
+        const sel = document.getElementById('bf-bl-filter-' + kind);
+        if (!sel) return;
+        const relevant = log.filter(e => kind === 'preset' ? isPresetSource(e.source) : !isPresetSource(e.source));
+        const lvls = [...new Set(relevant.map(e => e.level))].sort((a,b) => a - b);
+        lvls.forEach(l => {
+          const opt = document.createElement('option');
+          opt.value = String(l); opt.textContent = `Level ${l}`;
+          sel.appendChild(opt);
+        });
       });
     });
   }
 
-  function renderBattleLog() {
+  // ── BATTLE LOG HELPERS (v1.5.8) ────────────────────────────────
+  // A "preset" source is the exact-match preset hit. Everything else
+  // (SIM, SIM+WARM, DEEP-ST, DEEP-PAR, FAST-ST, FAST-PAR, …) is "new".
+  // Backwards compatible with v1.5.7 entries which only used 'PRESET'/'SIM'.
+  function isPresetSource(src) {
+    if (!src) return false;
+    return String(src).toUpperCase().startsWith('PRESET');
+  }
+
+  function exportBattleLogCsv(kind) {
     sGet([SK('ruinsBattleLog')], r => {
-      const log = r[SK('ruinsBattleLog')] || [];
-      const filterLvl = document.getElementById('bf-bl-filter')?.value || 'all';
+      const all = r[SK('ruinsBattleLog')] || [];
+      const log = all.filter(e => kind === 'preset' ? isPresetSource(e.source) : !isPresetSource(e.source));
+      if (!log.length) return;
+      const rows = [['Time','Level','Result','Enemy','Formation','Source','Losses','Gold','XP','Blood']];
+      log.forEach(e => {
+        rows.push([
+          new Date(e.ts).toLocaleString(), e.level,
+          e.won ? 'Victory' : 'Defeat', qtyToString(e.enemy || {}),
+          qtyToString(e.formation || {}), e.source || '?',
+          qtyToString(e.losses || {}), e.gold || 0, e.xp || 0, e.blood || 0,
+        ]);
+      });
+      const csv = rows.map(r => r.join(';')).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `bf-battlelog-${kind}-${SERVER_ID}${PLAYER_ID ? '-p' + PLAYER_ID : ''}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+  }
+
+  // ── ADD WINNING NEW ENTRY AS PRESET (manual save, v1.5.8) ────
+  // Reused by the "📥 Save as Ruins preset" button on each winning
+  // "new" entry. Same write semantics as the manual Add Preset flow.
+  function saveBattleEntryAsPreset(entry, cb) {
+    if (!entry || !entry.won) { if (cb) cb({ ok: false, reason: 'not a victory' }); return; }
+    const formation = {};
+    Object.keys(entry.formation || {}).forEach(k => {
+      const v = parseInt(entry.formation[k]) || 0;
+      if (v > 0) formation[k.toUpperCase()] = v;
+    });
+    if (!Object.keys(formation).length) { if (cb) cb({ ok: false, reason: 'empty formation' }); return; }
+    const enemyObj = {};
+    Object.keys(entry.enemy || {}).forEach(k => {
+      const v = parseInt(entry.enemy[k]) || 0;
+      if (v > 0) enemyObj[k.toUpperCase()] = v;
+    });
+    const fingerprint = Object.entries(enemyObj).sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) => `${k}:${v}`).join(',');
+    sGet([SK('ruinsPresets')], r => {
+      const presets = r[SK('ruinsPresets')] || {};
+      const lvl = String(entry.level);
+      if (!presets[lvl]) presets[lvl] = [];
+      const existed = presets[lvl].some(p => p.enemy === fingerprint);
+      presets[lvl] = presets[lvl].filter(p => p.enemy !== fingerprint);
+      presets[lvl].push({ enemy: fingerprint, formation });
+      sSet({ [SK('ruinsPresets')]: presets }, () => {
+        if (cb) cb({ ok: true, level: lvl, enemy: fingerprint, updated: existed });
+      });
+    });
+  }
+
+  // ── ADD WINNING NEW ENTRY AS SMART PRESET (manual save, v1.5.9) ──
+  // Writes to the simulator's Smart Preset library via BFPresets.updateLevelPreset.
+  // Smart preset is per-LAYER (no enemy fingerprint) — it acts as the warm-start
+  // template when bot.js or the simulator runs optimization without an exact
+  // ruins-preset match. We store the formation as concrete tier counts and
+  // mark confidence='yellow' since it comes from a single battle.
+  function saveBattleEntryAsSmartPreset(entry, cb) {
+    if (!entry || !entry.won) { if (cb) cb({ ok: false, reason: 'not a victory' }); return; }
+    if (!window.BFPresets || typeof window.BFPresets.updateLevelPreset !== 'function') {
+      if (cb) cb({ ok: false, reason: 'BFPresets unavailable' });
+      return;
+    }
+    const tiers = {};
+    Object.keys(entry.formation || {}).forEach(k => {
+      const v = parseInt(entry.formation[k]) || 0;
+      if (v > 0) tiers[k.toUpperCase()] = v;
+    });
+    if (!Object.keys(tiers).length) { if (cb) cb({ ok: false, reason: 'empty formation' }); return; }
+    const lvl = String(entry.level);
+    // Check if a preset already exists for this layer to set correct confidence
+    const cache = window.BFPresets.getCached ? (window.BFPresets.getCached() || {}) : {};
+    const existing = cache[lvl];
+    const preset = {
+      tiers: tiers,
+      confidence: existing && existing.confidence === 'green' ? 'green' : 'yellow',
+      note: 'Auto-imported from battle log on ' + new Date(entry.ts).toLocaleDateString('en-GB'),
+      lastUsed: Date.now(),
+    };
+    window.BFPresets.updateLevelPreset(lvl, preset, function (err) {
+      if (err) { if (cb) cb({ ok: false, reason: 'storage error' }); return; }
+      if (cb) cb({ ok: true, level: lvl, updated: !!existing });
+    });
+  }
+
+  function renderBattleLog(kind) {
+    kind = kind || 'preset';
+    sGet([SK('ruinsBattleLog')], r => {
+      const all = r[SK('ruinsBattleLog')] || [];
+      const log = all.filter(e => kind === 'preset' ? isPresetSource(e.source) : !isPresetSource(e.source));
+      const filterEl = document.getElementById('bf-bl-filter-' + kind);
+      const filterLvl = filterEl?.value || 'all';
       const filtered = filterLvl === 'all' ? log : log.filter(e => String(e.level) === filterLvl);
 
-      const sumEl = document.getElementById('bf-bl-summary');
+      const sumEl = document.getElementById('bf-bl-summary-' + kind);
       if (sumEl) {
         const wins = filtered.filter(e => e.won).length;
         const total = filtered.length;
@@ -3288,17 +5184,37 @@
         `;
       }
 
-      const listEl = document.getElementById('bf-bl-list');
+      const listEl = document.getElementById('bf-bl-list-' + kind);
       if (!listEl) return;
       const show = [...filtered].reverse().slice(0, 100);
       if (!show.length) {
         listEl.innerHTML = '<div style="color:#444;text-align:center;padding:10px;font-size:0.58rem">No records</div>';
         return;
       }
+      // Index in `all` (not filtered) so the Save button can find the right entry by ts+level+source.
       listEl.innerHTML = show.map(e => {
         const time = new Date(e.ts).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
         const date = new Date(e.ts).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' });
         const lossStr = Object.entries(e.losses || {}).filter(([,v]) => v > 0).map(([k,v]) => `<span style="color:#e07040">${k}:-${v}</span>`).join(' ');
+        // v1.5.9 — separate Ruins and Smart import flags. Each button is
+        // independent so the player can save to either or both libraries.
+        const isNew = (kind === 'new');
+        const wonNew = isNew && e.won;
+        const savedRuins = isNew && e.importedAsPreset;       // legacy flag = Ruins
+        const savedSmart = isNew && e.importedAsSmart;
+        const savedBadgeParts = [];
+        if (savedRuins) savedBadgeParts.push('Ruins');
+        if (savedSmart) savedBadgeParts.push('Smart');
+        const savedBadge = savedBadgeParts.length
+          ? `<div style="font-size:0.55rem;color:#2ecc71;margin-top:2px">✓ Saved as ${savedBadgeParts.join(' + ')}</div>`
+          : '';
+        const btnStyle = 'background:rgba(46,204,113,0.1);border:1px solid #27ae60;color:#2ecc71;font-family:Cinzel,serif;font-size:0.55rem;padding:2px 4px;border-radius:2px;cursor:pointer;flex:1;min-width:0';
+        const btnRuins = (wonNew && !savedRuins)
+          ? `<button class="bf-bl-save-preset" data-ts="${e.ts}" data-level="${e.level}" title="Save as Ruins preset" style="${btnStyle}">📥 Ruins preset</button>` : '';
+        const btnSmart = (wonNew && !savedSmart)
+          ? `<button class="bf-bl-save-smart" data-ts="${e.ts}" data-level="${e.level}" title="Save as Smart preset (simulator)" style="${btnStyle.replace('46,204,113','155,89,182').replace('#27ae60','#9b59b6').replace('#2ecc71','#bb84db')}">🧠 Smart preset</button>` : '';
+        const btnsRow = (btnRuins || btnSmart)
+          ? `<div style="display:flex;gap:4px;margin-top:3px">${btnRuins}${btnSmart}</div>` : '';
         return `<div class="bf-bl-entry ${e.won ? 'bf-bl-win' : 'bf-bl-loss'}">
           <div class="bf-bl-entry-top">
             <span class="bf-bl-time">${date} ${time}</span>
@@ -3316,8 +5232,54 @@
             ${e.xp ? ` ⭐${e.xp.toLocaleString()}` : ''}
             ${e.blood ? ` 🩸${e.blood.toLocaleString()}` : ''}
           </div>
+          ${savedBadge}
+          ${btnsRow}
         </div>`;
       }).join('');
+
+      // Wire up Save-as-Ruins-Preset buttons
+      listEl.querySelectorAll('.bf-bl-save-preset').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const ts = parseInt(btn.getAttribute('data-ts'));
+          const level = parseInt(btn.getAttribute('data-level'));
+          sGet([SK('ruinsBattleLog')], rr => {
+            const arr = rr[SK('ruinsBattleLog')] || [];
+            const entryIdx = arr.findIndex(x => x.ts === ts && x.level === level);
+            if (entryIdx < 0) { btn.textContent = '✗ Not found'; btn.style.color = '#e74c3c'; return; }
+            saveBattleEntryAsPreset(arr[entryIdx], res => {
+              if (!res || !res.ok) { btn.textContent = '✗ ' + (res?.reason || 'Failed'); btn.style.color = '#e74c3c'; return; }
+              arr[entryIdx].importedAsPreset = true;
+              sSet({ [SK('ruinsBattleLog')]: arr }, () => {
+                btn.textContent = res.updated ? '✓ Updated' : `✓ Saved L${res.level}`;
+                btn.style.background = 'rgba(46,204,113,0.25)';
+                botSetTimeout(() => renderBattleLog('new'), 800);
+              });
+            });
+          });
+        });
+      });
+
+      // v1.5.9 — Wire up Save-as-Smart-Preset buttons (simulator's warm-start library)
+      listEl.querySelectorAll('.bf-bl-save-smart').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const ts = parseInt(btn.getAttribute('data-ts'));
+          const level = parseInt(btn.getAttribute('data-level'));
+          sGet([SK('ruinsBattleLog')], rr => {
+            const arr = rr[SK('ruinsBattleLog')] || [];
+            const entryIdx = arr.findIndex(x => x.ts === ts && x.level === level);
+            if (entryIdx < 0) { btn.textContent = '✗ Not found'; btn.style.color = '#e74c3c'; return; }
+            saveBattleEntryAsSmartPreset(arr[entryIdx], res => {
+              if (!res || !res.ok) { btn.textContent = '✗ ' + (res?.reason || 'Failed'); btn.style.color = '#e74c3c'; return; }
+              arr[entryIdx].importedAsSmart = true;
+              sSet({ [SK('ruinsBattleLog')]: arr }, () => {
+                btn.textContent = res.updated ? '✓ Updated' : `✓ Saved L${res.level}`;
+                btn.style.background = 'rgba(155,89,182,0.25)';
+                botSetTimeout(() => renderBattleLog('new'), 800);
+              });
+            });
+          });
+        });
+      });
     });
   }
 
@@ -3380,7 +5342,7 @@
     panel.id = 'bf-bot-panel';
     panel.innerHTML = `
       <div id="bf-bot-header">
-        <span>🤖 BF Bot <span style="font-size:0.55rem;opacity:0.4;margin-left:4px">v0.9.4 · ${SERVER_ID}</span></span>
+        <span>🤖 BF Bot <span style="font-size:0.55rem;opacity:0.4;margin-left:4px">v1.6.13 · ${SERVER_ID}</span></span>
         <div style="display:flex;gap:4px;align-items:center">
           <span id="bf-player-badge" style="font-size:0.52rem;color:#9a7a5a;opacity:0.7">${PLAYER_ID ? '👤 #' + PLAYER_ID : ''}</span>
           <button id="bf-bot-pin" title="Pin panel (stays open after reload)">📌</button>
@@ -3410,7 +5372,7 @@
           <button class="bf-bot-btn bf-bot-toggle-top" id="bf-hunt-toggle">▶ Start Hunt Bot</button>
 
           <div class="bf-bot-status">
-            <span class="status-text">Stav:</span>
+            <span class="status-text">Status:</span>
             <span class="status-value" id="bf-hunt-status">Disabled</span>
           </div>
 
@@ -3493,53 +5455,119 @@
           </div>
 
           <div class="bf-bot-group">
-            <div class="bf-bot-group-title">⚔ Auto Recruitment</div>
+            <div class="bf-bot-group-title">⚔ Auto Recruitment
+              <button id="bf-recruit-refresh" title="Refresh army state" style="float:right;background:none;border:none;cursor:pointer;color:#5a7a4a;font-size:0.6rem;margin-left:4px">↻</button>
+            </div>
             <label class="bf-bot-checkbox">
               <input type="checkbox" id="bf-recruit-enabled">
               Auto-train units
+              <span class="bf-help-hint" title="Runs as a GLOBAL module (like Spend Gold).&#10;&#10;Works during idle/cooldown periods (yellow/white indicator) regardless of which main bot is active. Decoupled from Hunt — no longer requires extractions to fire.&#10;&#10;On every cycle the bot navigates to Crimson Sanctuary, parses live army state, and trains units per your strategy. 60-second minimum cycle.">?</span>
             </label>
+
+            <!-- Trigger -->
             <div class="bf-bot-row" style="margin-top:4px">
-              <span class="bf-bot-label" style="min-width:60px">Kedy:</span>
+              <span class="bf-bot-label" style="min-width:60px">When:</span>
               <select class="bf-bot-select" id="bf-recruit-trigger" style="flex:1">
-                <option value="every">After every extraction</option>
+                <option value="idle">Idle / cooldown (yellow & white)</option>
                 <option value="threshold">When BE ≥ threshold</option>
+                <option value="continuous">Continuous (every tick)</option>
+                <option value="extraction">After each extraction (legacy)</option>
               </select>
             </div>
             <div class="bf-bot-row" id="bf-recruit-threshold-row" style="display:none;margin-top:4px">
               <span class="bf-bot-label" style="min-width:60px">BE ≥</span>
               <input type="number" class="bf-bot-input" id="bf-recruit-threshold" value="100" min="10" style="width:70px">
             </div>
-            <div style="font-size:0.6rem;color:#aaa;margin:8px 0 4px 0">
-              Dividing the essence into units (%):
+
+            <!-- Strategy -->
+            <div class="bf-bot-row" style="margin-top:6px">
+              <span class="bf-bot-label" style="min-width:60px">Strategy:</span>
+              <select class="bf-bot-select" id="bf-recruit-strategy" style="flex:1">
+                <option value="priority">Priority order (drain top first)</option>
+                <option value="percent">Percent split</option>
+              </select>
             </div>
-            <div class="bf-recruit-unit-row" style="display:flex;align-items:center;gap:6px;margin:3px 0">
-              <span style="color:#ccc;font-size:0.6rem;min-width:90px">T1 (10 BE)</span>
-              <input type="number" class="bf-bot-input bf-recruit-pct" data-unit="1" min="0" max="100" value="0" style="width:50px">
-              <span style="color:#5a7a4a;font-size:0.6rem">%</span>
+
+            <!-- Reserve BE -->
+            <div class="bf-bot-row" style="margin-top:4px;align-items:center;flex-wrap:wrap;gap:4px">
+              <span class="bf-bot-label" style="min-width:60px">Reserve:</span>
+              <input type="number" class="bf-bot-input" id="bf-recruit-reserve" value="0" min="0" style="width:70px;flex:0 0 auto">
+              <span style="color:#5a7a4a;font-size:0.56rem">BE kept on hand</span>
+              <span class="bf-help-hint" title="Bot never spends below this amount of blood essence.&#10;&#10;Useful if you want to keep BE aside for a planned formation or for manual purchases.&#10;&#10;Example: Reserve = 200 → bot only spends BE above 200.">?</span>
             </div>
-            <div class="bf-recruit-unit-row" style="display:flex;align-items:center;gap:6px;margin:3px 0">
-              <span style="color:#ccc;font-size:0.6rem;min-width:90px">T2 (15 BE)</span>
-              <input type="number" class="bf-bot-input bf-recruit-pct" data-unit="2" min="0" max="100" value="0" style="width:50px">
-              <span style="color:#5a7a4a;font-size:0.6rem">%</span>
+
+            <!-- Strategy: PRIORITY panel -->
+            <div id="bf-recruit-priority-panel" style="margin-top:6px">
+              <div style="font-size:0.58rem;color:#aaa;margin-bottom:3px">
+                Enable tiers and reorder. Available BE drains into the top-most enabled tier first.
+              </div>
+              <div id="bf-recruit-priority-list">
+                <!-- Rows injected by renderRecruitPriorityRows() -->
+              </div>
             </div>
-            <div class="bf-recruit-unit-row" style="display:flex;align-items:center;gap:6px;margin:3px 0">
-              <span style="color:#ccc;font-size:0.6rem;min-width:90px">T3 (20 BE)</span>
-              <input type="number" class="bf-bot-input bf-recruit-pct" data-unit="3" min="0" max="100" value="0" style="width:50px">
-              <span style="color:#5a7a4a;font-size:0.6rem">%</span>
+
+            <!-- Strategy: PERCENT panel -->
+            <div id="bf-recruit-percent-panel" style="display:none;margin-top:6px">
+              <div style="font-size:0.58rem;color:#aaa;margin-bottom:3px">
+                Divide BE between tiers (%). Leftover BE rolls over to the next cycle.
+              </div>
+              <div class="bf-recruit-unit-row" style="display:flex;align-items:center;gap:6px;margin:2px 0">
+                <span style="color:#e0c068;font-size:0.6rem;min-width:90px"><b>T1</b> <span style="color:#5a7a4a">(10 BE)</span></span>
+                <input type="number" class="bf-bot-input bf-recruit-pct" data-unit="1" min="0" max="100" value="0" style="width:50px">
+                <span style="color:#5a7a4a;font-size:0.6rem">%</span>
+              </div>
+              <div class="bf-recruit-unit-row" style="display:flex;align-items:center;gap:6px;margin:2px 0">
+                <span style="color:#e0c068;font-size:0.6rem;min-width:90px"><b>T2</b> <span style="color:#5a7a4a">(15 BE)</span></span>
+                <input type="number" class="bf-bot-input bf-recruit-pct" data-unit="2" min="0" max="100" value="0" style="width:50px">
+                <span style="color:#5a7a4a;font-size:0.6rem">%</span>
+              </div>
+              <div class="bf-recruit-unit-row" style="display:flex;align-items:center;gap:6px;margin:2px 0">
+                <span style="color:#e0c068;font-size:0.6rem;min-width:90px"><b>T3</b> <span style="color:#5a7a4a">(20 BE)</span></span>
+                <input type="number" class="bf-bot-input bf-recruit-pct" data-unit="3" min="0" max="100" value="0" style="width:50px">
+                <span style="color:#5a7a4a;font-size:0.6rem">%</span>
+              </div>
+              <div class="bf-recruit-unit-row" style="display:flex;align-items:center;gap:6px;margin:2px 0">
+                <span style="color:#e0c068;font-size:0.6rem;min-width:90px"><b>T4</b> <span style="color:#5a7a4a">(35 BE)</span></span>
+                <input type="number" class="bf-bot-input bf-recruit-pct" data-unit="4" min="0" max="100" value="0" style="width:50px">
+                <span style="color:#5a7a4a;font-size:0.6rem">%</span>
+              </div>
+              <div class="bf-recruit-unit-row" style="display:flex;align-items:center;gap:6px;margin:2px 0">
+                <span style="color:#e0c068;font-size:0.6rem;min-width:90px"><b>T5</b> <span style="color:#5a7a4a">(50 BE)</span></span>
+                <input type="number" class="bf-bot-input bf-recruit-pct" data-unit="5" min="0" max="100" value="0" style="width:50px">
+                <span style="color:#5a7a4a;font-size:0.6rem">%</span>
+              </div>
+              <div class="bf-recruit-unit-row" style="display:flex;align-items:center;gap:6px;margin:2px 0">
+                <span style="color:#e0c068;font-size:0.6rem;min-width:90px"><b>T6</b> <span style="color:#5a7a4a">(75 BE)</span></span>
+                <input type="number" class="bf-bot-input bf-recruit-pct" data-unit="6" min="0" max="100" value="0" style="width:50px">
+                <span style="color:#5a7a4a;font-size:0.6rem">%</span>
+              </div>
+              <div class="bf-recruit-unit-row" style="display:flex;align-items:center;gap:6px;margin:2px 0">
+                <span style="color:#e0c068;font-size:0.6rem;min-width:90px"><b>T7</b> <span style="color:#5a7a4a">(90 BE)</span></span>
+                <input type="number" class="bf-bot-input bf-recruit-pct" data-unit="7" min="0" max="100" value="0" style="width:50px">
+                <span style="color:#5a7a4a;font-size:0.6rem">%</span>
+              </div>
+              <div class="bf-recruit-unit-row" style="display:flex;align-items:center;gap:6px;margin:2px 0">
+                <span style="color:#e0c068;font-size:0.6rem;min-width:90px"><b>T8</b> <span style="color:#5a7a4a">(150 BE)</span></span>
+                <input type="number" class="bf-bot-input bf-recruit-pct" data-unit="8" min="0" max="100" value="0" style="width:50px">
+                <span style="color:#5a7a4a;font-size:0.6rem">%</span>
+              </div>
+              <div id="bf-recruit-total" style="font-size:0.6rem;color:#e0a030;margin-top:4px;font-weight:bold">
+                Total: 0% — set at least one tier
+              </div>
             </div>
-            <div class="bf-recruit-unit-row" style="display:flex;align-items:center;gap:6px;margin:3px 0">
-              <span style="color:#ccc;font-size:0.6rem;min-width:90px">T4 (35 BE)</span>
-              <input type="number" class="bf-bot-input bf-recruit-pct" data-unit="4" min="0" max="100" value="0" style="width:50px">
-              <span style="color:#5a7a4a;font-size:0.6rem">%</span>
+
+            <!-- Live status -->
+            <div style="font-size:0.6rem;color:#aaa;margin:8px 0 3px 0">Live status:</div>
+            <div id="bf-recruit-live-status" style="font-size:0.56rem;color:#aaa;line-height:1.4;background:rgba(20,20,20,0.3);padding:4px 6px;border-radius:3px;border:1px solid #2a2a2a">
+              <em style="color:#5a7a4a">Click ↻ to fetch live state.</em>
             </div>
-            <div id="bf-recruit-total" style="font-size:0.6rem;color:#e0a030;margin-top:4px;font-weight:bold">
-              Total: 0% (must be 100%)
-            </div>
-            <div style="font-size:0.56rem;color:#5a7a4a;margin-top:4px;line-height:1.3">
-              E.g. T2 60% + T3 40% → from 100 BE, 60 goes to T2 (4 units) and 40 to T3 (2 units).
-              Remaining BE will be saved for the next extraction.
+
+            <!-- Manual trigger -->
+            <div style="display:flex;gap:6px;margin-top:6px">
+              <button id="bf-recruit-train-now" class="bf-bot-btn" style="flex:1;font-size:0.62rem;padding:4px 8px" title="Trigger one recruitment cycle right now (bypasses the 60s cooldown).">▶ Train now</button>
             </div>
           </div>
+
 
         </div>
 
@@ -3548,16 +5576,26 @@
           <button class="bf-bot-btn bf-bot-toggle-top" id="bf-ruins-toggle">▶ Start Ruins Bot</button>
 
           <div class="bf-bot-status">
-            <span class="status-text">Stav:</span>
+            <span class="status-text">Status:</span>
             <span class="status-value" id="bf-ruins-status">Disabled</span>
           </div>
 
           <div class="bf-bot-group">
-            <div class="bf-bot-group-title">🏚 Levels to Farm</div>
+            <div class="bf-bot-group-title">
+              🏚 Levels to Farm
+              <button id="bf-ruins-lock-btn" title="Lock selection (prevent accidental changes)"
+                style="float:right;background:none;border:none;cursor:pointer;color:#5a7a4a;font-size:0.85rem;line-height:1;padding:0">🔓</button>
+            </div>
+            <div style="font-size:0.56rem;color:#5a7a4a;margin-bottom:4px;line-height:1.3">
+              Hold &amp; drag to paint a range. Each cell toggles by the first cell's new state.
+            </div>
             <div class="bf-ruins-levels" id="bf-ruins-level-grid"></div>
-            <div class="bf-bot-row" style="margin-top:6px">
-              <span class="bf-bot-label">Custom:</span>
-              <input type="text" class="bf-bot-input" id="bf-ruins-custom" placeholder="napr: 1,5,10,15,20" style="flex:1">
+            <div class="bf-bot-row" style="margin-top:6px;flex-wrap:wrap;gap:4px">
+              <span class="bf-bot-label" style="min-width:0;flex:0 0 auto">Additional (&gt;50):</span>
+              <input type="text" class="bf-bot-input" id="bf-ruins-custom" placeholder="e.g. 55, 70, 80" style="flex:1;min-width:0">
+            </div>
+            <div style="font-size:0.54rem;color:#5a7a4a;margin-top:3px;line-height:1.3">
+              Levels here are added to grid selection. Use for layers above 50.
             </div>
           </div>
 
@@ -3582,11 +5620,66 @@
               </label>
               <input type="number" class="bf-bot-input" id="bf-ruins-cycles" value="5" min="1" max="999">
             </div>
-            <div class="bf-bot-row">
-              <span class="bf-bot-label">Interval:</span>
-              <input type="number" class="bf-bot-input" id="bf-ruins-interval" value="60" min="1" max="1440">
-              <span style="color:#5a7a4a;font-size:0.62rem">min</span>
+            <div class="bf-bot-row" style="flex-wrap:wrap;gap:4px">
+              <span class="bf-bot-label" style="min-width:0;flex:0 0 auto">Default interval:</span>
+              <input type="number" class="bf-bot-input" id="bf-ruins-interval" value="60" min="1" max="1440" style="width:55px;flex:0 0 auto">
+              <span style="color:#5a7a4a;font-size:0.6rem">min (fallback)</span>
             </div>
+            <div style="font-size:0.56rem;color:#5a7a4a;margin-top:6px;margin-bottom:3px;line-height:1.3">
+              Per-band cooldown (min). 1–10 ≈ 1h, 11–100 ≈ 1:30h, 101+ depends on player.
+            </div>
+            <div id="bf-ruins-interval-bands" style="max-height:130px;overflow-y:auto;border:1px solid #1a3a1a;border-radius:3px;padding:4px;background:rgba(0,0,0,0.2)"></div>
+          </div>
+
+          <div class="bf-bot-group">
+            <div class="bf-bot-group-title">🔓 Unlocked Tiers</div>
+            <div style="font-size:0.58rem;color:#5a7a4a;margin-bottom:4px;line-height:1.4">
+              Only the selected tiers will be used by the optimizer. T1–T8.
+            </div>
+            <div id="bf-ruins-unlock-bar" style="display:flex;flex-wrap:wrap;gap:4px"></div>
+          </div>
+
+          <div class="bf-bot-group">
+            <div class="bf-bot-group-title">🎯 Optimization</div>
+            <div style="font-size:0.58rem;color:#5a7a4a;margin-bottom:4px;line-height:1.4">
+              Used when no exact preset match. Skipped entirely on preset hits.
+            </div>
+            <label class="bf-bot-checkbox" style="align-items:flex-start;gap:6px">
+              <input type="checkbox" id="bf-ruins-opt-killE3" style="margin-top:3px">
+              <span>
+                ☠ Kill Tier e3 in round 1
+                <span style="display:block;font-size:0.55rem;color:#5a7a4a">Requires T4 unlocked. Prevents cumulative E3 buffing.</span>
+              </span>
+            </label>
+            <div class="bf-bot-row" style="margin-top:4px;flex-wrap:wrap;gap:4px">
+              <span class="bf-bot-label" style="min-width:0;flex:0 0 auto">Mode:</span>
+              <label class="bf-bot-checkbox" style="margin-right:4px;flex:0 0 auto">
+                <input type="radio" name="bf-ruins-opt-mode" value="deep" id="bf-ruins-opt-mode-deep" checked>
+                Deep
+              </label>
+              <label class="bf-bot-checkbox" style="flex:0 0 auto">
+                <input type="radio" name="bf-ruins-opt-mode" value="fast" id="bf-ruins-opt-mode-fast">
+                Fast
+              </label>
+            </div>
+            <label class="bf-bot-checkbox">
+              <input type="checkbox" id="bf-ruins-opt-parallel" checked>
+              Parallel Workers
+            </label>
+            <div class="bf-bot-row" style="margin-top:4px">
+              <span class="bf-bot-label" style="min-width:55px">Warm-start:</span>
+              <select class="bf-bot-select" id="bf-ruins-warm-source" style="flex:1">
+                <option value="none">None (full search)</option>
+                <option value="smart">Smart Preset (simulator)</option>
+                <option value="preset">Preset Formations (this layer)</option>
+              </select>
+            </div>
+            <div class="bf-bot-row" id="bf-ruins-warm-range-row" style="display:none;margin-top:3px">
+              <span class="bf-bot-label" style="min-width:55px">Range:</span>
+              <input type="number" class="bf-bot-input" id="bf-ruins-warm-range" value="15" min="1" max="200" style="width:60px">
+              <span style="color:#5a7a4a;font-size:0.6rem">± units per tier</span>
+            </div>
+            <div id="bf-ruins-opt-t4-info" style="font-size:0.56rem;color:#5a7a4a;margin-top:5px;line-height:1.3;display:none"></div>
           </div>
 
           <div class="bf-bot-group">
@@ -3594,6 +5687,13 @@
             <div style="font-size:0.58rem;color:#5a7a4a;margin-bottom:4px;line-height:1.4">
               Bot compares enemy with database. Match → uses preset. No match → simulates.
             </div>
+            <label class="bf-bot-checkbox" style="align-items:flex-start;gap:6px;margin-bottom:4px">
+              <input type="checkbox" id="bf-ruins-ignore-presets" style="margin-top:3px">
+              <span>
+                🚫 Ignore presets (always use optimizer)
+                <span style="display:block;font-size:0.55rem;color:#5a7a4a">Skip preset matching entirely. Presets requiring locked tiers are auto-skipped regardless.</span>
+              </span>
+            </label>
             <div class="bf-bot-row" style="margin-bottom:4px">
               <span class="bf-bot-label">Level:</span>
               <select class="bf-bot-select" id="bf-preset-level" style="flex:1"></select>
@@ -3659,6 +5759,54 @@
                 </div>
               </div>
             </div>
+            <div id="bf-ruins-t4short-row" style="margin-top:6px;display:none;border-top:1px solid #2a1218;padding-top:5px">
+              <div style="font-size:0.56rem;color:#e0a030;margin-bottom:3px">Kill E3 R1 — when T4 is insufficient:</div>
+              <label class="bf-bot-checkbox">
+                <input type="radio" name="bf-ruins-t4short" value="stop" id="bf-ruins-t4short-stop" checked>
+                Stop bot
+              </label>
+              <label class="bf-bot-checkbox">
+                <input type="radio" name="bf-ruins-t4short" value="continue" id="bf-ruins-t4short-continue">
+                Continue without E3 R1 strategy
+              </label>
+              <label class="bf-bot-checkbox">
+                <input type="radio" name="bf-ruins-t4short" value="wait" id="bf-ruins-t4short-wait">
+                Wait &amp; retry every
+                <input type="number" class="bf-bot-input" id="bf-ruins-t4wait-min" value="10" min="1" max="180" style="width:50px;margin-left:4px">
+                min
+              </label>
+            </div>
+          </div>
+
+          <div class="bf-bot-group">
+            <div class="bf-bot-group-title">📊 Army Status
+              <button id="bf-army-refresh" title="Refresh army state" style="float:right;background:none;border:none;cursor:pointer;color:#5a7a4a;font-size:0.6rem">↻</button>
+            </div>
+            <div id="bf-army-status-grid" style="font-size:0.56rem;color:#aaa;line-height:1.4">
+              <em style="color:#5a7a4a">Click ↻ to fetch live army state.</em>
+            </div>
+          </div>
+
+          <div class="bf-bot-group">
+            <div class="bf-bot-group-title">📥 Auto-import New Formations</div>
+            <div style="font-size:0.56rem;color:#5a7a4a;margin-bottom:4px;line-height:1.3">
+              When idle, save winning formations from the "Ruins (new)" log as presets.
+            </div>
+            <label class="bf-bot-checkbox">
+              <input type="checkbox" id="bf-ruins-autoimport">
+              Auto-import as Ruins preset
+            </label>
+            <label class="bf-bot-checkbox">
+              <input type="checkbox" id="bf-ruins-autoimport-smart">
+              Auto-import as 🧠 Smart preset (simulator)
+            </label>
+            <div class="bf-bot-row" style="margin-top:4px;flex-wrap:wrap;gap:4px">
+              <span class="bf-bot-label" style="min-width:0;flex:0 0 auto">Max per layer:</span>
+              <input type="number" class="bf-bot-input" id="bf-ruins-autoimport-max" value="3" min="1" max="20" style="width:50px;flex:0 0 auto">
+            </div>
+            <div style="font-size:0.54rem;color:#5a7a4a;margin-top:3px;line-height:1.3">
+              Applies to Ruins presets only. Smart presets are one-per-layer (overwrites).
+            </div>
           </div>
 
         </div>
@@ -3673,7 +5821,7 @@
           <button class="bf-bot-btn bf-bot-toggle-top" id="bf-story-toggle">▶ Start Story Bot</button>
 
           <div class="bf-bot-status">
-            <span class="status-text">Stav:</span>
+            <span class="status-text">Status:</span>
             <span class="status-value" id="bf-story-status">Disabled</span>
           </div>
 
@@ -3838,7 +5986,7 @@
           <button class="bf-bot-btn bf-bot-toggle-top" id="bf-grotto-toggle">▶ Start Grotto Bot</button>
 
           <div class="bf-bot-status">
-            <span class="status-text">Stav:</span>
+            <span class="status-text">Status:</span>
             <span class="status-value" id="bf-grotto-status">Disabled</span>
           </div>
 
@@ -3905,7 +6053,7 @@
           <button class="bf-bot-btn bf-bot-toggle-top" id="bf-pvp-toggle">▶ Start PvP Bot</button>
 
           <div class="bf-bot-status">
-            <span class="status-text">Stav:</span>
+            <span class="status-text">Status:</span>
             <span class="status-value" id="bf-pvp-status">Disabled</span>
           </div>
 
@@ -3921,9 +6069,9 @@
               </select>
             </div>
             <div class="bf-bot-row" id="bf-pvp-bv-row" style="display:none;margin-top:4px">
-              <span class="bf-bot-label" style="min-width:70px">BV od:</span>
+              <span class="bf-bot-label" style="min-width:70px">BV from:</span>
               <input type="number" class="bf-bot-input" id="bf-pvp-bv-from" placeholder="9965" style="width:70px">
-              <span class="bf-bot-label" style="min-width:30px;text-align:center">do:</span>
+              <span class="bf-bot-label" style="min-width:30px;text-align:center">to:</span>
               <input type="number" class="bf-bot-input" id="bf-pvp-bv-to" placeholder="15570" style="width:70px">
             </div>
             <div class="bf-bot-row" style="margin-top:4px">
@@ -3955,11 +6103,11 @@
               <input type="checkbox" id="bf-pvp-break">
               Pause between attacks
             </label>
-            <div class="bf-bot-row" style="margin-top:4px">
+            <div class="bf-bot-row" style="margin-top:4px;flex-wrap:wrap;row-gap:2px">
               <input type="number" class="bf-bot-input" id="bf-pvp-delay" value="20" min="1" style="width:50px">
               <span style="color:#5a7a4a;font-size:0.56rem">min &nbsp;±</span>
               <input type="number" class="bf-bot-input" id="bf-pvp-margin" value="3" min="0" style="width:40px">
-              <span style="color:#5a7a4a;font-size:0.56rem">(randomizer)</span>
+              <span style="color:#5a7a4a;font-size:0.56rem">min</span>
             </div>
             <div style="font-size:0.56rem;color:#5a7a4a;margin-top:4px;line-height:1.3">
               E.g. 20±3 = pause 17–23 min between attacks (random interval).
@@ -3970,7 +6118,79 @@
             <div class="bf-bot-group-title">📊 PvP Statistics</div>
             <div class="bf-bot-info-grid" style="grid-template-columns:1fr 1fr">
               <div class="bf-bot-info-cell"><span class="label">Wins:</span> <span class="value" id="bf-pvp-wins">0</span></div>
-              <div class="bf-bot-info-cell"><span class="label">Prehry:</span> <span class="value" id="bf-pvp-losses">0</span></div>
+              <div class="bf-bot-info-cell"><span class="label">Losses:</span> <span class="value" id="bf-pvp-losses">0</span></div>
+            </div>
+          </div>
+
+          <!-- ── HENCHMAN VS HENCHMAN (v1.6.9) ──────────────────── -->
+          <div style="height:1px;background:#1a3a1a;margin:10px 0"></div>
+
+          <button class="bf-bot-btn bf-bot-toggle-top" id="bf-henchman-toggle">▶ Start Henchman Bot</button>
+
+          <div class="bf-bot-status">
+            <span class="status-text">Status:</span>
+            <span class="status-value" id="bf-henchman-status">Disabled</span>
+          </div>
+
+          <div class="bf-bot-group">
+            <div class="bf-bot-group-title">🗡 Henchman vs Henchman</div>
+            <div style="font-size:0.56rem;color:#5a7a4a;margin-bottom:4px;line-height:1.3">
+              Sends your henchman to fight the opponent's henchman. Costs 1 AP.
+              Mutually exclusive with PvP — starting one stops the other.
+            </div>
+            <div class="bf-bot-row">
+              <span class="bf-bot-label" style="min-width:70px">Attack:</span>
+              <select class="bf-bot-select" id="bf-henchman-mode">
+                <option value="1">Anyone (skip blacklist)</option>
+                <option value="2">Whitelist only (by name)</option>
+              </select>
+            </div>
+            <label class="bf-bot-checkbox" style="margin-top:4px">
+              <input type="checkbox" id="bf-henchman-own-race">
+              <span style="flex:1;min-width:0">⚔ Attack own race
+                <span style="display:block;color:#5a7a4a;font-size:0.55rem;margin-top:1px;font-weight:normal">When the game shows the cross-race confirmation modal ("includes both werewolves and vampires"), auto-confirm it. Off = skip same-race targets and re-search.</span>
+              </span>
+            </label>
+          </div>
+
+          <div class="bf-bot-group" id="bf-henchman-wl-group">
+            <div class="bf-bot-group-title">📋 Whitelist (attack)</div>
+            <input type="text" class="bf-bot-input" id="bf-henchman-whitelist" placeholder="Player1, Player2, ..." style="width:100%">
+            <div style="font-size:0.56rem;color:#5a7a4a;margin:2px 0">
+              Comma-separated. Used by "Whitelist only" mode — these names get attacked.
+            </div>
+          </div>
+
+          <div class="bf-bot-group" id="bf-henchman-bl-group">
+            <div class="bf-bot-group-title" style="color:#e74c3c">📋 Blacklist (do not attack)</div>
+            <input type="text" class="bf-bot-input" id="bf-henchman-blacklist" placeholder="Player1, Player2, ..." style="width:100%">
+            <div style="font-size:0.56rem;color:#5a7a4a;margin:2px 0">
+              Comma-separated. Used by "Anyone" mode — random results matching these names get skipped.
+            </div>
+          </div>
+
+          <div class="bf-bot-group">
+            <div class="bf-bot-group-title">⏱ Smart Break</div>
+            <label class="bf-bot-checkbox">
+              <input type="checkbox" id="bf-henchman-break">
+              Pause between attacks
+            </label>
+            <div class="bf-bot-row" style="margin-top:4px;flex-wrap:wrap;row-gap:2px">
+              <input type="number" class="bf-bot-input" id="bf-henchman-delay" value="20" min="1" style="width:50px">
+              <span style="color:#5a7a4a;font-size:0.56rem">min &nbsp;±</span>
+              <input type="number" class="bf-bot-input" id="bf-henchman-margin" value="3" min="0" style="width:40px">
+              <span style="color:#5a7a4a;font-size:0.56rem">min</span>
+            </div>
+            <div style="font-size:0.56rem;color:#5a7a4a;margin-top:4px;line-height:1.3">
+              E.g. 20±3 = pause 17–23 min between attacks (random interval).
+            </div>
+          </div>
+
+          <div class="bf-bot-group">
+            <div class="bf-bot-group-title">📊 Henchman Statistics</div>
+            <div class="bf-bot-info-grid" style="grid-template-columns:1fr 1fr">
+              <div class="bf-bot-info-cell"><span class="label">Wins:</span> <span class="value" id="bf-henchman-wins">0</span></div>
+              <div class="bf-bot-info-cell"><span class="label">Losses:</span> <span class="value" id="bf-henchman-losses">0</span></div>
             </div>
           </div>
         </div>
@@ -4038,7 +6258,7 @@
 
           <button class="bf-bot-btn bf-bot-toggle-top" id="bf-gifts-toggle" style="background:rgba(128,0,128,0.15)">▶ Open Purple Gifts</button>
           <div class="bf-bot-status">
-            <span class="status-text">Stav:</span>
+            <span class="status-text">Status:</span>
             <span class="status-value" id="bf-gifts-status">Disabled</span>
           </div>
         </div>
@@ -4071,22 +6291,28 @@
               </div>
             </div>
             <div id="bf-gold-donate-panel" style="display:none;margin-top:4px">
-              <div class="bf-bot-row">
+              <div class="bf-bot-row" style="flex-wrap:wrap;gap:4px;align-items:center">
                 <span class="bf-bot-label" style="min-width:70px">Min Gold:</span>
-                <input type="number" class="bf-bot-input" id="bf-gold-donate-min" value="10000" min="0" style="width:90px">
+                <input type="number" class="bf-bot-input" id="bf-gold-donate-min" value="10000" min="0" style="width:80px;flex:0 0 auto">
+                <span class="bf-help-hint" title="TRIGGER threshold (anti-raid protection).&#10;&#10;When your gold ≥ this value, the bot WILL donate everything above the Keep amount to the clan. It will preempt other modules — gold above threshold attracts raids and cannot sit.&#10;&#10;Example:&#10;  Min Gold = 20,000, Keep = 0&#10;  • You have 19,999 → bot does NOT donate yet&#10;  • You have 20,000+ → bot donates EVERYTHING (minus Keep)&#10;&#10;Min is the trigger, NOT the donation amount.">?</span>
               </div>
-              <label class="bf-bot-checkbox">
-                <input type="checkbox" id="bf-gold-donate-all">
-                Donate all gold
+              <label class="bf-bot-checkbox" style="align-items:flex-start;gap:6px">
+                <input type="checkbox" id="bf-gold-donate-all" style="margin-top:3px">
+                <span>
+                  Donate all gold (idle mode)
+                  <span class="bf-help-hint" title="When ON: donate everything above Keep on every tick, regardless of the Min Gold threshold. Use during idle/cooldown periods (yellow/white indicator states) so gold keeps flowing to the clan even when no raid threat is imminent.&#10;&#10;When OFF: only donate when the Min Gold threshold is reached.&#10;&#10;Both modes respect the Keep amount.">?</span>
+                  <span style="display:block;font-size:0.55rem;color:#5a7a4a">Donates on every tick, not only when threshold is reached.</span>
+                </span>
               </label>
             </div>
-            <div class="bf-bot-row" style="margin-top:4px;align-items:center;flex-wrap:nowrap">
+            <div class="bf-bot-row" style="margin-top:4px;align-items:center;flex-wrap:wrap;gap:4px">
               <label class="bf-bot-checkbox" style="flex:0 0 auto;margin:0;white-space:nowrap">
                 <input type="checkbox" id="bf-gold-keep">
                 Keep:
               </label>
-              <input type="number" class="bf-bot-input" id="bf-gold-keep-val" value="0" min="0" style="width:80px;flex:0 0 auto;margin-left:4px">
-              <span style="color:#5a7a4a;font-size:0.56rem;flex:0 0 auto;margin-left:2px">Gold</span>
+              <input type="number" class="bf-bot-input" id="bf-gold-keep-val" value="0" min="0" style="width:70px;flex:0 0 auto">
+              <span style="color:#5a7a4a;font-size:0.56rem;flex:0 0 auto">Gold</span>
+              <span class="bf-help-hint" title="Reserve buffer kept on your character.&#10;&#10;The bot will never spend / donate below this amount. The actual donation amount = (current gold) − (Keep).&#10;&#10;Example:&#10;  Gold = 1,200,000, Keep = 50,000&#10;  Bot donates 1,150,000, you keep 50,000.">?</span>
             </div>
             <label class="bf-bot-checkbox">
               <input type="checkbox" id="bf-gold-potion-buffer">
@@ -4134,6 +6360,60 @@
           </div>
 
           <div class="bf-bot-group">
+            <div class="bf-bot-group-title">🗑 Inventory Cleanup</div>
+            <div style="font-size:0.55rem;color:#7a9a6a;margin-bottom:6px;font-style:italic;line-height:1.3">
+              Auto-discards low-level drop items from the inventory (Omega items, ruins loot). Only items that show a Discard button in-game are touched — equipped items, elixirs, and gifts are never touched.
+            </div>
+            <label class="bf-bot-checkbox">
+              <input type="checkbox" id="bf-invdisc-enabled">
+              <span style="flex:1;min-width:0">Enable Inventory Cleanup
+                <span class="bf-help-hint" title="When ON, the bot will scan your /profile/index inventory during idle periods and discard items whose level requirement is at or below the configured Max Level. Discard is IRREVERSIBLE in-game — preview before turning on Auto mode.">?</span>
+              </span>
+            </label>
+            <div id="bf-invdisc-panel" style="margin-left:18px;display:none;min-width:0">
+              <div class="bf-bot-row" style="margin-top:4px;align-items:center;gap:6px;flex-wrap:wrap">
+                <span class="bf-bot-label" style="min-width:70px">Mode:</span>
+                <select class="bf-bot-select" id="bf-invdisc-mode" style="flex:0 1 auto">
+                  <option value="manual">Manual (button only)</option>
+                  <option value="auto">Auto (scheduled)</option>
+                </select>
+                <span class="bf-help-hint" title="Manual = only runs when you press the Run Now button. Auto = runs on a schedule (daily / weekly / every N hours), during any idle period (yellow/white indicator).">?</span>
+              </div>
+              <div id="bf-invdisc-auto-panel" style="display:none">
+                <div class="bf-bot-row" style="align-items:center;gap:6px;flex-wrap:wrap">
+                  <span class="bf-bot-label" style="min-width:70px">Frequency:</span>
+                  <select class="bf-bot-select" id="bf-invdisc-freq" style="flex:0 1 auto">
+                    <option value="daily">Once per day</option>
+                    <option value="weekly">Once per week</option>
+                    <option value="custom">Custom interval</option>
+                  </select>
+                </div>
+                <div class="bf-bot-row" id="bf-invdisc-custom-row" style="display:none;align-items:center;gap:6px;flex-wrap:wrap">
+                  <span class="bf-bot-label" style="min-width:70px">Every:</span>
+                  <input type="number" class="bf-bot-input" id="bf-invdisc-custom-hours" value="12" min="1" max="720" style="width:60px">
+                  <span style="color:#5a7a4a;font-size:0.56rem">hours</span>
+                </div>
+              </div>
+              <div class="bf-bot-row" style="align-items:center;gap:6px;flex-wrap:wrap;margin-top:4px">
+                <span class="bf-bot-label" style="min-width:70px">Max level:</span>
+                <input type="number" class="bf-bot-input" id="bf-invdisc-maxlvl" value="1000" min="1" max="9999" style="width:70px">
+                <span class="bf-help-hint" title="Items requiring this level OR LOWER will be discarded. Items needing a higher level are kept.&#10;&#10;Example:&#10;  Max level = 1000&#10;  • Item needs level 150 → DISCARD&#10;  • Item needs level 999 → DISCARD&#10;  • Item needs level 1001 → KEEP">?</span>
+              </div>
+              <div class="bf-bot-row" style="align-items:center;gap:6px;flex-wrap:wrap">
+                <span class="bf-bot-label" style="min-width:70px">Min level:</span>
+                <input type="number" class="bf-bot-input" id="bf-invdisc-minlvl" value="0" min="0" max="9999" style="width:70px">
+                <span class="bf-help-hint" title="Items requiring LESS than this level are kept. Use 0 to disable the floor.&#10;&#10;Useful to keep very-low-level newbie items (e.g. Min 100 / Max 1000 → only discard items between level 100 and 1000).">?</span>
+              </div>
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px">
+                <button type="button" class="bf-bot-btn" id="bf-invdisc-run-now" style="font-size:0.62rem;padding:5px 12px;width:auto;flex:0 0 auto;background:linear-gradient(180deg,#5a2a2a,#3a1a1a)">🗑 Run Now</button>
+                <button type="button" class="bf-bot-btn" id="bf-invdisc-preview" style="font-size:0.62rem;padding:5px 12px;width:auto;flex:0 0 auto;background:#2a2a3a">👁 Preview</button>
+              </div>
+              <div id="bf-invdisc-status" style="margin-top:6px;font-size:0.56rem;color:#7a9a6a;line-height:1.5;padding:4px 6px;background:#080808;border:1px solid #2a2a2a;border-radius:3px"></div>
+              <div id="bf-invdisc-preview-out" style="display:none;margin-top:6px;font-size:0.56rem;color:#cccccc;line-height:1.4;max-height:160px;overflow-y:auto;padding:4px 6px;background:#0a0a0a;border:1px solid #3a3a3a;border-radius:3px"></div>
+            </div>
+          </div>
+
+          <div class="bf-bot-group">
             <div class="bf-bot-group-title">💊 Potions</div>
             <label class="bf-bot-checkbox">
               <input type="checkbox" id="bf-potion-energy">
@@ -4163,42 +6443,26 @@
 
           <div class="bf-bot-group">
             <div class="bf-bot-group-title">📅 Schedule</div>
-            <label class="bf-bot-checkbox">
-              <input type="checkbox" id="bf-schedule-enabled">
-              Enable schedule
-            </label>
-            <div id="bf-schedule-intervals" style="margin-top:4px;font-size:0.56rem">
-              <div class="bf-bot-row" style="margin-bottom:2px">
-                <input type="checkbox" class="bf-sched-cb" data-si="0"> <span style="min-width:20px">#1</span>
-                <input type="time" class="bf-bot-input bf-sched-start" data-si="0" style="width:75px;font-size:0.56rem" value="08:00">
-                <span>–</span>
-                <input type="time" class="bf-bot-input bf-sched-end" data-si="0" style="width:75px;font-size:0.56rem" value="12:00">
-              </div>
-              <div class="bf-bot-row" style="margin-bottom:2px">
-                <input type="checkbox" class="bf-sched-cb" data-si="1"> <span style="min-width:20px">#2</span>
-                <input type="time" class="bf-bot-input bf-sched-start" data-si="1" style="width:75px;font-size:0.56rem" value="13:00">
-                <span>–</span>
-                <input type="time" class="bf-bot-input bf-sched-end" data-si="1" style="width:75px;font-size:0.56rem" value="17:00">
-              </div>
-              <div class="bf-bot-row" style="margin-bottom:2px">
-                <input type="checkbox" class="bf-sched-cb" data-si="2"> <span style="min-width:20px">#3</span>
-                <input type="time" class="bf-bot-input bf-sched-start" data-si="2" style="width:75px;font-size:0.56rem" value="18:00">
-                <span>–</span>
-                <input type="time" class="bf-bot-input bf-sched-end" data-si="2" style="width:75px;font-size:0.56rem" value="22:00">
-              </div>
-              <div class="bf-bot-row" style="margin-bottom:2px">
-                <input type="checkbox" class="bf-sched-cb" data-si="3"> <span style="min-width:20px">#4</span>
-                <input type="time" class="bf-bot-input bf-sched-start" data-si="3" style="width:75px;font-size:0.56rem">
-                <span>–</span>
-                <input type="time" class="bf-bot-input bf-sched-end" data-si="3" style="width:75px;font-size:0.56rem">
-              </div>
-              <div class="bf-bot-row" style="margin-bottom:2px">
-                <input type="checkbox" class="bf-sched-cb" data-si="4"> <span style="min-width:20px">#5</span>
-                <input type="time" class="bf-bot-input bf-sched-start" data-si="4" style="width:75px;font-size:0.56rem">
-                <span>–</span>
-                <input type="time" class="bf-bot-input bf-sched-end" data-si="4" style="width:75px;font-size:0.56rem">
-              </div>
+            <div style="font-size:0.55rem;color:#7a9a6a;margin-bottom:6px;font-style:italic;line-height:1.3">
+              Bot automatically enables selected modules during specific time windows. Outside all slots, all bots pause.
             </div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+              <label class="bf-bot-checkbox" style="margin-bottom:0">
+                <input type="checkbox" id="bf-schedule-enabled">
+                Schedule active
+              </label>
+              <span id="bf-schedule-status" style="font-size:0.6rem;color:#7a9a6a;margin-left:auto">--</span>
+            </div>
+            <div id="bf-layout-bar" class="bf-layout-bar">
+              <span class="bf-layout-lbl">Layout:</span>
+              <select id="bf-layout-sel" class="bf-bot-select bf-layout-sel"></select>
+              <button id="bf-layout-rename" type="button" class="bf-layout-btn" title="Rename active layout">✏</button>
+              <button id="bf-layout-new"    type="button" class="bf-layout-btn" title="Add new layout">➕</button>
+              <button id="bf-layout-dup"    type="button" class="bf-layout-btn" title="Duplicate active layout">📋</button>
+              <button id="bf-layout-del"    type="button" class="bf-layout-btn danger" title="Delete active layout">🗑</button>
+            </div>
+            <div id="bf-schedule-list" style="margin-bottom:8px"></div>
+            <button id="bf-schedule-add" type="button" class="bf-bot-btn" style="font-size:0.62rem;padding:4px 10px;width:auto">📅 + Add slot</button>
           </div>
 
           <div class="bf-bot-group">
@@ -4213,12 +6477,23 @@
             </label>
             <label class="bf-bot-checkbox">
               <input type="checkbox" id="bf-bg-refresh">
-              Background Refresh (Smart Wake Up)
+              <span style="flex:1;min-width:0">🔄 Background Refresh (Smart Wake-Up)
+                <span style="display:block;color:#5a7a4a;font-size:0.55rem;margin-top:1px;font-weight:normal;line-height:1.3">Periodically reloads the page so the bot can re-tick from a fresh DOM.</span>
+              </span>
             </label>
-            <div class="bf-bot-row" style="margin-left:18px;flex-wrap:wrap">
-              <span style="color:#5a7a4a;font-size:0.56rem;width:100%;margin-bottom:2px">Background page refresh interval (1–600 min):</span>
-              <input type="range" class="bf-bot-input" id="bf-bg-refresh-interval" min="1" max="600" step="1" value="60" style="width:150px;accent-color:red">
-              <span id="bf-bg-refresh-label" style="color:#e0a030;font-size:0.6rem;font-weight:bold;min-width:50px">60 min</span>
+            <div id="bf-bg-refresh-panel" style="margin-left:18px;display:none;min-width:0">
+              <div class="bf-bot-row" style="font-size:0.58rem;gap:6px;flex-wrap:wrap">
+                <span style="color:#9a7a5a;flex:1 1 auto;min-width:0">Interval (min):</span>
+                <input type="number" class="bf-bot-input" id="bf-bg-refresh-interval" value="60" min="1" max="600" style="width:52px;flex:0 0 52px;text-align:center">
+              </div>
+              <div class="bf-bot-row" style="font-size:0.58rem;gap:6px;flex-wrap:wrap">
+                <span style="color:#9a7a5a;flex:1 1 auto;min-width:0">Randomize (±min):</span>
+                <input type="number" class="bf-bot-input" id="bf-bg-refresh-rand" value="5" min="0" max="60" style="width:52px;flex:0 0 52px;text-align:center">
+              </div>
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:0.56rem;padding:4px 6px;background:#080808;border:1px solid #2a2a2a;border-radius:3px;margin-top:2px">
+                <span style="color:#9a7a5a">⏱ Next refresh:</span>
+                <span id="bf-bg-refresh-eta" style="color:#2ecc71;font-weight:bold">--</span>
+              </div>
             </div>
           </div>
         </div>
@@ -4281,6 +6556,9 @@
         if (newState) {
           // Cancel ALL pending bot timers/intervals RIGHT NOW before async write
           cancelAllBotTimers();
+          // v1.6.7 — also reset schedule watcher ID so startScheduleWatcher
+          // can re-arm it after release (the interval itself was killed above).
+          _scheduleWatcherId = null;
         }
         sSet({ [SK('centralStop')]: newState }, () => {
           centralStopBtn.classList.toggle('engaged', newState);
@@ -4292,7 +6570,12 @@
             loadState(st => { loadSettings(se => {
               updateStatusDot(se, st);
               botSetTimeout(() => botTick(st, se), randomDelay(500, 1500));
+              // v1.6.10 — re-arm background refresh (cancelAllBotTimers cleared its timer)
+              if (se.backgroundRefresh) bgRefreshSchedule(false);
             }); });
+            // v1.6.7 — re-arm schedule watcher (cancelAllBotTimers cleared it)
+            _scheduleWatcherId = null;
+            botSetTimeout(startScheduleWatcher, 1500);
           }
           updateStatusDot();
         });
@@ -4346,13 +6629,25 @@
       }
     });
 
-    // Ruins level grid clicks
-    panel.addEventListener('click', (e) => {
-      const lvl = e.target.closest('.bf-ruins-lvl');
-      if (lvl) {
-        lvl.classList.toggle('selected');
-        updateRuinsLevelSelection();
-      }
+    // Ruins level grid drag-paint selection is wired in buildRuinsGrid()
+    // via pointer events. The old click-toggle handler is no longer needed.
+
+    // Lock toggle for the level grid
+    document.getElementById('bf-ruins-lock-btn')?.addEventListener('click', () => {
+      loadSettings(se => {
+        se.ruinsLevelsLocked = !se.ruinsLevelsLocked;
+        saveSettings(se);
+        applyRuinsLockState(se.ruinsLevelsLocked);
+      });
+    });
+
+    // Custom input — persist immediately on change (union into ruinsLevels)
+    document.getElementById('bf-ruins-custom')?.addEventListener('change', () => {
+      loadSettings(se => {
+        if (se.ruinsLevelsLocked) return;
+        se.ruinsLevels = readGridAndCustomLevels();
+        saveSettings(se);
+      });
     });
 
     // Hunt toggle
@@ -4364,16 +6659,37 @@
         settings.huntManualType = parseInt(document.getElementById('bf-manual-type')?.value) || 5;
         settings.extractEnabled = document.getElementById('bf-extract-enabled')?.checked ?? true;
         settings.extractAutoRepeat = document.getElementById('bf-extract-repeat')?.checked ?? true;
-        settings.recruitEnabled = document.getElementById('bf-recruit-enabled')?.checked ?? false;
-        settings.recruitTrigger = document.getElementById('bf-recruit-trigger')?.value || 'every';
-        settings.recruitThreshold = parseInt(document.getElementById('bf-recruit-threshold')?.value) || 100;
-        // Gather recruit % allocation
-        const recruitPct = {};
-        document.querySelectorAll('.bf-recruit-pct').forEach(inp => {
-          const unitId = inp.dataset.unit;
-          if (unitId) recruitPct[unitId] = parseInt(inp.value) || 0;
-        });
-        settings.recruitPercent = recruitPct;
+        // ── Auto Recruitment (v1.6.5 — defensive save) ─────────
+        // Only overwrite a recruit field if its DOM element is actually
+        // present + readable. This prevents the v1.6.4 bug where toggling
+        // Hunt from a state with no recruit-panel rendering wiped tiers and
+        // priority back to defaults.
+        const recEn = document.getElementById('bf-recruit-enabled');
+        if (recEn) settings.recruitEnabled = !!recEn.checked;
+        const recTrig = document.getElementById('bf-recruit-trigger');
+        if (recTrig) settings.recruitTrigger = recTrig.value || 'idle';
+        const recTh = document.getElementById('bf-recruit-threshold');
+        if (recTh) settings.recruitThreshold = parseInt(recTh.value) || 100;
+        const recStrat = document.getElementById('bf-recruit-strategy');
+        if (recStrat) settings.recruitStrategy = recStrat.value || 'priority';
+        const recRes = document.getElementById('bf-recruit-reserve');
+        if (recRes) settings.recruitReserveBE = parseInt(recRes.value) || 0;
+        // Percent allocation (T1-T8) — only update if at least one input exists
+        const pctInputs = document.querySelectorAll('.bf-recruit-pct');
+        if (pctInputs.length > 0) {
+          const recruitPct = {};
+          pctInputs.forEach(inp => {
+            const unitId = inp.dataset.unit;
+            if (unitId) recruitPct[unitId] = parseInt(inp.value) || 0;
+          });
+          settings.recruitPercent = recruitPct;
+        }
+        // Priority list — only update if rows were rendered
+        const prioRows = document.querySelectorAll('#bf-recruit-priority-list .bf-recruit-prio-row');
+        if (prioRows.length > 0) {
+          settings.recruitEnabledTiers = readEnabledTiersFromDOM();
+          settings.recruitPriority = readPriorityOrderFromDOM();
+        }
         // Gather ignore qualities
         settings.huntIgnoreQ = [...document.querySelectorAll('#bf-ignore-q input[data-iq]:checked')].map(cb => cb.value);
         // Gather manual mode accept qualities
@@ -4442,9 +6758,18 @@
         settings.ruinsCadence = document.querySelector('input[name="bf-ruins-cadence"]:checked')?.value || 'infinite';
         settings.ruinsCycles = parseInt(document.getElementById('bf-ruins-cycles')?.value) || 5;
         settings.ruinsIntervalMin = parseInt(document.getElementById('bf-ruins-interval')?.value) || 60;
+        // v1.5.9 — gather per-band intervals
+        const bands = settings.ruinsIntervalBands || {};
+        document.querySelectorAll('#bf-ruins-interval-bands .bf-ruins-band-input').forEach(inp => {
+          const band = inp.getAttribute('data-band');
+          const v = parseInt(inp.value);
+          if (band && v > 0 && v <= 1440) bands[band] = v;
+        });
+        settings.ruinsIntervalBands = bands;
         // Safety settings
         settings.ruinsStopNoWin = document.getElementById('bf-ruins-stop-nowin')?.checked ?? true;
         settings.ruinsStopPresetShort = document.getElementById('bf-ruins-stop-preset-short')?.checked ?? true;
+        settings.ruinsIgnorePresets = document.getElementById('bf-ruins-ignore-presets')?.checked ?? false;
         settings.ruinsStopMinUnits = document.getElementById('bf-ruins-stop-min-units')?.checked ?? false;
         settings.ruinsMinUnits = {
           T1: parseInt(document.getElementById('bf-ruins-min-t1')?.value) || 0,
@@ -4452,6 +6777,26 @@
           T3: parseInt(document.getElementById('bf-ruins-min-t3')?.value) || 0,
           T4: parseInt(document.getElementById('bf-ruins-min-t4')?.value) || 0,
         };
+        // v1.5.8 — UNLOCKED tiers
+        const unlocks = [];
+        document.querySelectorAll('#bf-ruins-unlock-bar [data-rt]').forEach(btn => {
+          if (btn.dataset.unlocked === '1') unlocks.push(btn.getAttribute('data-rt'));
+        });
+        if (unlocks.length) settings.ruinsAllyUnlocks = unlocks;
+        // v1.5.8 — Optimization
+        settings.ruinsOptStratKillE3 = document.getElementById('bf-ruins-opt-killE3')?.checked ?? false;
+        settings.ruinsOptMode = document.querySelector('input[name="bf-ruins-opt-mode"]:checked')?.value || 'deep';
+        settings.ruinsOptParallel = document.getElementById('bf-ruins-opt-parallel')?.checked ?? true;
+        settings.ruinsWarmStartSource = document.getElementById('bf-ruins-warm-source')?.value || 'none';
+        settings.ruinsWarmStartRange = parseInt(document.getElementById('bf-ruins-warm-range')?.value) || 15;
+        // v1.5.8 — T4 short action
+        settings.ruinsT4ShortAction = document.querySelector('input[name="bf-ruins-t4short"]:checked')?.value || 'stop';
+        settings.ruinsT4WaitMin = parseInt(document.getElementById('bf-ruins-t4wait-min')?.value) || 10;
+        // v1.5.8 — Auto-import
+        settings.ruinsAutoImportNew = document.getElementById('bf-ruins-autoimport')?.checked ?? false;
+        settings.ruinsAutoImportMaxPerLevel = parseInt(document.getElementById('bf-ruins-autoimport-max')?.value) || 3;
+        // v1.5.9 — Auto-import as Smart preset
+        settings.ruinsAutoImportSmart = document.getElementById('bf-ruins-autoimport-smart')?.checked ?? false;
 
         saveSettings(settings);
 
@@ -4590,6 +6935,84 @@
         document.getElementById('bf-preset-add').style.display = 'none';
         document.getElementById('bf-preset-add-btn').style.display = 'block';
         renderPresetList();
+      });
+    });
+
+    // ── SIMULATOR → BOT BRIDGE: import preset from history (v1.5.7) ──
+    // The simulator iframe sends BF_ADD_PRESET messages when the user clicks
+    // 📥 To Preset on a VICTORY history card. We validate the payload, build
+    // the preset entry the same way bf-preset-save does, and append to the
+    // current character's preset store. The simulator does NOT have direct
+    // access to chrome.storage (it lives at chrome-extension:// origin and
+    // doesn't know SERVER_ID + PLAYER_ID) so all storage goes through here.
+    window.addEventListener('message', (ev) => {
+      const m = ev.data;
+      if (!m || m.type !== 'BF_ADD_PRESET') return;
+
+      // Validation. Bail silently on malformed payloads — this protects
+      // against unrelated messages on shared windows / dev tools etc.
+      const lvl = parseInt(m.level, 10);
+      if (isNaN(lvl) || lvl < 1 || lvl > 30) {
+        botLog('warn', 'Preset import: invalid level ' + m.level);
+        return;
+      }
+      if (!m.enemy || typeof m.enemy !== 'object') {
+        botLog('warn', 'Preset import: missing enemy object');
+        return;
+      }
+      if (!m.formation || typeof m.formation !== 'object') {
+        botLog('warn', 'Preset import: missing formation object');
+        return;
+      }
+
+      // Strip zeroes + ensure all values are integers. The simulator should
+      // already send clean data, but defensive coding here means malformed
+      // future payloads can't corrupt the preset store.
+      const cleanEnemy = {};
+      Object.keys(m.enemy).forEach(k => {
+        const v = parseInt(m.enemy[k], 10);
+        if (v > 0) cleanEnemy[k.toUpperCase()] = v;
+      });
+      const cleanForm = {};
+      Object.keys(m.formation).forEach(k => {
+        const v = parseInt(m.formation[k], 10);
+        if (v > 0) cleanForm[k.toUpperCase()] = v;
+      });
+      if (Object.keys(cleanEnemy).length === 0 || Object.keys(cleanForm).length === 0) {
+        botLog('warn', 'Preset import: empty enemy or formation after sanitize');
+        return;
+      }
+
+      const canonicalEnemy = enemyFingerprint(cleanEnemy);
+      const lvlKey = String(lvl);
+
+      loadPresets(presets => {
+        if (!presets[lvlKey]) presets[lvlKey] = [];
+        // Same overwrite-on-duplicate-fingerprint policy as manual save.
+        const existed = presets[lvlKey].some(p => p.enemy === canonicalEnemy);
+        presets[lvlKey] = presets[lvlKey].filter(p => p.enemy !== canonicalEnemy);
+        presets[lvlKey].push({ enemy: canonicalEnemy, formation: cleanForm });
+        savePresets(presets);
+        botLog('ok', `Preset ${existed ? 'updated' : 'imported'} from simulator: L${lvl}, ${canonicalEnemy} → ${qtyToString(cleanForm)}`);
+        // If the preset panel is currently showing this level, refresh it
+        // so the user sees the new entry without having to switch tabs.
+        const currentLvl = document.getElementById('bf-preset-level')?.value;
+        if (currentLvl === lvlKey) renderPresetList();
+
+        // ACK back to the simulator so the card can show success feedback.
+        // We don't await a response — fire-and-forget is fine here.
+        try {
+          const iframe = document.getElementById('bf-sim-iframe');
+          if (iframe && iframe.contentWindow) {
+            iframe.contentWindow.postMessage({
+              type: 'BF_ADD_PRESET_ACK',
+              ok: true,
+              level: lvl,
+              enemy: canonicalEnemy,
+              updated: existed,
+            }, '*');
+          }
+        } catch (_) {}
       });
     });
 
@@ -4863,13 +7286,21 @@
         settings.pvpSmartBreak = document.getElementById('bf-pvp-break')?.checked ?? false;
         settings.pvpDelay = parseInt(document.getElementById('bf-pvp-delay')?.value) || 20;
         settings.pvpMargin = parseInt(document.getElementById('bf-pvp-margin')?.value) || 3;
+        // v1.6.9: PvP and Henchman are mutually exclusive — turning PvP on
+        // implicitly stops the Henchman bot.
+        if (settings.pvpEnabled && settings.henchmanEnabled) {
+          settings.henchmanEnabled = false;
+          botLog('warn', 'Henchman Bot stopped (PvP took over)');
+        }
         saveSettings(settings);
         if (settings.pvpEnabled) {
           loadState((state) => {
             state.pvpState = 'navigating';
+            state.henchmanState = 'idle';
             saveState(state);
             botLog('ok', 'PvP Bot STARTED');
             updatePvPUI(settings, state);
+            updateHenchmanUI(settings, state);
             botSetTimeout(() => botTick(state, settings), randomDelay(500, 1500));
           });
         } else {
@@ -4882,6 +7313,49 @@
         }
       });
     });
+
+    // Henchman toggle (v1.6.9) — mirrors PvP toggle but for the henchman flow.
+    document.getElementById('bf-henchman-toggle')?.addEventListener('click', () => {
+      loadSettings((settings) => {
+        settings.henchmanEnabled = !settings.henchmanEnabled;
+        settings.henchmanMode = parseInt(document.getElementById('bf-henchman-mode')?.value) || 1;
+        settings.henchmanWhitelist = document.getElementById('bf-henchman-whitelist')?.value || '';
+        settings.henchmanBlacklist = document.getElementById('bf-henchman-blacklist')?.value || '';
+        settings.henchmanSmartBreak = document.getElementById('bf-henchman-break')?.checked ?? false;
+        settings.henchmanDelay = parseInt(document.getElementById('bf-henchman-delay')?.value) || 20;
+        settings.henchmanMargin = parseInt(document.getElementById('bf-henchman-margin')?.value) || 3;
+        settings.henchmanAttackOwnRace = document.getElementById('bf-henchman-own-race')?.checked ?? false;
+        // Mutual exclusivity with PvP.
+        if (settings.henchmanEnabled && settings.pvpEnabled) {
+          settings.pvpEnabled = false;
+          botLog('warn', 'PvP Bot stopped (Henchman took over)');
+        }
+        saveSettings(settings);
+        if (settings.henchmanEnabled) {
+          loadState((state) => {
+            state.henchmanState = 'navigating';
+            state.pvpState = 'idle';
+            saveState(state);
+            botLog('ok', 'Henchman Bot STARTED');
+            updateHenchmanUI(settings, state);
+            updatePvPUI(settings, state);
+            botSetTimeout(() => botTick(state, settings), randomDelay(500, 1500));
+          });
+        } else {
+          loadState((state) => {
+            state.henchmanState = 'idle';
+            saveState(state);
+            botLog('warn', 'Henchman Bot STOPPED');
+            updateHenchmanUI(settings, state);
+          });
+        }
+      });
+    });
+
+    // Henchman mode change (v1.6.9 / semantics v1.6.10) — both whitelist and
+    // blacklist groups stay visible regardless of mode, since users typically
+    // want to maintain both lists across mode switches. The mode only changes
+    // which list the runtime uses; the UI shows both for clarity.
 
     // Gifts toggle (Purple Gifts)
     document.getElementById('bf-gifts-toggle').addEventListener('click', () => {
@@ -4929,6 +7403,103 @@
       document.getElementById('bf-gold-donate-panel').style.display = v === 2 ? 'block' : 'none';
     });
 
+    // ── Inventory Discard / Cleanup (v1.6.13) ─────────────────
+    // Enable checkbox → toggle the whole panel
+    document.getElementById('bf-invdisc-enabled')?.addEventListener('change', (e) => {
+      const panel = document.getElementById('bf-invdisc-panel');
+      if (panel) panel.style.display = e.target.checked ? '' : 'none';
+      // If disabling, also clear any pending manual run flag so a future
+      // re-enable doesn't immediately fire a stale "Run Now".
+      if (!e.target.checked) {
+        loadState(st => {
+          if (st.invDiscardManualPending) {
+            st.invDiscardManualPending = false;
+            saveState(st);
+          }
+        });
+      } else {
+        // Refresh status line when newly enabled
+        loadState(st => { loadSettings(se => _invDiscardRefreshUI(st, se)); });
+      }
+    });
+
+    // Mode select → show/hide Auto subpanel
+    document.getElementById('bf-invdisc-mode')?.addEventListener('change', (e) => {
+      const isAuto = e.target.value === 'auto';
+      const autoPanel = document.getElementById('bf-invdisc-auto-panel');
+      if (autoPanel) autoPanel.style.display = isAuto ? '' : 'none';
+      // Also re-evaluate custom-row visibility based on frequency
+      const freq = (document.getElementById('bf-invdisc-freq')?.value) || 'daily';
+      const customRow = document.getElementById('bf-invdisc-custom-row');
+      if (customRow) customRow.style.display = (isAuto && freq === 'custom') ? '' : 'none';
+      loadState(st => { loadSettings(se => _invDiscardRefreshUI(st, se)); });
+    });
+
+    // Frequency select → show/hide custom hours row
+    document.getElementById('bf-invdisc-freq')?.addEventListener('change', (e) => {
+      const customRow = document.getElementById('bf-invdisc-custom-row');
+      if (customRow) customRow.style.display = e.target.value === 'custom' ? '' : 'none';
+      loadState(st => { loadSettings(se => _invDiscardRefreshUI(st, se)); });
+    });
+
+    // "Run Now" — set the manual-pending flag and trigger an immediate tick
+    document.getElementById('bf-invdisc-run-now')?.addEventListener('click', () => {
+      if (_centralStopActive) {
+        botLog('warn', '🗑 Cannot run — Central STOP is engaged');
+        return;
+      }
+      loadSettings(se => {
+        if (!se.invDiscardEnabled) {
+          botLog('warn', '🗑 Inventory Cleanup is disabled. Enable it first.');
+          return;
+        }
+        loadState(st => {
+          st.invDiscardManualPending = true;
+          st.invDiscardSessionCount = 0;
+          // Reset spacing so the very first action fires promptly
+          st.invDiscardLastAction = 0;
+          saveState(st);
+          botLog('info', `🗑 Inventory Cleanup: Manual run requested (max lvl ${se.invDiscardMaxLevel || 1000})`);
+          _invDiscardRefreshUI(st, se);
+          // Kick the tick immediately
+          botSetTimeout(() => botTick(st, se), randomDelay(200, 500));
+        });
+      });
+    });
+
+    // "Preview" — scan inventory and list what WOULD be discarded, no action
+    document.getElementById('bf-invdisc-preview')?.addEventListener('click', () => {
+      loadSettings(se => {
+        const maxL = parseInt(document.getElementById('bf-invdisc-maxlvl')?.value) || (se.invDiscardMaxLevel || 1000);
+        const minL = parseInt(document.getElementById('bf-invdisc-minlvl')?.value) || (se.invDiscardMinLevel || 0);
+        const out = document.getElementById('bf-invdisc-preview-out');
+        if (!out) return;
+        if (!PAGE.includes('/profile')) {
+          out.style.display = '';
+          out.innerHTML = `<div style="color:#e0a030">⚠ Preview only works on the Profile/Inventory page. Open <code>/profile/index</code> first.</div>`;
+          return;
+        }
+        const items = scanInventoryForDiscardable(maxL, minL);
+        if (items.length === 0) {
+          out.style.display = '';
+          out.innerHTML = `<div style="color:#7a9a6a">✓ No items would be discarded (max lvl ${maxL}${minL > 0 ? ', min lvl ' + minL : ''}).</div>`;
+          return;
+        }
+        const TYPE_LABEL = { 1: 'Weapon', 3: 'Helmet', 4: 'Armor', 5: 'Item', 6: 'Gloves', 7: 'Boots', 8: 'Shield' };
+        const rows = items.map(it => {
+          const t = TYPE_LABEL[it.itemType] || ('Type ' + it.itemType);
+          return `<div style="display:flex;gap:6px;border-bottom:1px solid #1a1a1a;padding:2px 0">
+            <span style="color:#9a7a5a;flex:0 0 50px">[${t}]</span>
+            <span style="flex:1;color:#cccccc">${(it.name || '?').replace(/[<>]/g,'')}</span>
+            <span style="color:#7a9a6a;flex:0 0 60px;text-align:right">lvl ${it.level}</span>
+            <span style="color:#5a7a4a;flex:0 0 40px;text-align:right">×${it.count}</span>
+          </div>`;
+        }).join('');
+        out.style.display = '';
+        out.innerHTML = `<div style="color:#e0a030;margin-bottom:4px"><b>${items.length}</b> item(s) would be discarded (max lvl ${maxL}${minL > 0 ? ', min lvl ' + minL : ''}):</div>${rows}`;
+      });
+    });
+
     // Story priority — show/hide aspects panel
     document.getElementById('bf-story-priority')?.addEventListener('change', (e) => {
       const asp = document.getElementById('bf-story-aspects-panel');
@@ -4941,10 +7512,161 @@
       if (lbl) lbl.textContent = parseFloat(e.target.value).toFixed(2) + 's';
     });
 
-    // Background refresh slider label
-    document.getElementById('bf-bg-refresh-interval')?.addEventListener('input', (e) => {
-      const lbl = document.getElementById('bf-bg-refresh-label');
-      if (lbl) lbl.textContent = e.target.value + ' min';
+    // ── Background Page Refresh (v1.6.10 rewrite) ─────────────
+    // BK-style structured panel: enable checkbox, interval (min),
+    // randomize (±min), live ETA. Drives bgRefreshSchedule() below.
+    document.getElementById('bf-bg-refresh')?.addEventListener('change', (e) => {
+      const panel = document.getElementById('bf-bg-refresh-panel');
+      if (panel) panel.style.display = e.target.checked ? '' : 'none';
+      loadSettings(se => {
+        se.backgroundRefresh = !!e.target.checked;
+        saveSettings(se);
+        if (e.target.checked) bgRefreshSchedule(true);
+        else bgRefreshCancel();
+      });
+    });
+    document.getElementById('bf-bg-refresh-interval')?.addEventListener('change', (e) => {
+      const v = Math.max(1, Math.min(600, parseInt(e.target.value) || 60));
+      e.target.value = v;
+      loadSettings(se => {
+        se.backgroundRefreshInterval = v;
+        saveSettings(se);
+        if (se.backgroundRefresh) bgRefreshSchedule(true); // reset cycle with new interval
+      });
+    });
+    document.getElementById('bf-bg-refresh-rand')?.addEventListener('change', (e) => {
+      const v = Math.max(0, Math.min(60, parseInt(e.target.value) || 0));
+      e.target.value = v;
+      loadSettings(se => {
+        se.backgroundRefreshRandomize = v;
+        saveSettings(se);
+        if (se.backgroundRefresh) bgRefreshSchedule(true);
+      });
+    });
+
+    // ── Schedule (v1.6.7) ─────────────────────────────────────
+    // The Schedule-active checkbox change is already captured by the global
+    // panel's change-listener (saveGlobalSettings writes scheduleEnabled).
+    // Here we add the extra behavior: refresh status + reset transition state
+    // + start/refresh the watcher every time the user toggles it.
+    document.getElementById('bf-schedule-enabled')?.addEventListener('change', () => {
+      _lastScheduleSlotId = '__init__'; // force re-log on next check
+      botSetTimeout(() => {
+        runScheduleCheck('toggle');
+        startScheduleWatcher();
+        renderScheduleList();
+      }, 100);
+    });
+
+    // Add-slot button (click event, not covered by the change-listener)
+    document.getElementById('bf-schedule-add')?.addEventListener('click', () => {
+      loadSettings(se => {
+        const layout = getActiveScheduleLayout(se);
+        if (!layout) return;
+        if (!Array.isArray(layout.slots)) layout.slots = [];
+        layout.slots.push({
+          id: newScheduleSlotId(),
+          enabled: true,
+          startH: 8, startM: 0,
+          endH: 12, endM: 0,
+          actions: { hunt:false, story:false, pvp:false, henchman:false, ruins:false, grotto:false, invdisc:false }
+        });
+        saveSettings(se);
+        renderScheduleList();
+        runScheduleCheck('add');
+      });
+    });
+
+    // ── Layout bar (v1.6.8) ───────────────────────────────────
+    // Switch active layout via dropdown
+    document.getElementById('bf-layout-sel')?.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const newId = e.target.value;
+      loadSettings(se => {
+        if (!Array.isArray(se.scheduleLayouts) || !se.scheduleLayouts.some(l => l.id === newId)) return;
+        se.scheduleActiveLayoutId = newId;
+        saveSettings(se);
+        _lastScheduleSlotId = '__init__'; // force re-log on next check
+        renderScheduleList();
+        runScheduleCheck('layout-switch');
+      });
+    });
+
+    // ➕ New empty layout
+    document.getElementById('bf-layout-new')?.addEventListener('click', () => {
+      const name = (window.prompt('Name for the new layout:', 'New layout') || '').trim();
+      if (!name) return; // cancelled or empty
+      loadSettings(se => {
+        if (!Array.isArray(se.scheduleLayouts)) se.scheduleLayouts = [];
+        const layout = {
+          id: newScheduleLayoutId(),
+          name: name.substring(0, 40),
+          slots: []
+        };
+        se.scheduleLayouts.push(layout);
+        se.scheduleActiveLayoutId = layout.id;
+        saveSettings(se);
+        renderScheduleList();
+        runScheduleCheck('layout-new');
+        botLog('info', `📅 Created new layout: "${layout.name}"`);
+      });
+    });
+
+    // 📋 Duplicate active layout (deep-copy slots with fresh IDs)
+    document.getElementById('bf-layout-dup')?.addEventListener('click', () => {
+      loadSettings(se => {
+        const src = getActiveScheduleLayout(se);
+        if (!src) return;
+        const clone = {
+          id: newScheduleLayoutId(),
+          name: (src.name + ' (copy)').substring(0, 40),
+          slots: (src.slots || []).map(s => Object.assign({}, s, {
+            id: newScheduleSlotId(),
+            actions: Object.assign({}, s.actions || {})
+          }))
+        };
+        se.scheduleLayouts.push(clone);
+        se.scheduleActiveLayoutId = clone.id;
+        saveSettings(se);
+        renderScheduleList();
+        runScheduleCheck('layout-dup');
+        botLog('info', `📅 Duplicated layout: "${src.name}" → "${clone.name}"`);
+      });
+    });
+
+    // ✏ Rename active layout
+    document.getElementById('bf-layout-rename')?.addEventListener('click', () => {
+      loadSettings(se => {
+        const active = getActiveScheduleLayout(se);
+        if (!active) return;
+        const newName = (window.prompt('Rename layout:', active.name) || '').trim();
+        if (!newName) return; // cancelled or empty
+        const oldName = active.name;
+        active.name = newName.substring(0, 40);
+        saveSettings(se);
+        renderLayoutBar(se);
+        botLog('info', `📅 Renamed layout: "${oldName}" → "${active.name}"`);
+      });
+    });
+
+    // 🗑 Delete active layout (refused when only one exists)
+    document.getElementById('bf-layout-del')?.addEventListener('click', () => {
+      loadSettings(se => {
+        if (!Array.isArray(se.scheduleLayouts) || se.scheduleLayouts.length <= 1) {
+          window.alert('Cannot delete the last layout. At least one must exist.');
+          return;
+        }
+        const active = getActiveScheduleLayout(se);
+        if (!active) return;
+        if (!window.confirm(`Delete layout "${active.name}"?\n\nAll ${active.slots?.length || 0} slot(s) in this layout will be lost.`)) return;
+        const idx = se.scheduleLayouts.findIndex(l => l.id === active.id);
+        se.scheduleLayouts.splice(idx, 1);
+        se.scheduleActiveLayoutId = se.scheduleLayouts[0].id;
+        saveSettings(se);
+        renderScheduleList();
+        runScheduleCheck('layout-del');
+        botLog('info', `📅 Deleted layout: "${active.name}"`);
+      });
     });
 
     // PvP mode change — show/hide BV range row and blacklist group
@@ -4956,19 +7678,201 @@
       if (blGroup) blGroup.style.display = (mode === 3) ? '' : 'none';
     });
 
-    // Recruit — % total calculator
-    document.querySelectorAll('.bf-recruit-pct').forEach(inp => {
-      inp.addEventListener('input', () => updateRecruitTotal());
+    // v1.6.10 — Auto-persist PvP/Henchman config fields on any change.
+    // BUG FIX: previously these fields were saved ONLY when the user clicked
+    // Start/Stop. Anything typed into whitelist/blacklist between sessions
+    // was lost if the user closed the tab without toggling.
+    function persistPvPHenchmanFromDOM() {
+      loadSettings((se) => {
+        const get = (id) => document.getElementById(id);
+        if (get('bf-pvp-mode'))      se.pvpMode      = parseInt(get('bf-pvp-mode').value) || 1;
+        if (get('bf-pvp-minhp'))     se.pvpMinHP     = parseInt(get('bf-pvp-minhp').value) || 50;
+        if (get('bf-pvp-whitelist')) se.pvpWhitelist = get('bf-pvp-whitelist').value || '';
+        if (get('bf-pvp-blacklist')) se.pvpBlacklist = get('bf-pvp-blacklist').value || '';
+        if (get('bf-pvp-bv-from'))   se.pvpBVFrom    = get('bf-pvp-bv-from').value || '';
+        if (get('bf-pvp-bv-to'))     se.pvpBVTo      = get('bf-pvp-bv-to').value || '';
+        if (get('bf-pvp-inactive'))  se.pvpIncludeInactive = !!get('bf-pvp-inactive').checked;
+        if (get('bf-pvp-break'))     se.pvpSmartBreak = !!get('bf-pvp-break').checked;
+        if (get('bf-pvp-delay'))     se.pvpDelay     = parseInt(get('bf-pvp-delay').value) || 20;
+        if (get('bf-pvp-margin'))    se.pvpMargin    = parseInt(get('bf-pvp-margin').value) || 3;
+        if (get('bf-henchman-mode'))      se.henchmanMode      = parseInt(get('bf-henchman-mode').value) || 1;
+        if (get('bf-henchman-whitelist')) se.henchmanWhitelist = get('bf-henchman-whitelist').value || '';
+        if (get('bf-henchman-blacklist')) se.henchmanBlacklist = get('bf-henchman-blacklist').value || '';
+        if (get('bf-henchman-break'))     se.henchmanSmartBreak = !!get('bf-henchman-break').checked;
+        if (get('bf-henchman-delay'))     se.henchmanDelay     = parseInt(get('bf-henchman-delay').value) || 20;
+        if (get('bf-henchman-margin'))    se.henchmanMargin    = parseInt(get('bf-henchman-margin').value) || 3;
+        if (get('bf-henchman-own-race'))  se.henchmanAttackOwnRace = !!get('bf-henchman-own-race').checked;
+        saveSettings(se);
+      });
+    }
+    // Attach to all PvP+Henchman input/select/textarea elements (debounced).
+    let _pvpPersistTimer = null;
+    function schedulePvPPersist() {
+      if (_pvpPersistTimer) clearTimeout(_pvpPersistTimer);
+      _pvpPersistTimer = setTimeout(persistPvPHenchmanFromDOM, 300);
+    }
+    [
+      'bf-pvp-mode','bf-pvp-minhp','bf-pvp-whitelist','bf-pvp-blacklist',
+      'bf-pvp-bv-from','bf-pvp-bv-to','bf-pvp-inactive','bf-pvp-break',
+      'bf-pvp-delay','bf-pvp-margin',
+      'bf-henchman-mode','bf-henchman-whitelist','bf-henchman-blacklist',
+      'bf-henchman-break','bf-henchman-delay','bf-henchman-margin',
+      'bf-henchman-own-race'
+    ].forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener('change', schedulePvPPersist);
+      // text/number inputs also get 'input' for live typing
+      if (el.tagName === 'INPUT' && (el.type === 'text' || el.type === 'number')) {
+        el.addEventListener('input', schedulePvPPersist);
+      }
     });
 
-    // Recruit trigger change — show/hide threshold row
+    // ── Auto Recruitment (v1.6.5) ────────────────────────────
+    // Helper: persist the entire current recruit-panel state to settings
+    // immediately. Called on every user change so we don't rely on the
+    // Hunt master toggle to save recruit fields (which caused the
+    // v1.6.4 reset bug).
+    function persistRecruitFromDOM() {
+      loadSettings((se) => {
+        const recEn = document.getElementById('bf-recruit-enabled');
+        if (recEn) se.recruitEnabled = !!recEn.checked;
+        const trig = document.getElementById('bf-recruit-trigger');
+        if (trig) se.recruitTrigger = trig.value || 'idle';
+        const th = document.getElementById('bf-recruit-threshold');
+        if (th) se.recruitThreshold = parseInt(th.value) || 100;
+        const strat = document.getElementById('bf-recruit-strategy');
+        if (strat) se.recruitStrategy = strat.value || 'priority';
+        const res = document.getElementById('bf-recruit-reserve');
+        if (res) se.recruitReserveBE = parseInt(res.value) || 0;
+        const pctInputs = document.querySelectorAll('.bf-recruit-pct');
+        if (pctInputs.length > 0) {
+          const pct = {};
+          pctInputs.forEach(inp => {
+            const t = inp.dataset.unit;
+            if (t) pct[t] = parseInt(inp.value) || 0;
+          });
+          se.recruitPercent = pct;
+        }
+        const prioRows = document.querySelectorAll('#bf-recruit-priority-list .bf-recruit-prio-row');
+        if (prioRows.length > 0) {
+          se.recruitEnabledTiers = readEnabledTiersFromDOM();
+          se.recruitPriority = readPriorityOrderFromDOM();
+        }
+        saveSettings(se);
+      });
+    }
+
+    // Percent total calculator + auto-persist
+    document.querySelectorAll('.bf-recruit-pct').forEach(inp => {
+      inp.addEventListener('input', () => { updateRecruitTotal(); persistRecruitFromDOM(); });
+    });
+    // Master enable checkbox
+    document.getElementById('bf-recruit-enabled')?.addEventListener('change', persistRecruitFromDOM);
+    // Trigger dropdown → show/hide threshold row + persist
     document.getElementById('bf-recruit-trigger')?.addEventListener('change', (e) => {
       const thresholdRow = document.getElementById('bf-recruit-threshold-row');
       if (thresholdRow) thresholdRow.style.display = (e.target.value === 'threshold') ? 'flex' : 'none';
+      persistRecruitFromDOM();
+    });
+    document.getElementById('bf-recruit-threshold')?.addEventListener('input', persistRecruitFromDOM);
+    document.getElementById('bf-recruit-reserve')?.addEventListener('input', persistRecruitFromDOM);
+    // Strategy dropdown → swap priority vs percent panels + persist
+    document.getElementById('bf-recruit-strategy')?.addEventListener('change', (e) => {
+      const v = e.target.value;
+      const prioPanel = document.getElementById('bf-recruit-priority-panel');
+      const pctPanel  = document.getElementById('bf-recruit-percent-panel');
+      if (prioPanel) prioPanel.style.display = (v === 'priority') ? 'block' : 'none';
+      if (pctPanel)  pctPanel.style.display  = (v === 'percent')  ? 'block' : 'none';
+      persistRecruitFromDOM();
+    });
+    // Priority list — delegate change events for dynamically-rendered rows
+    document.getElementById('bf-recruit-priority-list')?.addEventListener('change', (e) => {
+      if (e.target && e.target.classList && e.target.classList.contains('bf-recruit-prio-en')) {
+        persistRecruitFromDOM();
+      }
+    });
+    // Reorder buttons re-render the list; hook a click listener that persists
+    // AFTER the re-render is complete (next event-loop tick).
+    document.getElementById('bf-recruit-priority-list')?.addEventListener('click', (e) => {
+      if (e.target && (e.target.classList.contains('bf-recruit-prio-up') ||
+                       e.target.classList.contains('bf-recruit-prio-dn'))) {
+        setTimeout(persistRecruitFromDOM, 50);
+      }
+    });
+    // Refresh live status — pulls fresh army state from /nourishing/index
+    document.getElementById('bf-recruit-refresh')?.addEventListener('click', () => {
+      refreshRecruitLiveStatus();
+    });
+    // Train now — manual trigger; bypasses cooldown AND trigger gates
+    document.getElementById('bf-recruit-train-now')?.addEventListener('click', () => {
+      botLog('info', '⚔ Recruit: Manual "Train now" requested');
+      // Pull latest UI values into settings before firing.
+      // IMPORTANT: only overwrite fields where the DOM is actually populated,
+      // otherwise reading from a not-yet-rendered tab can blow away user
+      // settings (the v1.6.4 "settings reset" bug).
+      loadSettings((se) => {
+        se.recruitEnabled = true; // ensure logic runs even if user hasn't toggled
+        const trig = document.getElementById('bf-recruit-trigger');
+        if (trig) se.recruitTrigger = trig.value || 'idle';
+        const strat = document.getElementById('bf-recruit-strategy');
+        if (strat) se.recruitStrategy = strat.value || 'priority';
+        const res = document.getElementById('bf-recruit-reserve');
+        if (res) se.recruitReserveBE = parseInt(res.value) || 0;
+
+        const pctInputs = document.querySelectorAll('.bf-recruit-pct');
+        if (pctInputs.length > 0) {
+          const pct = {};
+          pctInputs.forEach(inp => {
+            const t = inp.dataset.unit;
+            if (t) pct[t] = parseInt(inp.value) || 0;
+          });
+          se.recruitPercent = pct;
+        }
+        const prioRows = document.querySelectorAll('#bf-recruit-priority-list .bf-recruit-prio-row');
+        if (prioRows.length > 0) {
+          se.recruitEnabledTiers = readEnabledTiersFromDOM();
+          se.recruitPriority = readPriorityOrderFromDOM();
+        }
+
+        saveSettings(se);
+        loadState((st) => {
+          // Bypass cycle cooldown AND trigger checks for manual trigger
+          st.recruitLastCycle = 0;
+          st.recruitNavigating = false; // clean slate
+          saveState(st);
+          const handled = globalRecruitTick(st, se, { skipGate: true });
+          if (!handled) {
+            botLog('warn', '⚔ Recruit: "Train now" did not produce an action — see prior log line for the reason (no tiers enabled / no BE / etc.)');
+          }
+        });
+      });
     });
 
     // Build ruins level grid
     buildRuinsGrid();
+
+    // v1.5.8 — wire up new ruins controls
+    // Warm-start range row visibility follows the source selector
+    document.getElementById('bf-ruins-warm-source')?.addEventListener('change', (e) => {
+      const row = document.getElementById('bf-ruins-warm-range-row');
+      if (row) row.style.display = (e.target.value === 'none') ? 'none' : 'flex';
+    });
+    // Kill E3 R1 toggle → update T4 info / T4 short action visibility
+    document.getElementById('bf-ruins-opt-killE3')?.addEventListener('change', () => {
+      loadSettings(se => {
+        se.ruinsOptStratKillE3 = document.getElementById('bf-ruins-opt-killE3').checked;
+        saveSettings(se);
+        updateRuinsOptHints(se);
+      });
+    });
+    // Army refresh button (in Army Status group)
+    document.getElementById('bf-army-refresh')?.addEventListener('click', () => {
+      const grid = document.getElementById('bf-army-status-grid');
+      if (grid) grid.innerHTML = '<em style="color:#5a7a4a">Loading…</em>';
+      _armyCache = null; // force fresh fetch
+      fetchArmyState((data) => renderArmyStatus(data));
+    });
 
     // Init UI from saved settings
     loadSettings((settings) => {
@@ -4979,9 +7883,16 @@
         updateStoryUI(settings, state);
         updateGrottoUI(settings, state);
         updatePvPUI(settings, state);
+        updateHenchmanUI(settings, state);
         updateGiftsUI(settings, state);
         applyGlobalSettingsToUI(settings);
         updateInfoBadges();
+
+        // v1.6.10 — Start background page refresh cycle if enabled.
+        // The ETA label loop runs unconditionally so the user sees "--"
+        // when disabled and a live countdown when enabled.
+        bgRefreshStartETALoop();
+        if (settings.backgroundRefresh) bgRefreshSchedule(false);
 
         // ── Wait for Central STOP check BEFORE auto-resume ──
         initCentralStop((stopped) => {
@@ -4999,18 +7910,33 @@
           const storyActive = settings.storyEnabled && state.storyState !== 'idle' && state.storyState !== 'done';
           const grottoActive = settings.grottoEnabled && state.grottoState !== 'idle' && state.grottoState !== 'done';
           const pvpActive = settings.pvpEnabled && state.pvpState !== 'idle' && state.pvpState !== 'done';
+          const henchmanActive = settings.henchmanEnabled && state.henchmanState !== 'idle' && state.henchmanState !== 'done';
           const giftsActive = state.giftsState === 'running' || settings.giftsAutoDBG;
-          const globalActive = settings.goldMode > 0 || settings.graveyardEnabled;
+          const globalActive = settings.goldMode > 0 || settings.graveyardEnabled || settings.recruitEnabled;
+          // v1.6.14 — Inventory Cleanup must auto-resume too. Without this, the
+          // page-reload that follows each /discardItem navigation kills the
+          // loop after the first item (no tick fires, bot is stuck on
+          // /profile/index until something else wakes it up). Triggers on:
+          //   • manual run in progress (Run-Now flag set)
+          //   • navigation handoff (sent ourselves to /profile)
+          //   • auto-mode enabled (the tick's schedule gate decides if it actually fires)
+          const invDiscardActive = !!settings.invDiscardEnabled && (
+            !!state.invDiscardManualPending ||
+            !!state.invDiscardNavigating ||
+            (settings.invDiscardMode === 'auto')
+          );
 
-          if (huntActive || ruinsActive || storyActive || grottoActive || pvpActive || giftsActive || globalActive) {
+          if (huntActive || ruinsActive || storyActive || grottoActive || pvpActive || henchmanActive || giftsActive || globalActive || invDiscardActive) {
             const parts = [];
             if (huntActive) parts.push('Hunt' + (state.huntState === 'waiting_orb' ? ' (cooldown)' : ''));
             if (ruinsActive) parts.push('Ruins');
             if (storyActive) parts.push('Story');
             if (grottoActive) parts.push('Grotto');
             if (pvpActive) parts.push('PvP');
+            if (henchmanActive) parts.push('Henchman');
             if (giftsActive) parts.push('Gifts');
             if (globalActive) parts.push('Global');
+            if (invDiscardActive) parts.push('Inv Cleanup' + (state.invDiscardManualPending ? ' (manual)' : ''));
             botLog('info', `Bot resumed after reload: ${parts.join(' + ')}`);
             updateStatusDot(settings, state);
 
@@ -5068,6 +7994,122 @@
     _botIntervals.clear();
     // Also kill the cooldown ticker
     stopCooldownTicker();
+    // v1.6.10 — pause (but don't reset) the background-refresh cycle.
+    // The persisted "next at" is preserved; bgRefreshTick re-checks
+    // _centralStopActive and defers if engaged, so the schedule survives
+    // a stop/release cycle and resumes from where it left off.
+    if (_bgRefreshTimerId) { clearTimeout(_bgRefreshTimerId); _bgRefreshTimerId = null; }
+  }
+
+  // ── BACKGROUND PAGE REFRESH (v1.6.10 — BK-style structured cycle) ──
+  // Periodically reloads the current page so the bot can re-tick from a
+  // fresh DOM. The "next refresh at" timestamp is persisted via storage
+  // under SK('bgRefreshNextAt') so the cycle survives the very reload it
+  // triggers — without that the timer would restart every page load and
+  // never fire on schedule.
+  //
+  // Storage key: SK('bgRefreshNextAt') — number (Date.now() + delay)
+  //
+  // Behaviour:
+  //   • bgRefreshSchedule(force)
+  //       Reads settings, computes a fresh "next at" if none persisted or
+  //       force === true, then schedules a timer to fire at that time.
+  //   • bgRefreshCancel()
+  //       Clears the in-memory timer and removes the persisted "next at".
+  //   • bgRefreshTick()
+  //       The actual reload trigger. Skipped if Central STOP is engaged.
+  //   • bgRefreshETALoop()
+  //       Updates the live "Next refresh: Xm Ys" label every second.
+
+  let _bgRefreshTimerId = null;
+  let _bgRefreshEtaIntervalId = null;
+
+  function bgRefreshComputeNextAt(settings) {
+    const baseMin = Math.max(1, Math.min(600, parseInt(settings.backgroundRefreshInterval) || 60));
+    const randMin = Math.max(0, Math.min(60, parseInt(settings.backgroundRefreshRandomize) || 0));
+    const jitter = randMin > 0 ? (Math.random() * 2 - 1) * randMin : 0;
+    const totalMs = Math.max(60000, Math.round((baseMin + jitter) * 60 * 1000)); // floor 1 min
+    return Date.now() + totalMs;
+  }
+
+  function bgRefreshCancel() {
+    if (_bgRefreshTimerId) { clearTimeout(_bgRefreshTimerId); _bgRefreshTimerId = null; }
+    // Clear persisted "next at" so a future enable starts fresh.
+    if (ctxOk()) {
+      try { chrome.storage.local.remove([SK('bgRefreshNextAt')]); } catch(e) {}
+    }
+    const eta = document.getElementById('bf-bg-refresh-eta');
+    if (eta) { eta.textContent = '--'; eta.style.color = '#5a4a3a'; }
+  }
+
+  function bgRefreshSchedule(force) {
+    if (_bgRefreshTimerId) { clearTimeout(_bgRefreshTimerId); _bgRefreshTimerId = null; }
+    loadSettings(settings => {
+      if (!settings.backgroundRefresh) return bgRefreshCancel();
+      sGet([SK('bgRefreshNextAt')], r => {
+        let nextAt = r[SK('bgRefreshNextAt')];
+        if (force || !nextAt || nextAt <= Date.now()) {
+          nextAt = bgRefreshComputeNextAt(settings);
+          sSet({ [SK('bgRefreshNextAt')]: nextAt });
+        }
+        const delay = Math.max(1000, nextAt - Date.now());
+        // setTimeout maximum is ~24.8 days; our max is 600+60 min so safe.
+        _bgRefreshTimerId = setTimeout(bgRefreshTick, delay);
+      });
+    });
+  }
+
+  function bgRefreshTick() {
+    _bgRefreshTimerId = null;
+    if (_centralStopActive) {
+      // Defer: re-check in 30s — central stop should not eat the cycle.
+      _bgRefreshTimerId = setTimeout(bgRefreshTick, 30000);
+      return;
+    }
+    loadSettings(settings => {
+      if (!settings.backgroundRefresh) return;
+      botLog('info', '🔄 Background refresh — reloading page');
+      // Pre-compute the NEXT next-at BEFORE reload, so the cycle continues
+      // smoothly after the new page boots.
+      const nextAt = bgRefreshComputeNextAt(settings);
+      sSet({ [SK('bgRefreshNextAt')]: nextAt }, () => {
+        // Tiny delay so the storage write definitely commits.
+        setTimeout(() => { window.location.reload(); }, 200);
+      });
+    });
+  }
+
+  function bgRefreshFormatETA(ms) {
+    if (ms <= 0) return 'now';
+    const total = Math.floor(ms / 1000);
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    if (m >= 60) {
+      const h = Math.floor(m / 60);
+      const rm = m % 60;
+      return `${h}h ${rm}m`;
+    }
+    return `${m}m ${s}s`;
+  }
+
+  function bgRefreshStartETALoop() {
+    if (_bgRefreshEtaIntervalId) return; // already running
+    const tick = () => {
+      const eta = document.getElementById('bf-bg-refresh-eta');
+      if (!eta) return;
+      sGet([SK('bgRefreshNextAt')], r => {
+        const nextAt = r[SK('bgRefreshNextAt')];
+        if (!nextAt) { eta.textContent = '--'; eta.style.color = '#5a4a3a'; return; }
+        const remaining = nextAt - Date.now();
+        eta.textContent = bgRefreshFormatETA(remaining);
+        // Green when plenty of time, orange under 2 min, red under 30s
+        if (remaining < 30000)      eta.style.color = '#e74c3c';
+        else if (remaining < 120000) eta.style.color = '#e0a030';
+        else                          eta.style.color = '#2ecc71';
+      });
+    };
+    tick();
+    _bgRefreshEtaIntervalId = setInterval(tick, 1000);
   }
 
   function initCentralStop(cb) {
@@ -5115,19 +8157,24 @@
         const huntActive = settings.huntEnabled && state.huntState !== 'idle' && state.huntState !== 'done';
         const huntWaiting = settings.huntEnabled && state.huntState === 'waiting_orb';
         const ruinsActive = settings.ruinsEnabled && state.ruinsState !== 'idle' && state.ruinsState !== 'done';
+        const ruinsWaiting = settings.ruinsEnabled && state.ruinsState === 'waiting_training';
         const storyActive = settings.storyEnabled && state.storyState !== 'idle' && state.storyState !== 'done';
         const storyWaiting = settings.storyEnabled && (state.storyState === 'waiting_ap' || state.storyRecovering);
         const grottoActive = settings.grottoEnabled && state.grottoState !== 'idle' && state.grottoState !== 'done';
         const pvpActive = settings.pvpEnabled && state.pvpState !== 'idle' && state.pvpState !== 'done';
         const pvpWaiting = settings.pvpEnabled && state.pvpState === 'waiting';
+        const henchmanActive = settings.henchmanEnabled && state.henchmanState !== 'idle' && state.henchmanState !== 'done';
+        const henchmanWaiting = settings.henchmanEnabled && state.henchmanState === 'waiting';
         const giftsActive = state.giftsState === 'running' || settings.giftsAutoDBG;
-        const globalActive = settings.goldMode > 0 || settings.graveyardEnabled;
+        const globalActive = settings.goldMode > 0 || settings.graveyardEnabled || settings.recruitEnabled;
 
-        const anyBotEnabled = huntActive || ruinsActive || storyActive || grottoActive || pvpActive || giftsActive;
+        const anyBotEnabled = huntActive || ruinsActive || storyActive || grottoActive || pvpActive || henchmanActive || giftsActive;
         const allWaiting = (!huntActive || huntWaiting) &&
                            (!storyActive || storyWaiting) &&
                            (!pvpActive || pvpWaiting) &&
-                           !ruinsActive && !grottoActive && !giftsActive;
+                           (!henchmanActive || henchmanWaiting) &&
+                           (!ruinsActive || ruinsWaiting) &&
+                           !grottoActive && !giftsActive;
 
         if (anyBotEnabled && !allWaiting) {
           // 3. Green — actively running
@@ -5219,6 +8266,12 @@
     const remainNow = Math.max(0, until - Date.now());
     const totalMs = Math.max(fallbackTotal, remainNow);
 
+    // v1.6.5 — Counter for periodic global-module re-tick during cooldown.
+    // Fires botTick every ~30 seconds so Spend Gold / Auto Recruitment /
+    // Graveyard can run when nothing else is keeping the bot awake.
+    let _coolDownTickCounter = 0;
+    const GLOBAL_RETICK_EVERY = 30; // seconds (matches interval = 1000ms)
+
     _cooldownInterval = botSetInterval(() => {
       const now = Date.now();
       const until = state.orbWaitUntil || 0;
@@ -5248,6 +8301,26 @@
       // Status text
       const status = document.getElementById('bf-hunt-status');
       if (status) status.textContent = `Cooldown: ${h}h ${String(m).padStart(2,'0')}m`;
+
+      // v1.6.5 — Periodic global-module re-tick while waiting for cooldown.
+      // Skipped if we're about to finish (remainMs <= 0 handler will navigate).
+      _coolDownTickCounter++;
+      if (remainMs > 0 && _coolDownTickCounter >= GLOBAL_RETICK_EVERY) {
+        _coolDownTickCounter = 0;
+        loadState(st => {
+          loadSettings(se => {
+            // v1.6.14 — Inventory Cleanup is also a global-style module that
+            // can need re-ticking during Hunt cooldown (e.g. user pressed
+            // Run-Now while waiting_orb is active).
+            const globalsEnabled = (se.goldMode > 0) || !!se.recruitEnabled || !!se.graveyardEnabled || !!se.invDiscardEnabled;
+            // Only fire if we're still in waiting_orb and a global module is on.
+            // (If the user disabled hunt during cooldown, huntState may differ.)
+            if (globalsEnabled && st.huntState === 'waiting_orb') {
+              botTick(st, se);
+            }
+          });
+        });
+      }
 
       // Done?
       if (remainMs <= 0) {
@@ -5365,32 +8438,290 @@
     }
   }
 
+  // v1.6.0 — Levels grid (1..50) with drag-paint selection.
+  // Pointer events handle mouse, touch and pen uniformly. Each touched
+  // cell toggles to a single "paint" state determined by the first
+  // cell's new value at pointerdown. Cells are tracked in a per-drag
+  // Set so re-entering the same cell doesn't bounce its state.
+  //
+  // Layers > 50 are NOT in the grid — user enters them in the Custom
+  // ("Additional") field and they are unioned at save time.
+  //
+  // The 🔒 Lock toggle disables all pointer interaction and the Custom
+  // input. The lock state is persisted in settings.ruinsLevelsLocked.
+  const RUINS_GRID_SIZE = 50;
+
   function buildRuinsGrid() {
     const grid = document.getElementById('bf-ruins-level-grid');
     if (!grid) return;
     let html = '';
-    for (let i = 1; i <= 30; i++) {
-      html += `<div class="bf-ruins-lvl${i <= 20 ? ' selected' : ''}" data-level="${i}">${i}</div>`;
+    for (let i = 1; i <= RUINS_GRID_SIZE; i++) {
+      // Default selection (1..20) is applied later in applySettingsToUI;
+      // build cells in unselected state here so applySettings is authoritative.
+      html += `<div class="bf-ruins-lvl" data-level="${i}">${i}</div>`;
     }
     grid.innerHTML = html;
+    attachRuinsGridDragHandlers(grid);
   }
 
-  function getSelectedRuinsLevels() {
-    // Check custom input first
-    const custom = document.getElementById('bf-ruins-custom')?.value?.trim();
-    if (custom) {
-      return custom.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n) && n > 0);
+  // Idempotent: detaches old listeners by replacing the grid's inline
+  // dataset flag, but in practice buildRuinsGrid is called once at boot
+  // so we just attach here. Uses pointer events for unified input handling.
+  function attachRuinsGridDragHandlers(grid) {
+    let dragging = false;
+    let paintMode = false;     // true → mark as selected; false → mark as unselected
+    let touched = null;        // Set of level numbers toggled in this drag
+
+    function isLocked() {
+      return grid.classList.contains('locked');
     }
-    // Grid selection
-    return Array.from(document.querySelectorAll('.bf-ruins-lvl.selected'))
-      .map(el => parseInt(el.getAttribute('data-level'))).filter(n => !isNaN(n)).sort((a, b) => a - b);
+
+    function cellAtPoint(x, y) {
+      const el = document.elementFromPoint(x, y);
+      if (!el) return null;
+      const cell = el.closest('.bf-ruins-lvl');
+      if (!cell || !grid.contains(cell)) return null;
+      return cell;
+    }
+
+    function applyPaint(cell) {
+      const lvl = parseInt(cell.getAttribute('data-level'));
+      if (!lvl || (touched && touched.has(lvl))) return;
+      if (paintMode) cell.classList.add('selected');
+      else cell.classList.remove('selected');
+      if (touched) touched.add(lvl);
+    }
+
+    grid.addEventListener('pointerdown', (e) => {
+      if (isLocked()) { return; }
+      const cell = e.target.closest('.bf-ruins-lvl');
+      if (!cell || !grid.contains(cell)) return;
+      e.preventDefault();
+      // Paint mode = inverse of cell's current state (so the first
+      // touched cell flips immediately and sets the direction).
+      paintMode = !cell.classList.contains('selected');
+      touched = new Set();
+      dragging = true;
+      applyPaint(cell);
+      // Use setPointerCapture so pointermove keeps firing even if the
+      // pointer briefly leaves the grid (mobile finger drift).
+      try { grid.setPointerCapture(e.pointerId); } catch (_) {}
+    });
+
+    grid.addEventListener('pointermove', (e) => {
+      if (!dragging || isLocked()) return;
+      const cell = cellAtPoint(e.clientX, e.clientY);
+      if (cell) applyPaint(cell);
+    });
+
+    function endDrag(e) {
+      if (!dragging) return;
+      dragging = false;
+      touched = null;
+      try { grid.releasePointerCapture(e.pointerId); } catch (_) {}
+      // Persist immediately so the toggle button doesn't have to gather
+      loadSettings(se => {
+        se.ruinsLevels = readGridAndCustomLevels();
+        saveSettings(se);
+      });
+    }
+    grid.addEventListener('pointerup', endDrag);
+    grid.addEventListener('pointercancel', endDrag);
+    grid.addEventListener('pointerleave', (e) => {
+      // Only end drag if pointer is actually released (no buttons).
+      // pointerleave fires on capture too, so check buttons state.
+      if (!dragging) return;
+      if (e.buttons === 0) endDrag(e);
+    });
   }
 
-  function updateRuinsLevelSelection() {
-    // Sync custom input with grid
-    const levels = Array.from(document.querySelectorAll('.bf-ruins-lvl.selected'))
-      .map(el => el.getAttribute('data-level')).join(',');
-    // Don't overwrite custom if it has values
+  // Read the grid's current selection AND the Custom input, union them,
+  // and return a sorted unique array of levels. Used both at save-time
+  // and during drag persistence.
+  function readGridAndCustomLevels() {
+    const set = new Set();
+    document.querySelectorAll('.bf-ruins-lvl.selected').forEach(el => {
+      const n = parseInt(el.getAttribute('data-level'));
+      if (n > 0) set.add(n);
+    });
+    const customRaw = document.getElementById('bf-ruins-custom')?.value?.trim() || '';
+    if (customRaw) {
+      customRaw.split(/[\s,;]+/).forEach(tok => {
+        const n = parseInt(tok);
+        if (n > 0) set.add(n);
+      });
+    }
+    return Array.from(set).sort((a, b) => a - b);
+  }
+
+  // v1.6.0 — Lock toggle applies a CSS class that blocks pointer/custom
+  // interaction and updates the button glyph. Persisted in settings.
+  function applyRuinsLockState(locked) {
+    const grid = document.getElementById('bf-ruins-level-grid');
+    const btn = document.getElementById('bf-ruins-lock-btn');
+    const custom = document.getElementById('bf-ruins-custom');
+    if (grid) {
+      grid.classList.toggle('locked', !!locked);
+    }
+    if (custom) {
+      custom.disabled = !!locked;
+      custom.style.opacity = locked ? '0.55' : '1';
+      custom.title = locked ? 'Unlock first to edit' : '';
+    }
+    if (btn) {
+      btn.textContent = locked ? '🔒' : '🔓';
+      btn.title = locked ? 'Click to unlock' : 'Lock selection (prevent accidental changes)';
+      btn.style.color = locked ? '#e0a030' : '#5a7a4a';
+    }
+  }
+
+  // v1.5.8 — UNLOCKED tier bar in Ruins panel (T1..T8 buttons).
+  // Mirrors the simulator's UNLOCKED bar visuals. The selection drives
+  // the optimizer & preset validators (locked tiers can't appear in
+  // suggested formations).
+  function buildRuinsUnlockBar(unlockedIds) {
+    const bar = document.getElementById('bf-ruins-unlock-bar');
+    if (!bar) return;
+    const allTiers = ['T1','T2','T3','T4','T5','T6','T7','T8'];
+    const setU = new Set(unlockedIds && unlockedIds.length ? unlockedIds : ['T1','T2','T3','T4','T5','T6']);
+    bar.innerHTML = '';
+    allTiers.forEach(tid => {
+      const unlocked = setU.has(tid);
+      const btn = document.createElement('button');
+      btn.setAttribute('data-rt', tid);
+      btn.dataset.unlocked = unlocked ? '1' : '0';
+      btn.textContent = 'Tier ' + tid.slice(1);
+      btn.title = unlocked ? 'Click to lock' : 'Click to unlock';
+      btn.style.cssText = 'font-family:Cinzel,serif;font-size:0.62rem;padding:2px 8px;border-radius:10px;cursor:pointer;'
+        + (unlocked
+          ? 'background:rgba(201,168,76,0.15);color:#e0c068;border:1px solid #c9a84c;'
+          : 'background:rgba(255,255,255,0.03);color:#5a4a3a;border:1px solid #2a1218;');
+      btn.addEventListener('click', () => {
+        const nowU = btn.dataset.unlocked === '1';
+        btn.dataset.unlocked = nowU ? '0' : '1';
+        btn.title = nowU ? 'Click to unlock' : 'Click to lock';
+        btn.style.background = nowU ? 'rgba(255,255,255,0.03)' : 'rgba(201,168,76,0.15)';
+        btn.style.color      = nowU ? '#5a4a3a' : '#e0c068';
+        btn.style.borderColor= nowU ? '#2a1218' : '#c9a84c';
+        // Persist immediately (separate from the toggle button save)
+        loadSettings(se => {
+          const sel = [];
+          document.querySelectorAll('#bf-ruins-unlock-bar [data-rt]').forEach(b => {
+            if (b.dataset.unlocked === '1') sel.push(b.getAttribute('data-rt'));
+          });
+          se.ruinsAllyUnlocks = sel.length ? sel : ['T1'];
+          saveSettings(se);
+          // Refresh T4 info hint if Kill E3 R1 is on
+          updateRuinsOptHints(se);
+        });
+      });
+      bar.appendChild(btn);
+    });
+  }
+
+  // v1.5.9 — Build per-layer-band interval input rows in the Cadence group.
+  // Renders one row per band (L1-10, L11-20, …, L91-100, L101+) with a
+  // number input bound to settings.ruinsIntervalBands[band]. Changes
+  // persist immediately. The user can scroll the inner container since
+  // 11 rows don't all fit at once.
+  function buildRuinsIntervalBands(bandValues) {
+    const host = document.getElementById('bf-ruins-interval-bands');
+    if (!host) return;
+    host.innerHTML = '';
+    const vals = bandValues || {};
+    RUINS_BAND_KEYS.forEach(key => {
+      const cur = parseInt(vals[key]) || 0;
+      const labelTxt = key === '101' ? 'L 101+' : ('L ' + key);
+      const row = document.createElement('div');
+      row.className = 'bf-bot-row';
+      row.style.cssText = 'margin-bottom:3px;gap:6px;flex-wrap:wrap';
+      row.innerHTML = `
+        <span class="bf-bot-label" style="min-width:0;flex:0 0 56px;color:#7a9a6a">${labelTxt}</span>
+        <input type="number" class="bf-bot-input bf-ruins-band-input" data-band="${key}" value="${cur || 60}" min="1" max="1440" style="width:55px;flex:0 0 auto">
+        <span style="color:#5a7a4a;font-size:0.6rem">min</span>
+      `;
+      host.appendChild(row);
+    });
+    // Immediate persist on change
+    host.querySelectorAll('.bf-ruins-band-input').forEach(inp => {
+      inp.addEventListener('change', () => {
+        loadSettings(se => {
+          if (!se.ruinsIntervalBands) se.ruinsIntervalBands = {};
+          const band = inp.getAttribute('data-band');
+          const v = parseInt(inp.value);
+          if (band && v > 0 && v <= 1440) se.ruinsIntervalBands[band] = v;
+          saveSettings(se);
+        });
+      });
+    });
+  }
+
+  // v1.5.8 — Update hint area for "Kill E3 R1" (T4 required).
+  function updateRuinsOptHints(settings) {
+    const info = document.getElementById('bf-ruins-opt-t4-info');
+    const t4ShortRow = document.getElementById('bf-ruins-t4short-row');
+    if (!info) return;
+    const killE3 = !!settings.ruinsOptStratKillE3;
+    const t4Unlocked = (settings.ruinsAllyUnlocks || []).indexOf('T4') >= 0;
+    if (killE3) {
+      info.style.display = 'block';
+      info.innerHTML = t4Unlocked
+        ? '<span style="color:#9b59b6">☠ Kill E3 R1 active</span> — T4 minimum is calculated per battle from E3 count.'
+        : '<span style="color:#e74c3c">⚠ T4 is locked!</span> Unlock T4 in the bar above or this strategy cannot run.';
+    } else {
+      info.style.display = 'none';
+    }
+    if (t4ShortRow) t4ShortRow.style.display = killE3 ? 'block' : 'none';
+  }
+
+  // v1.5.8 — Render the Army Status grid (T1..T8 owned / cooldown / queue ETA).
+  // Called via the ↻ refresh button. Data fetched in background (no navigation).
+  function renderArmyStatus(data) {
+    const grid = document.getElementById('bf-army-status-grid');
+    if (!grid) return;
+    if (!data) {
+      grid.innerHTML = '<em style="color:#e74c3c">Failed to fetch army state.</em>';
+      return;
+    }
+    const rows = [];
+    let any = false;
+    for (let n = 1; n <= 8; n++) {
+      const tid = 'T' + n;
+      const owned = data.owned[tid];
+      const cd    = data.cooldown[tid] || 0;
+      const queue = data.queue[tid];
+      if (owned == null && !queue) continue;
+      any = true;
+      const queuePart = queue
+        ? ` <span style="color:#9b59b6">+${queue.qty} training</span>`
+          + (queue.nextReadySec > 0 ? ` <span style="color:#5a7a4a">(next: ${formatSeconds(queue.nextReadySec)})</span>` : '')
+        : '';
+      const cdPart = cd > 0 ? ` <span style="color:#c0392b">${cd} ⏱</span>` : '';
+      rows.push(`<div><b style="color:#e0c068">${tid}</b>: <span style="color:#f0d080">${owned || 0}</span>${cdPart}${queuePart}</div>`);
+    }
+    if (!any) {
+      grid.innerHTML = '<em style="color:#5a7a4a">No army data (recruit some units first).</em>';
+      return;
+    }
+    rows.push(`<div style="margin-top:4px;color:#5a7a4a;font-size:0.54rem">Total value: <b>${data.totalValue.toLocaleString()}</b></div>`);
+    grid.innerHTML = rows.join('');
+  }
+
+  function formatSeconds(s) {
+    if (!s || s < 0) return '-';
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60);
+    const ss = s % 60;
+    if (m < 60) return m + 'm ' + (ss > 0 ? ss + 's' : '');
+    const h = Math.floor(m / 60);
+    return h + 'h ' + (m % 60) + 'm';
+  }
+
+  // v1.6.0 — Levels are the union of the grid (1..50) AND the Custom
+  // input (>50, free-form). Previously Custom acted as override; now
+  // it is additive so grid + custom always combine.
+  function getSelectedRuinsLevels() {
+    return readGridAndCustomLevels();
   }
 
   function applySettingsToUI(settings) {
@@ -5413,22 +8744,41 @@
     const extractRep = document.getElementById('bf-extract-repeat');
     if (extractRep) extractRep.checked = settings.extractAutoRepeat !== false;
 
-    // Recruit
+    // ── Auto Recruitment (v1.6.4) ──────────────────────────────
     const recruitEn = document.getElementById('bf-recruit-enabled');
     if (recruitEn) recruitEn.checked = !!settings.recruitEnabled;
     const recruitTrigger = document.getElementById('bf-recruit-trigger');
-    if (recruitTrigger) recruitTrigger.value = settings.recruitTrigger || 'every';
+    // Migrate legacy 'every' (old "after every extraction") → new 'extraction' value
+    let trig = settings.recruitTrigger || 'idle';
+    if (trig === 'every') trig = 'extraction';
+    if (recruitTrigger) recruitTrigger.value = trig;
     const recruitThreshold = document.getElementById('bf-recruit-threshold');
     if (recruitThreshold) recruitThreshold.value = settings.recruitThreshold || 100;
     const thresholdRow = document.getElementById('bf-recruit-threshold-row');
-    if (thresholdRow) thresholdRow.style.display = (settings.recruitTrigger === 'threshold') ? 'flex' : 'none';
-    // Restore % allocations
+    if (thresholdRow) thresholdRow.style.display = (trig === 'threshold') ? 'flex' : 'none';
+    // Strategy selector & sub-panels
+    const recruitStrategy = document.getElementById('bf-recruit-strategy');
+    const strat = settings.recruitStrategy || 'priority';
+    if (recruitStrategy) recruitStrategy.value = strat;
+    const prioPanel = document.getElementById('bf-recruit-priority-panel');
+    const pctPanel  = document.getElementById('bf-recruit-percent-panel');
+    if (prioPanel) prioPanel.style.display = (strat === 'priority') ? 'block' : 'none';
+    if (pctPanel)  pctPanel.style.display  = (strat === 'percent')  ? 'block' : 'none';
+    // Reserve BE
+    const recruitReserve = document.getElementById('bf-recruit-reserve');
+    if (recruitReserve) recruitReserve.value = parseInt(settings.recruitReserveBE) || 0;
+    // Restore % allocations (T1-T8)
     const rPct = settings.recruitPercent || {};
     document.querySelectorAll('.bf-recruit-pct').forEach(inp => {
       const unitId = inp.dataset.unit;
       if (unitId && rPct[unitId] !== undefined) inp.value = rPct[unitId];
     });
     updateRecruitTotal();
+    // Build priority list rows from saved order + enabled tiers
+    renderRecruitPriorityRows(
+      settings.recruitPriority || TIER_ORDER_DEFAULT.slice(),
+      settings.recruitEnabledTiers || {}
+    );
 
     // Ignore qualities
     const ignoreQ = settings.huntIgnoreQ || [];
@@ -5455,19 +8805,37 @@
     const intervalInput = document.getElementById('bf-ruins-interval');
     if (intervalInput) intervalInput.value = settings.ruinsIntervalMin || 60;
 
-    // Ruins levels — select in grid
+    // Ruins levels — restore grid (1..50) and split levels >50 into Custom field.
+    // v1.6.0: grid + custom are now UNION; previously custom was an override.
+    // We migrate any pre-1.6.0 save by populating the Custom input from
+    // levels that fall outside the grid range.
     const levels = settings.ruinsLevels || [];
+    const inGrid = new Set();
+    const outGrid = [];
+    levels.forEach(l => {
+      const n = parseInt(l);
+      if (!n || n < 1) return;
+      if (n <= RUINS_GRID_SIZE) inGrid.add(n);
+      else outGrid.push(n);
+    });
     document.querySelectorAll('.bf-ruins-lvl').forEach(el => {
       const lvl = parseInt(el.getAttribute('data-level'));
-      if (levels.includes(lvl)) el.classList.add('selected');
+      if (inGrid.has(lvl)) el.classList.add('selected');
       else el.classList.remove('selected');
     });
+    const customEl = document.getElementById('bf-ruins-custom');
+    if (customEl) customEl.value = outGrid.length ? outGrid.sort((a,b) => a - b).join(', ') : '';
+    // v1.6.0 — apply lock state
+    applyRuinsLockState(!!settings.ruinsLevelsLocked);
 
     // Ruins safety settings
     const stopNoWin = document.getElementById('bf-ruins-stop-nowin');
     if (stopNoWin) stopNoWin.checked = settings.ruinsStopNoWin !== false;
     const stopPreset = document.getElementById('bf-ruins-stop-preset-short');
     if (stopPreset) stopPreset.checked = settings.ruinsStopPresetShort !== false;
+    // v1.6.2 — Ignore Presets toggle
+    const ignorePresetsEl = document.getElementById('bf-ruins-ignore-presets');
+    if (ignorePresetsEl) ignorePresetsEl.checked = !!settings.ruinsIgnorePresets;
     const stopMinU = document.getElementById('bf-ruins-stop-min-units');
     if (stopMinU) {
       stopMinU.checked = !!settings.ruinsStopMinUnits;
@@ -5479,6 +8847,41 @@
     const mt2 = document.getElementById('bf-ruins-min-t2'); if (mt2) mt2.value = minU.T2 || 0;
     const mt3 = document.getElementById('bf-ruins-min-t3'); if (mt3) mt3.value = minU.T3 || 0;
     const mt4 = document.getElementById('bf-ruins-min-t4'); if (mt4) mt4.value = minU.T4 || 0;
+
+    // v1.5.8 — UNLOCKED tier bar
+    buildRuinsUnlockBar(settings.ruinsAllyUnlocks || ['T1','T2','T3','T4','T5','T6']);
+    // v1.5.9 — Per-layer interval bands
+    buildRuinsIntervalBands(settings.ruinsIntervalBands || {});
+    // v1.5.8 — Optimization controls
+    const optKillE3 = document.getElementById('bf-ruins-opt-killE3');
+    if (optKillE3) optKillE3.checked = !!settings.ruinsOptStratKillE3;
+    const optMode = settings.ruinsOptMode === 'fast' ? 'fast' : 'deep';
+    const modeRadio = document.getElementById('bf-ruins-opt-mode-' + optMode);
+    if (modeRadio) modeRadio.checked = true;
+    const optPar = document.getElementById('bf-ruins-opt-parallel');
+    if (optPar) optPar.checked = settings.ruinsOptParallel !== false;
+    const wSrc = document.getElementById('bf-ruins-warm-source');
+    if (wSrc) wSrc.value = settings.ruinsWarmStartSource || 'none';
+    const wRng = document.getElementById('bf-ruins-warm-range');
+    if (wRng) wRng.value = settings.ruinsWarmStartRange || 15;
+    const wRow = document.getElementById('bf-ruins-warm-range-row');
+    if (wRow) wRow.style.display = (settings.ruinsWarmStartSource && settings.ruinsWarmStartSource !== 'none') ? 'flex' : 'none';
+    // v1.5.8 — T4 short action
+    const t4Action = settings.ruinsT4ShortAction || 'stop';
+    const t4Radio = document.getElementById('bf-ruins-t4short-' + t4Action);
+    if (t4Radio) t4Radio.checked = true;
+    const t4Wait = document.getElementById('bf-ruins-t4wait-min');
+    if (t4Wait) t4Wait.value = settings.ruinsT4WaitMin || 10;
+    // v1.5.8 — Auto-import
+    const aiEl = document.getElementById('bf-ruins-autoimport');
+    if (aiEl) aiEl.checked = !!settings.ruinsAutoImportNew;
+    const aiMaxEl = document.getElementById('bf-ruins-autoimport-max');
+    if (aiMaxEl) aiMaxEl.value = settings.ruinsAutoImportMaxPerLevel || 3;
+    // v1.5.9 — Auto-import as Smart preset
+    const aiSmartEl = document.getElementById('bf-ruins-autoimport-smart');
+    if (aiSmartEl) aiSmartEl.checked = !!settings.ruinsAutoImportSmart;
+    // Update Kill E3 / T4 short hints
+    updateRuinsOptHints(settings);
 
     // Story mode settings
     const storyPriority = document.getElementById('bf-story-priority');
@@ -5581,6 +8984,35 @@
     const blGroup = document.getElementById('bf-pvp-bl-group');
     if (blGroup) blGroup.style.display = (parseInt(settings.pvpMode) === 3) ? '' : 'none';
 
+    // ── HENCHMAN SETTINGS (v1.6.9, semantics flipped v1.6.10) ──
+    // Legacy mode 3 (old "blacklist by name") maps onto the new mode 2
+    // ("whitelist only") since the old code stored target names in the
+    // blacklist field. We carry the OLD blacklist over to the NEW whitelist
+    // for any user who briefly ran the interim 1.6.9 build, so they don't
+    // lose their target list.
+    if (settings.henchmanMode === 3 || settings.henchmanMode === '3') {
+      if (!settings.henchmanWhitelist && settings.henchmanBlacklist) {
+        settings.henchmanWhitelist = settings.henchmanBlacklist;
+        settings.henchmanBlacklist = '';
+      }
+      settings.henchmanMode = 2;
+    }
+    const hMode = document.getElementById('bf-henchman-mode');
+    if (hMode) hMode.value = String(settings.henchmanMode || 1);
+    const hWL = document.getElementById('bf-henchman-whitelist');
+    if (hWL) hWL.value = settings.henchmanWhitelist || '';
+    const hBL = document.getElementById('bf-henchman-blacklist');
+    if (hBL) hBL.value = settings.henchmanBlacklist || '';
+    const hBreak = document.getElementById('bf-henchman-break');
+    if (hBreak) hBreak.checked = !!settings.henchmanSmartBreak;
+    const hDelay = document.getElementById('bf-henchman-delay');
+    if (hDelay) hDelay.value = settings.henchmanDelay || 20;
+    const hMargin = document.getElementById('bf-henchman-margin');
+    if (hMargin) hMargin.value = settings.henchmanMargin || 3;
+    const hOwnRace = document.getElementById('bf-henchman-own-race');
+    if (hOwnRace) hOwnRace.checked = !!settings.henchmanAttackOwnRace;
+    // v1.6.10 — both lists are always visible; no per-mode show/hide.
+
     // ── GIFTS SETTINGS ──
     const gfDBG = document.getElementById('bf-gifts-dbg');
     if (gfDBG) gfDBG.checked = !!settings.giftsAutoDBG;
@@ -5629,10 +9061,130 @@
   }
 
   // ── INIT ─────────────────────────────────────────────────────
+  // ── AUTO-IMPORT NEW FORMATIONS AS PRESETS (v1.5.8) ──────────
+  // Periodically (every 90s) scans ruinsBattleLog for winning "new"
+  // entries that haven't been imported yet, and saves them as preset
+  // formations — but only while the bot's overall status indicator is
+  // WHITE (only global features) or YELLOW (enabled but waiting).
+  //   GREEN  = a bot module is actively running → skip (avoid churn)
+  //   TRANSPARENT = nothing enabled → skip
+  // Respects ruinsAutoImportMaxPerLevel for Ruins presets. Smart presets
+  // are per-LAYER (no fingerprint), so the cap doesn't apply — newest
+  // entry simply overwrites. v1.5.9: when ruinsAutoImportSmart is on,
+  // we ALSO write the formation to BFPresets (simulator warm-start lib).
+  function runAutoImportTick() {
+    if (_centralStopActive) return;
+    loadSettings(settings => {
+      const wantRuins = !!settings.ruinsAutoImportNew;
+      const wantSmart = !!settings.ruinsAutoImportSmart;
+      if (!wantRuins && !wantSmart) return;
+      // We only do this when the bot is "white" (global only) or "yellow"
+      // (enabled-but-not-actively-running). Concretely: ruinsEnabled is true
+      // but ruinsState is idle/done/waiting_training, OR ruinsEnabled is false.
+      loadState(state => {
+        const rState = state.ruinsState || 'idle';
+        const ruinsActive = settings.ruinsEnabled && (rState === 'attacking' || rState === 'fighting');
+        if (ruinsActive) return; // skip while bot is mid-attack
+        const maxPerLevel = settings.ruinsAutoImportMaxPerLevel || 3;
+        sGet([SK('ruinsBattleLog'), SK('ruinsPresets')], r => {
+          const log = r[SK('ruinsBattleLog')] || [];
+          const presets = r[SK('ruinsPresets')] || {};
+          let dirtyLog = false, dirtyPresets = false;
+          let importedRuins = 0;
+          let pendingSmart = []; // queued for async BFPresets writes after ruins save
+          // Process oldest-first so per-layer cap behavior is deterministic
+          for (let i = 0; i < log.length; i++) {
+            const e = log[i];
+            if (!e.won || isPresetSource(e.source)) continue;
+
+            // ── Ruins preset path (per-fingerprint, capped) ────────────────
+            if (wantRuins && !e.importedAsPreset && importedRuins < 5) {
+              const lvl = String(e.level);
+              const existing = presets[lvl] || [];
+              if (existing.length < maxPerLevel) {
+                const formation = {};
+                Object.keys(e.formation || {}).forEach(k => {
+                  const v = parseInt(e.formation[k]) || 0;
+                  if (v > 0) formation[k.toUpperCase()] = v;
+                });
+                if (Object.keys(formation).length) {
+                  const enemyObj = {};
+                  Object.keys(e.enemy || {}).forEach(k => {
+                    const v = parseInt(e.enemy[k]) || 0;
+                    if (v > 0) enemyObj[k.toUpperCase()] = v;
+                  });
+                  const fingerprint = Object.entries(enemyObj).sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) => `${k}:${v}`).join(',');
+                  if (existing.some(p => p.enemy === fingerprint)) {
+                    e.importedAsPreset = true; dirtyLog = true;
+                  } else {
+                    if (!presets[lvl]) presets[lvl] = [];
+                    presets[lvl].push({ enemy: fingerprint, formation });
+                    e.importedAsPreset = true;
+                    dirtyLog = true; dirtyPresets = true;
+                    importedRuins++;
+                  }
+                }
+              }
+            }
+
+            // ── Smart preset path (per-layer, last-write-wins) ────────────
+            if (wantSmart && !e.importedAsSmart && pendingSmart.length < 5) {
+              pendingSmart.push(i);
+            }
+          }
+
+          // 1) Persist Ruins-preset changes first
+          const patch = {};
+          if (dirtyLog) patch[SK('ruinsBattleLog')] = log;
+          if (dirtyPresets) patch[SK('ruinsPresets')] = presets;
+          const afterRuinsSave = () => {
+            // 2) Now process queued Smart-preset saves sequentially
+            if (!pendingSmart.length) {
+              if (importedRuins > 0) botLog('ok', `Auto-import: ${importedRuins} formation${importedRuins === 1 ? '' : 's'} saved as Ruins preset`);
+              if (document.getElementById('bf-bl-list-new')) renderBattleLog('new');
+              return;
+            }
+            let smartDone = 0;
+            const processNext = () => {
+              if (!pendingSmart.length) {
+                // Flush the importedAsSmart flags + report
+                sSet({ [SK('ruinsBattleLog')]: log }, () => {
+                  if (importedRuins > 0) botLog('ok', `Auto-import: ${importedRuins} formation${importedRuins === 1 ? '' : 's'} saved as Ruins preset`);
+                  if (smartDone > 0) botLog('ok', `Auto-import: ${smartDone} formation${smartDone === 1 ? '' : 's'} saved as Smart preset`);
+                  if (document.getElementById('bf-bl-list-new')) renderBattleLog('new');
+                });
+                return;
+              }
+              const idx = pendingSmart.shift();
+              saveBattleEntryAsSmartPreset(log[idx], res => {
+                if (res && res.ok) { log[idx].importedAsSmart = true; smartDone++; }
+                botSetTimeout(processNext, 60); // small delay to avoid storage thrash
+              });
+            };
+            processNext();
+          };
+          if (Object.keys(patch).length) sSet(patch, afterRuinsSave); else afterRuinsSave();
+        });
+      });
+    });
+  }
+
   function boot() {
     detectPlayerId().then(() => {
       createBotPanel();
       createBattleLogPanel();
+      // Pre-load smart preset cache so findBestFormation can use warm-start synchronously
+      try {
+        if (window.BFPresets && window.BFPresets.loadPresets) {
+          window.BFPresets.loadPresets(function () { /* cached internally */ });
+        }
+      } catch (_) {}
+      // v1.5.8 — auto-import periodic scan (every 90s, cancellable)
+      botSetInterval(runAutoImportTick, 90 * 1000);
+      // First run after a short delay so settings/state are loaded
+      botSetTimeout(runAutoImportTick, 8000);
+      // v1.6.7 — schedule watcher (30s tick) — drives slot transitions
+      botSetTimeout(startScheduleWatcher, 4000);
     });
   }
   if (document.readyState === 'loading') {
