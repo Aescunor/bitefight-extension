@@ -1773,7 +1773,7 @@ function countCombinations(powerLimit, maxPerTier) {
 // Greedy approach: tries formations from strongest down, stops after finding topN winners.
 // Generates candidates ordered by total power (descending) using a priority approach.
 // Does NOT optimize for blood essence — just finds formations that WIN.
-async function runFastScan(enemyQtys, topN, stratKillE3, btn) {
+async function runFastScan(enemyQtys, topN, stratKillE3, btn, fastBudget) {
   const tiers = ALLY_TIERS.filter(t => unlockedAllyTiers.has(t.id));
   const maxPerTier = {};
   let minPerTier = null;
@@ -1813,9 +1813,10 @@ async function runFastScan(enemyQtys, topN, stratKillE3, btn) {
   // Simple approach: sort all unlocked tiers by (dmg/power) desc — greedy fill best DPS tiers first
   const tiersByValue = [...tiers].sort((a, b) => (b.dmg / b.power) - (a.dmg / a.power));
 
-  // Generate candidates ordered by power (high → low) using level-by-level BFS on power usage
-  // We cap at 500k candidates max to avoid infinite loops
-  const MAX_CANDIDATES = 500_000;
+  // v1.6.18 — use user-set Fast budget as candidate ceiling (was hardcoded 500k).
+  // Default 50k if caller didn't pass it.
+  const MAX_CANDIDATES = Math.max(1000, Math.min(5000000,
+    parseInt(fastBudget) || 50000));
 
   document.getElementById('opt-progress-label').textContent = 'Fast Scan: generating candidates...';
   await new Promise(r => setTimeout(r, 0));
@@ -1901,6 +1902,16 @@ async function runOptimizer() {
   const topN = parseInt(document.getElementById('opt-top').value);
   const stratKillE3 = document.getElementById('strat-kill-e3')?.checked || false;
   const useParallel = document.getElementById('opt-parallel')?.checked !== false;
+  // v1.6.18 — read user's Fast Scan budget (clamped 1k..5M)
+  const fastBudget = Math.max(1000, Math.min(5000000,
+    parseInt(document.getElementById('opt-fastsims')?.value) || 50000));
+  // Show a console hint if Fast is used with a low budget on what looks like
+  // a high-power army. (The simulator doesn't know "layer" the way the bot
+  // does, but we can use PowerLimit ≈ 240 as a proxy for L21+.)
+  if (mode === 'fast' && fastBudget < 200000 && ARMY_POWER_LIMIT >= 240) {
+    console.warn('[BF] Fast Scan @', fastBudget, 'sims with PowerLimit', ARMY_POWER_LIMIT,
+      '— coverage may be insufficient. Consider Deep or budget 200k+.');
+  }
   const btn = document.getElementById('opt-btn-label');
   btn.textContent = '⏳ Running...';
   document.getElementById('opt-progress').style.display = 'block';
@@ -1910,7 +1921,7 @@ async function runOptimizer() {
   // Try parallel path first if requested and Worker is available
   if (useParallel && typeof Worker !== 'undefined' && supportsParallelOptimizer()) {
     try {
-      await runParallelOptimizer({ enemyQtys, mode, priority, topN, stratKillE3, btn });
+      await runParallelOptimizer({ enemyQtys, mode, priority, topN, stratKillE3, btn, fastBudget });
       return;
     } catch (err) {
       console.warn('[BF] Parallel optimizer failed, falling back to single-thread:', err);
@@ -1922,7 +1933,7 @@ async function runOptimizer() {
 
   // Fast Scan mode — separate algorithm (single thread)
   if (mode === 'fast') {
-    await runFastScan(enemyQtys, topN, stratKillE3, btn);
+    await runFastScan(enemyQtys, topN, stratKillE3, btn, fastBudget);
     return;
   }
 
@@ -2085,7 +2096,7 @@ function splitRangesWithOffset(minVal, maxVal, n) {
   return ranges;
 }
 
-async function runParallelOptimizer({ enemyQtys, mode, priority, topN, stratKillE3, btn }) {
+async function runParallelOptimizer({ enemyQtys, mode, priority, topN, stratKillE3, btn, fastBudget }) {
   // Resolve worker + engine URLs via chrome.runtime
   const workerUrl = chrome.runtime.getURL('js/optimizer_worker.js');
   const engineUrl = chrome.runtime.getURL('js/sim_engine.js');
@@ -2140,6 +2151,13 @@ async function runParallelOptimizer({ enemyQtys, mode, priority, topN, stratKill
   const ranges = splitRangesWithOffset(splitMinPreset, splitMax, workerCount);
   const unlockedAllyIds = ALLY_TIERS.filter(t => unlockedAllyTiers.has(t.id)).map(t => t.id);
 
+  // v1.6.18 — derive per-worker candidate cap from user's Fast budget.
+  // Floor of 2000/worker so even small budgets give each worker room.
+  // Deep mode ignores this (worker has no cap in deep).
+  const _perWorkerFastCap = (mode === 'fast' && fastBudget)
+    ? Math.max(2000, Math.ceil(Math.max(workerCount * 2000, fastBudget) / workerCount))
+    : 200000;
+
   document.getElementById('opt-progress-label').textContent =
     `🚀 Spawning ${ranges.length} workers (split on ${splitTier.id}: ${splitMinPreset}..${splitMax})${presetSummary}…`;
   await new Promise(r => setTimeout(r, 0));
@@ -2190,7 +2208,7 @@ async function runParallelOptimizer({ enemyQtys, mode, priority, topN, stratKill
           enemyQtys: enemyQtys,
           stratKillE3: stratKillE3,
           targetWinners: Math.max(topN * 3, 20),
-          maxCandidates: 200_000,
+          maxCandidates: _perWorkerFastCap,
           progressEveryMs: 120,
         });
       } else if (msg.type === 'progress') {
@@ -3323,6 +3341,17 @@ document.addEventListener('DOMContentLoaded', function () {
 
   const btnCancelOpt = document.getElementById('btn-cancel-optimizer');
   if (btnCancelOpt) btnCancelOpt.addEventListener('click', requestOptimizerCancel);
+
+  // v1.6.18 — Mode radio toggles Fast Scan budget input visibility
+  function syncOptFastRowVisibility() {
+    const isFast = document.getElementById('opt-mode-fast')?.checked;
+    const row = document.getElementById('opt-fastsims-row');
+    if (row) row.style.display = isFast ? 'block' : 'none';
+  }
+  document.querySelectorAll('input[name="opt-mode"]').forEach(function (r) {
+    r.addEventListener('change', syncOptFastRowVisibility);
+  });
+  syncOptFastRowVisibility(); // init on load
 
   // Smart Preset section in optimizer
   const presetEnabled = document.getElementById('opt-preset-enabled');
