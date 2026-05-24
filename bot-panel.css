@@ -153,6 +153,26 @@
 }
 #bf-bot-close:hover { color: #e74c3c; }
 
+/* v1.6.19 — Fullscreen toggle (mirrors #bf-sim-fullscreen) */
+#bf-bot-fullscreen {
+  background: none; border: 1px solid transparent;
+  color: #5a7a4a; font-size: 0.85rem;
+  cursor: pointer; padding: 2px 6px;
+  border-radius: 3px; line-height: 1;
+  transition: all 0.2s;
+}
+#bf-bot-fullscreen:hover {
+  border-color: #4caf50;
+  background: rgba(76,175,80,0.12);
+  color: #7ad19a;
+}
+/* When the .bf-bot-fullscreen class is added by JS, override the
+   panel's normal 85vh cap so it truly fills the viewport. */
+#bf-bot-panel.bf-bot-fullscreen {
+  max-height: 100vh !important;
+  border-radius: 0;
+}
+
 /* ── Tabs ───────────────────────────────────────────────────── */
 .bf-bot-tabs {
   display: flex;
@@ -237,6 +257,36 @@
   outline: none;
   flex: 1;
   min-width: 0;
+}
+/* v1.6.15.3 — Native <select> styling fix.
+   Chrome on certain OS themes (especially dark Linux themes and some Windows
+   dark setups) ignores our color/background and renders the select with
+   system-default dark-on-dark text, making it invisible against our black
+   panel. Force-override with appearance: none, a brighter border, a custom
+   SVG dropdown arrow, and an explicit min-height so the dropdown is always
+   visible regardless of OS theme. */
+.bf-bot-select {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background-color: #14181a;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M0 0 L5 6 L10 0 Z' fill='%237a9a6a'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  background-size: 9px 5px;
+  border: 1px solid #3a5a3a;
+  color: #d4e4c0;
+  padding-right: 20px;
+  min-height: 22px;
+  cursor: pointer;
+}
+.bf-bot-select:hover { border-color: #4caf50; background-color: #1a201c; }
+/* Drop-down OPTION list — Chrome respects color/background on <option> on
+   most platforms (unlike the closed select on some Linux setups). */
+.bf-bot-select option {
+  background-color: #14181a;
+  color: #d4e4c0;
+  font-family: 'Cinzel', serif;
 }
 .bf-bot-select:focus, .bf-bot-input:focus { border-color: #4caf50; }
 .bf-bot-input[type="number"] { width: 55px; flex: none; text-align: center; }
