@@ -811,7 +811,7 @@
             style="margin-top:3px;accent-color:#9b59b6">
           <span>
             <span style="font-family:Cinzel,serif;font-size:0.72rem;color:var(--text)">🔬 Deep Simulation</span>
-            <span style="display:block;font-size:0.68rem;color:var(--text-dim);font-style:italic">Full precise simulation. Finds optimal formation. Recommended up to Power ~200.</span>
+            <span style="display:block;font-size:0.68rem;color:var(--text-dim);font-style:italic">Tests every viable formation, picks the truly optimal one. Best for layer 21+ or when minimizing losses matters. Slower.</span>
           </span>
         </label>
         <label style="cursor:pointer;display:flex;align-items:flex-start;gap:8px">
@@ -819,9 +819,22 @@
             style="margin-top:3px;accent-color:#e67e22">
           <span>
             <span style="font-family:Cinzel,serif;font-size:0.72rem;color:#e67e22">⚡ Fast Scan</span>
-            <span style="display:block;font-size:0.68rem;color:var(--text-dim);font-style:italic">Quick search for first winning formations. Regardless of losses. For Power 200+.</span>
+            <span style="display:block;font-size:0.68rem;color:var(--text-dim);font-style:italic">Tests up to N candidates sorted by power, stops once enough winners found. Quick formation finder for low layers.</span>
           </span>
         </label>
+      </div>
+      <!-- v1.6.18 — Fast Scan budget input + recommendation -->
+      <div id="opt-fastsims-row" style="display:none;margin-top:8px;padding:6px 8px;background:rgba(230,126,34,0.08);border:1px solid rgba(230,126,34,0.25);border-radius:3px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+          <span style="font-family:Cinzel,serif;font-size:0.66rem;color:#e67e22">Max simulations:</span>
+          <input type="number" id="opt-fastsims" value="50000" min="1000" max="5000000" step="5000"
+            style="width:90px;background:var(--dark);border:1px solid var(--border);color:var(--text);font-family:Cinzel,serif;font-size:0.72rem;padding:2px 6px;border-radius:2px;text-align:right">
+          <span style="font-size:0.62rem;color:var(--text-dim);font-style:italic">candidates tested</span>
+        </div>
+        <div style="font-size:0.62rem;color:var(--text-dim);line-height:1.4">
+          <span style="color:#7ad19a">💡 50,000</span> — recommended for layers 1–20 (typical losses 0–5 units).<br>
+          <span style="color:#e6a060">⚠</span> For layer 21+ either raise to <strong style="color:#e67e22">200,000+</strong> or switch to <strong style="color:#9b59b6">Deep Simulation</strong> — 50k is insufficient at high layers.
+        </div>
       </div>
     </div>
 
