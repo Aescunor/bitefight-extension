@@ -2,7 +2,7 @@
 
 Chrome extension for **[Bitefight](https://www.bitefight.gameforge.com/)** — a vampire-themed browser strategy game by Gameforge. Provides a battle simulator with parallel formation optimizer and a full suite of automation bots with multi-window scheduling.
 
-> **v1.6.14** · Chrome Manifest V3 · Language-independent (works on every Bitefight server)
+> **v1.6.19** · Chrome Manifest V3 · Language-independent (works on every Bitefight server)
 
 ---
 
