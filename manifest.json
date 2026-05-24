@@ -5,7 +5,7 @@
   "name": "Bitefight \u2013 Battle Simulator",
   "short_name": "BF Simulator",
   "description": "Battle simulator and bot assistant for Bitefight. Story Bot, Hunt Bot, Ruins Farming, Grotto, PvP, Gifts, Global settings, formation simulator. Includes full T1-T8 and E1-E10 unit simulation with all abilities. Parallel WebWorker optimizer and smart per-layer presets for fast formation search.",
-  "version": "1.6.14",
+  "version": "1.6.19",
   "icons": {
     "16": "img/icon-16.png",
     "48": "img/icon-48.png",
