@@ -30,7 +30,23 @@ self.onmessage = function (e) {
   const msg = e.data;
   try {
     if (msg.type === 'init') {
-      importScripts(msg.enginePath);
+      // v1.6.17: in the bot's content-script context the worker is built
+      // from a blob: URL with sim_engine.js already inlined ahead of this
+      // file, so self.BFEngine is defined before init arrives — skip the
+      // importScripts in that case. Simulator-iframe context still passes
+      // enginePath and lands in the importScripts branch.
+      const engineAlreadyLoaded =
+        typeof self.BFEngine === 'object' && self.BFEngine && typeof self.BFEngine.simulate === 'function';
+      if (!engineAlreadyLoaded) {
+        if (!msg.enginePath) {
+          self.postMessage({
+            type: 'error',
+            message: 'Engine not inlined and no enginePath provided',
+          });
+          return;
+        }
+        importScripts(msg.enginePath);
+      }
       if (typeof self.BFEngine !== 'object' || !self.BFEngine.simulate) {
         self.postMessage({ type: 'error', message: 'Engine failed to expose BFEngine on self' });
         return;
