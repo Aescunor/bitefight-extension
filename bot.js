@@ -497,7 +497,13 @@
 
     const mode = opts.mode === 'fast' ? 'fast' : 'deep';
     const stratKillE3 = !!opts.stratKillE3;
-    const maxTested = opts.maxTested || 50000;
+    // v1.6.18: maxTested is now an actual ceiling for BOTH modes. The
+    // previous "fast = 50k cap but stops at 200 anyway" behavior is gone
+    // (see removed shortcut in recurse). Caller passes opts.maxTested =
+    // user's Fast-budget setting (default 50k). Deep still falls back to
+    // 500k if no value is supplied — small enough to keep worst-case
+    // single-thread fallback under ~10s on the page thread.
+    const maxTested = opts.maxTested || (mode === 'deep' ? 500000 : 50000);
 
     const maxByTier = {};
     const minByTier = {};
@@ -545,7 +551,10 @@
         if (Object.keys(current).length === 0) return; // skip empty formation
         const r = botSimulate(current, enemyQtys);
         consider(current, r);
-        if (mode === 'fast' && bestResult && tested >= 200) stopFlag = true;
+        // v1.6.18: removed legacy `mode === 'fast' && tested >= 200` shortcut.
+        // It caused "fast" to commit to the first winner found (~200 sims),
+        // which is far too shallow even on L10. Fast now uses the user-set
+        // budget via maxTested, giving real winner-of-N selection.
         return;
       }
       const tier = tiers[idx];
@@ -561,7 +570,10 @@
       delete current[tier.id];
     }
 
+    const startMs = Date.now();
     recurse(0, powerLimit, {});
+    const elapsedMs = Date.now() - startMs;
+    const cappedOut = tested >= maxTested;
 
     // Prefer E3-killing formation when strategy is on AND we found one;
     // otherwise fall back to overall best winner (don't fail the run).
@@ -569,7 +581,11 @@
     const winnerLabel = !chosen ? 'no victory'
       : (stratKillE3 && bestE3KillQtys) ? 'winner found (E3 killed R1)'
       : (stratKillE3 ? 'winner found (NO E3 kill)' : 'winner found');
-    botLog('info', `Optimizer [${mode}/${tierIds.join(',')}]: ${tested} tested, ${winnerLabel}`);
+    const cappedNote = cappedOut
+      ? ` — CAP HIT @ ${maxTested}, search INCOMPLETE (re-run with parallel for full coverage)`
+      : '';
+    botLog(cappedOut ? 'warn' : 'info',
+      `Optimizer [${mode}/${tierIds.join(',')}]: ${tested} tested in ${elapsedMs}ms, ${winnerLabel}${cappedNote}`);
     return chosen;
   }
 
@@ -578,6 +594,52 @@
   // for the bot's content-script context. Mirrors split logic on
   // the chosen split tier (T1 if unlocked, else cheapest unlocked tier).
   // cb is called with (qtysOrNull, source) on completion or fallback.
+  //
+  // v1.6.17: bot.js runs in the page's content-script context (origin =
+  // bitefight.gameforge.com), and Chrome forbids constructing a Worker
+  // directly from a chrome-extension:// URL across origins, regardless of
+  // web_accessible_resources. (simulator.js doesn't hit this because it runs
+  // inside the panel iframe, whose origin IS chrome-extension://, so its
+  // workers are same-origin.) Workaround: fetch optimizer_worker.js +
+  // sim_engine.js once, concatenate engine-first + worker, wrap in a Blob,
+  // and spawn the Worker from the resulting blob: URL — which is same-origin
+  // to the content script. Engine is inlined so the worker never has to
+  // importScripts() across origins later either.
+  let _blobWorkerUrlPromise = null;
+  function getBlobWorkerUrl() {
+    if (_blobWorkerUrlPromise) return _blobWorkerUrlPromise;
+    _blobWorkerUrlPromise = new Promise(function (resolve, reject) {
+      if (typeof chrome === 'undefined' || !chrome.runtime || typeof chrome.runtime.getURL !== 'function') {
+        reject(new Error('chrome.runtime.getURL unavailable'));
+        return;
+      }
+      const workerSrc = chrome.runtime.getURL('js/optimizer_worker.js');
+      const engineSrc = chrome.runtime.getURL('js/sim_engine.js');
+      const fetchText = function (url, label) {
+        return fetch(url).then(function (r) {
+          if (!r.ok) throw new Error(label + ' fetch ' + r.status);
+          return r.text();
+        });
+      };
+      Promise.all([fetchText(workerSrc, 'worker'), fetchText(engineSrc, 'engine')])
+        .then(function (parts) {
+          const workerText = parts[0];
+          const engineText = parts[1];
+          // Engine first (defines self.BFEngine), then a leading semicolon
+          // safety + worker text. The worker's init handler is updated to
+          // skip importScripts when self.BFEngine is already defined.
+          const combined = engineText + '\n;\n' + workerText;
+          const blob = new Blob([combined], { type: 'application/javascript' });
+          resolve(URL.createObjectURL(blob));
+        })
+        .catch(function (err) {
+          _blobWorkerUrlPromise = null; // allow retry on next dispatch
+          reject(err);
+        });
+    });
+    return _blobWorkerUrlPromise;
+  }
+
   function findBestFormationParallel(enemyQtys, maxUnits, powerLimit, opts, cb) {
     opts = opts || {};
     const fallback = () => {
@@ -629,6 +691,15 @@
     const hw = (navigator && navigator.hardwareConcurrency) || 4;
     const workerCount = Math.max(1, Math.min(8, hw, splitMaxAll - splitMinAll + 1));
 
+    // v1.6.18: split user's Fast-scan budget across workers so total
+    // simulations ≈ user setting. Deep mode ignores this (no cap in worker).
+    // Floor of 2000 per worker guarantees each worker gets enough room to
+    // find a few winners even with small total budgets.
+    const totalFastBudget = (mode === 'fast' && opts.maxTested)
+      ? Math.max(workerCount * 2000, opts.maxTested)
+      : 200000 * workerCount; // legacy default if no budget supplied
+    const perWorkerCandidates = Math.ceil(totalFastBudget / workerCount);
+
     // Partition [splitMinAll..splitMaxAll] across workers
     const ranges = [];
     const totalRange = splitMaxAll - splitMinAll + 1;
@@ -642,8 +713,6 @@
       cursor += size;
     }
 
-    const workerUrl = chrome.runtime.getURL('js/optimizer_worker.js');
-    const engineUrl = chrome.runtime.getURL('js/sim_engine.js');
     const workers = [];
     const done = new Array(ranges.length).fill(false);
     let aggregated = [];
@@ -685,45 +754,69 @@
       fallback();
     }, 30000);
 
-    ranges.forEach((range, idx) => {
-      let w;
-      try { w = new Worker(workerUrl); }
-      catch (err) {
-        if (!cancelled) { cancelled = true; clearTimeout(safety); cleanup(); fallback(); }
-        return;
-      }
-      workers.push(w);
-      w.onerror = function () {
+    // v1.6.17: spawn workers from a blob: URL (same-origin to the content
+    // script). The blob has sim_engine.js inlined, so we pass enginePath:null
+    // in init and the worker skips importScripts() entirely.
+    getBlobWorkerUrl().then(function (blobUrl) {
+      if (cancelled) return;
+      ranges.forEach((range, idx) => {
         if (cancelled) return;
-        cancelled = true; clearTimeout(safety); cleanup();
-        botLog('warn', 'Parallel optimizer worker error, single-thread fallback');
-        fallback();
-      };
-      w.onmessage = function (ev) {
-        const msg = ev.data;
-        if (!msg) return;
-        if (msg.type === 'ready') {
-          w.postMessage({
-            type: 'run', mode: mode, powerLimit: powerLimit,
-            maxPerTier: maxPerTier, minPerTier: minPerTier,
-            unlockedAllyIds: tiers.map(t => t.id),
-            splitTierId: splitTier.id, splitMin: range[0], splitMax: range[1],
-            enemyQtys: enemyQtys, stratKillE3: stratKillE3,
-            targetWinners: 60, maxCandidates: 200000, progressEveryMs: 250,
-          });
-        } else if (msg.type === 'done') {
-          aggregated = aggregated.concat(msg.results || []);
-          totalTested += msg.tested || 0;
-          done[idx] = true;
-          if (done.every(Boolean)) { clearTimeout(safety); finalize(); }
-        } else if (msg.type === 'error') {
+        let w;
+        try { w = new Worker(blobUrl); }
+        catch (err) {
+          if (!cancelled) {
+            cancelled = true; clearTimeout(safety); cleanup();
+            botLog('warn',
+              'Parallel optimizer: Worker constructor threw — single-thread fallback ('
+              + (err && err.message ? err.message : String(err)) + ')');
+            fallback();
+          }
+          return;
+        }
+        workers.push(w);
+        w.onerror = function (ev) {
           if (cancelled) return;
           cancelled = true; clearTimeout(safety); cleanup();
-          botLog('warn', `Parallel optimizer: worker ${idx} error (${msg.message || '?'}), single-thread fallback`);
+          botLog('warn',
+            'Parallel optimizer worker error — single-thread fallback ('
+            + (ev && ev.message ? ev.message : 'no message') + ')');
           fallback();
-        }
-      };
-      w.postMessage({ type: 'init', enginePath: engineUrl });
+        };
+        w.onmessage = function (ev) {
+          const msg = ev.data;
+          if (!msg) return;
+          if (msg.type === 'ready') {
+            w.postMessage({
+              type: 'run', mode: mode, powerLimit: powerLimit,
+              maxPerTier: maxPerTier, minPerTier: minPerTier,
+              unlockedAllyIds: tiers.map(t => t.id),
+              splitTierId: splitTier.id, splitMin: range[0], splitMax: range[1],
+              enemyQtys: enemyQtys, stratKillE3: stratKillE3,
+              targetWinners: 60, maxCandidates: perWorkerCandidates, progressEveryMs: 250,
+            });
+          } else if (msg.type === 'done') {
+            aggregated = aggregated.concat(msg.results || []);
+            totalTested += msg.tested || 0;
+            done[idx] = true;
+            if (done.every(Boolean)) { clearTimeout(safety); finalize(); }
+          } else if (msg.type === 'error') {
+            if (cancelled) return;
+            cancelled = true; clearTimeout(safety); cleanup();
+            botLog('warn', `Parallel optimizer: worker ${idx} error (${msg.message || '?'}), single-thread fallback`);
+            fallback();
+          }
+        };
+        // enginePath is null — engine is already inlined into the blob,
+        // so the worker's init handler skips importScripts().
+        w.postMessage({ type: 'init', enginePath: null });
+      });
+    }).catch(function (err) {
+      if (cancelled) return;
+      cancelled = true; clearTimeout(safety); cleanup();
+      botLog('warn',
+        'Parallel optimizer: blob worker setup failed — single-thread fallback ('
+        + (err && err.message ? err.message : String(err)) + ')');
+      fallback();
     });
   }
 
@@ -826,6 +919,12 @@
     ruinsOptStratKillE3: false,    // require formations that kill all E3 in round 1
     ruinsOptMode: 'deep',          // 'deep' = simulate all, 'fast' = greedy stop
     ruinsOptParallel: true,        // use Web Workers (parallel slicing)
+    // v1.6.18 — user-configurable Fast scan budget. Default 50k = good
+    // coverage for L1-L20 (~0-5 unit losses typical). For L21+ either bump
+    // this to 200k+ or use Deep mode. Replaces the prior hardcoded
+    // 200-after-first-winner shortcut, which gave "fast" mode misleadingly
+    // shallow coverage.
+    ruinsOptFastMaxSims: 50000,
     ruinsWarmStartSource: 'none',  // 'none' | 'smart' | 'preset' (Ruins Preset Formations of same layer)
     ruinsWarmStartRange: 15,       // ± units around warm-start target
     // T4 short safety (only relevant when ruinsOptStratKillE3 is on)
@@ -869,10 +968,20 @@
     grottoChurchAP: 15,              // max AP to spend at church
     // PvP
     pvpEnabled: false,
-    pvpMode: 1,             // 1=anyone, 2=stronger/equal, 3=blacklist namesearch, 4=levelsearch (BV range)
+    // v1.6.19 — Your in-game player name. Used by BOTH the PvP and Henchman
+    // result-page parsers to identify which side of `Víťaz: NAME` is the
+    // user. The game's winner line is the only place where the result is
+    // expressed structurally enough to parse without language assumptions,
+    // and it identifies the winner by display name only.
+    playerName: '',
+    pvpMode: 1,             // 1=anyone, 2=stronger/equal, 3=whitelist by name (iterate), 4=levelsearch (BV range)
     pvpMinHP: 50,           // minimum HP% before attack
-    pvpWhitelist: '',       // players NOT to attack (comma-separated)
-    pvpBlacklist: '',       // players TO attack (comma-separated, mode 3)
+    // v1.6.19 — semantics now match Henchman (intuitive labels):
+    //   pvpWhitelist = priority targets, iterated by namesearch (mode 3)
+    //   pvpBlacklist = players to AVOID, filtered on every result page
+    // Existing users' values are swapped once via migration step 4.
+    pvpWhitelist: '',       // priority targets — namesearched in mode 3
+    pvpBlacklist: '',       // players to skip — filtered in all modes
     pvpBVFrom: '',          // battle value range from (mode 4)
     pvpBVTo: '',            // battle value range to (mode 4)
     pvpSmartBreak: false,   // pause between attacks
@@ -2365,15 +2474,29 @@
         }
 
         const maxStr = Object.entries(maxUnits).filter(([,v]) => v > 0).map(([k,v]) => `${k}:${v}`).join(', ');
-        const modeLabel = (settings.ruinsOptMode === 'fast' ? 'fast' : 'deep')
+        const isFast = settings.ruinsOptMode === 'fast';
+        // v1.6.18: clamp budget into a safe range (1k .. 5M). Default 50k.
+        const fastBudget = Math.max(1000, Math.min(5000000,
+          parseInt(settings.ruinsOptFastMaxSims) || 50000));
+        const modeLabel = (isFast ? `fast(${fastBudget})` : 'deep')
           + (settings.ruinsOptParallel ? '/parallel' : '/single');
         botLog('info', `No exact preset for L${level} (${fp}), simulating${warmStartLabel} mode=${modeLabel}… [${maxStr}] PL:${powerLimit}`);
 
+        // v1.6.18: warn when Fast is used on layer 21+ — coverage of even
+        // 50k candidates is typically insufficient for layers with rich
+        // T1-T5 enemy mixes; user should bump budget or switch to Deep.
+        if (isFast && level >= 21 && fastBudget < 200000) {
+          botLog('warn',
+            `Layer ${level} with Fast mode (budget ${fastBudget}) — coverage may be insufficient. `
+            + `Consider Deep mode or increasing budget to 200,000+.`);
+        }
+
         const optOpts = {
           unlockedAllyIds: unlocked,
-          mode: settings.ruinsOptMode === 'fast' ? 'fast' : 'deep',
+          mode: isFast ? 'fast' : 'deep',
           stratKillE3: useKillE3,
           warmStart: warmStart,
+          maxTested: isFast ? fastBudget : undefined, // deep uses internal default
         };
 
         function onOptimizerResult(useQtys, source) {
@@ -2859,11 +2982,17 @@
         pvpNextAttack: 0,
         pvpKills: 0,
         pvpDeaths: 0,
+        // v1.6.19 — whitelist iteration tracking (PvP mode 3)
+        pvpWhitelistTried: [],
+        pvpLastTriedWhitelistName: '',
         // Henchman vs Henchman (v1.6.9)
         henchmanState: 'idle',
         henchmanNextAttack: 0,
         henchmanKills: 0,
         henchmanDeaths: 0,
+        // v1.6.19 — whitelist iteration tracking (Henchman mode 2)
+        henchmanWhitelistTried: [],
+        henchmanLastTriedWhitelistName: '',
         // Recruit
         recruitDoneThisExtraction: false,
         recruitLastCycle: 0,        // v1.6.4 — last time globalRecruitTick fired (ms)
@@ -2954,6 +3083,35 @@
           if (typeof sl.actions.invdisc  === 'undefined') sl.actions.invdisc  = false;
         });
       });
+
+      // ── Migration step 4 (v1.6.19) — PvP list semantic swap ──
+      // Through v1.6.18 the PvP UI had its labels backwards:
+      //   pvpWhitelist  was used as "do not attack" (avoid)
+      //   pvpBlacklist  was used as "attack these in mode 3" (priority)
+      // The Henchman module already used the intuitive convention
+      // (whitelist = priority, blacklist = avoid). v1.6.19 aligns PvP with
+      // Henchman, which means swapping the values of these two fields
+      // exactly once for existing users so their data keeps the semantics
+      // they originally intended when they typed names in.
+      //
+      // The swap is idempotent and protected by a one-shot flag.
+      if (!merged._pvpListsSwappedV1619) {
+        const oldWL = String(merged.pvpWhitelist || '');
+        const oldBL = String(merged.pvpBlacklist || '');
+        // Only swap if at least one side actually had content — otherwise
+        // (fresh install / both empty) it's a no-op but we still set the
+        // flag so future sessions skip this branch.
+        if (oldWL.trim() !== '' || oldBL.trim() !== '') {
+          merged.pvpWhitelist = oldBL;
+          merged.pvpBlacklist = oldWL;
+        }
+        merged._pvpListsSwappedV1619 = true;
+        // Persist the migrated values so the next session reads the new
+        // semantics directly (no double swap). saveSettings is fire-and-
+        // forget here — if it fails the worst case is one extra swap on
+        // the next load, which the flag still prevents.
+        try { sSet({ [SK('settings')]: merged }); } catch(e) {}
+      }
 
       cb(merged);
     });
@@ -4173,17 +4331,113 @@
   }
 
   function isPvPBattleResultPage() {
-    // After the actual PvP fight — shows win/loss report
-    // CRITICAL: must NOT trigger on /robbery/index (which has "lost souls" text and PvP forms)
-    if (!PAGE.includes('/robbery/') || PAGE.includes('/robbery/humanhunt')) return false;
-    // If PvP search forms are present, this is the search page, NOT a result page
-    if (document.querySelector('input[name="optionsearch"], input[name="levelsearch"], input[name="namesearch"]')) return false;
-    // Definitive check: battle report table exists (language-independent)
-    if (document.querySelector('.reportTable, #reportResult, #fighter_details_attacker, #fighter_details_defender')) return true;
-    // Fallback text check with more specific patterns (avoid "won"/"lost" standalone)
-    const bodyText = document.body.textContent || '';
-    // Last resort text check — should rarely be needed since DOM checks above cover most cases
-    return !!(bodyText.match(/reportResult|combatResult|fighter_details/i));
+    // After the actual PvP/Henchman fight, the game redirects to the report
+    // page. The URL can be one of:
+    //   /report/fightreport/<id>/msg/1   (the link in the message)
+    //   /msg/showmessage/<id>            (older flow)
+    //   /robbery/...                     (variant the v1.6.18 build assumed)
+    // We must NOT trigger on /robbery/index (the hunt page itself) — it has
+    // PvP forms and other markers that would false-positive.
+    if (PAGE === '/robbery/index' || PAGE.endsWith('/robbery/index')) return false;
+    if (PAGE.includes('/robbery/humanhunt')) return false;
+    // If PvP search forms are present anywhere, this is the search/hunt page,
+    // NOT a result page.
+    if (document.querySelector('input[name="optionsearch"], input[name="levelsearch"], input[name="namesearch"], input[name="henchmanfightsearch"]')) return false;
+
+    // v1.6.19 — Definitive structural fingerprint for the PvP/Henchman
+    // result page. Combines two markers:
+    //   • #reportResult with at least one <h3> containing a colon → the
+    //     "Víťaz: NAME" line (language-independent — every locale uses
+    //     <label>:<space><name> format).
+    //   • #fighter_details_attacker / #fighter_details_defender → the
+    //     report's detailed-stats section, which is unique to fight reports.
+    // Either marker alone is sufficient evidence that we're on a fight
+    // result page.
+    const reportBox = document.getElementById('reportResult');
+    if (reportBox) {
+      // Make sure there's at least one h3 with a colon (the winner line).
+      const h3s = reportBox.querySelectorAll('h3');
+      for (const h3 of h3s) {
+        const txt = (h3.textContent || '').trim();
+        if (txt.indexOf(':') > 0 && txt.slice(txt.indexOf(':') + 1).trim()) return true;
+      }
+    }
+    if (document.querySelector('#fighter_details_attacker, #fighter_details_defender')) return true;
+    // Ruins-style fallback (rare but cheap to check).
+    if (document.querySelector('.combatResultHeader, .combatContainer')) return true;
+    return false;
+  }
+
+  // v1.6.19 — Win/loss detector for PvP & Henchman battle result pages.
+  //
+  // The PvP/Henchman report page (unlike Ruins, which uses
+  // .combatResultHeader.resultVictory) emits the result as:
+  //     <div id="reportResult">
+  //         <h2>Správa z boja 22.05.2026 11:12</h2>
+  //         <h3>Víťaz: BARBUCHA</h3>           ← language-independent: it's
+  //                                              the winner's *name* (data),
+  //                                              not the *label* (which is
+  //                                              localised).
+  //         …
+  //     </div>
+  // To identify whether the user won, we need to compare BARBUCHA against
+  // the user's own in-game name. That name is configured in the panel
+  // (bf-player-name) and stored in settings.playerName — there is no
+  // reliable way to read it directly from the result DOM in a language-
+  // independent way (the user's identity only appears inside paragraph
+  // text like "Efektívna strata (Kladivom)").
+  //
+  // detectCombatVictory(playerName) → true (user won) / false (user lost)
+  //                                   / null (couldn't determine).
+  // Callers MUST treat null as "don't update stats" (no false counting).
+  function detectCombatVictory(playerName) {
+    const name = String(playerName || '').trim();
+
+    // ── Primary: parse the winner name out of #reportResult > h3.
+    // We look at the FIRST h3 inside reportResult that contains a colon
+    // ("Víťaz:" / "Winner:" / "Sieger:" / etc.). The value after the
+    // colon is the display name — same on every server locale.
+    const reportBox = document.getElementById('reportResult')
+                   || document.querySelector('.reportResult');
+    if (reportBox) {
+      const h3s = reportBox.querySelectorAll('h3');
+      for (const h3 of h3s) {
+        const txt = (h3.textContent || '').trim();
+        if (!txt) continue;
+        const colonIdx = txt.indexOf(':');
+        if (colonIdx <= 0) continue; // need both a label and a value
+        const winner = txt.slice(colonIdx + 1).trim();
+        if (!winner) continue;
+        // Ignore h3s that are clearly something else (e.g. "Detaily správy"
+        // has no colon, but "Inventár" might in other locales). We've
+        // already required a colon AND a non-empty value on the right.
+        if (name) {
+          // Case-sensitive equality first (Bitefight names are case-sensitive),
+          // but fall back to case-insensitive to be forgiving of user typos
+          // in the settings field.
+          if (winner === name) return true;
+          if (winner.toLowerCase() === name.toLowerCase()) return true;
+          // The winner is *someone else* → user lost. We can't get this wrong
+          // unless playerName is misconfigured, in which case every fight
+          // would be a "loss" (visible immediately, easy to diagnose).
+          return false;
+        }
+        // playerName not configured → can't determine; bail to caller.
+        return null;
+      }
+    }
+
+    // ── Secondary: fall back to the Ruins-style structural marker so
+    // the helper still works on report layouts that use combatResultHeader
+    // (e.g. some PvE flows reuse this code path).
+    const header = document.querySelector('.combatResultHeader');
+    if (header) {
+      if (header.classList.contains('resultVictory')) return true;
+      if (header.classList.contains('resultDefeat'))  return false;
+    }
+
+    // Couldn't determine — signal NULL so the caller skips stat update.
+    return null;
   }
 
   // Find the optionsearch form (PvP random search)
@@ -4233,37 +4487,45 @@
       return;
     }
 
-    // Smart break
-    if (settings.pvpSmartBreak && state.pvpNextAttack > Date.now()) {
+    // v1.6.19 — Cooldown gate. Honors `pvpNextAttack` regardless of the
+    // Smart Break checkbox: Smart Break sets it after each fight, AND the
+    // new no-opponents guard (in the isPvPHuntPage branch below) sets it
+    // when the search returns empty — so we always need to respect it.
+    if (state.pvpNextAttack && state.pvpNextAttack > Date.now()) {
       const waitMs = state.pvpNextAttack - Date.now();
-      botLog('info', `PvP: Smart break – Next attack in ${Math.ceil(waitMs/60000)} min`);
+      const reason = (state.pvpState === 'waiting') ? 'No-opponents cooldown' : 'Smart break';
+      botLog('info', `PvP: ${reason} – Next attack in ${Math.ceil(waitMs/60000)} min`);
       botSetTimeout(() => { loadState(st => { loadSettings(se => { pvpTick(st, se); }); }); }, Math.min(waitMs + 1000, 300000));
       return;
     }
 
     // ── On battle result page — parse result and go back ──
     if (isPvPBattleResultPage()) {
-      const bodyText = document.body.textContent || '';
-      // Language-independent: detect win/loss from DOM structure
-      const reportResult = document.querySelector('#reportResult, .reportResult, .combatResultHeader');
-      const won = reportResult ? (
-        reportResult.classList.contains('resultVictory') ||
-        reportResult.classList.contains('won') ||
-        !!reportResult.querySelector('.victory, img[src*="victory"], img[src*="win"]')
-      ) : false;
-      // Fallback: check for fighter_details ordering — attacker wins if their section has win indicators
-      const wonFallback = !won && !!document.querySelector('.reportTable .winner, .report-winner');
-      const isWin = won || wonFallback;
-      if (isWin) state.pvpKills = (state.pvpKills || 0) + 1;
-      else state.pvpDeaths = (state.pvpDeaths || 0) + 1;
+      // v1.6.19 — Winner-name-based detection. Returns null when the user
+      // hasn't configured their playerName, in which case we still navigate
+      // back but skip the stats update (warn once, so the user knows why).
+      const isWin = detectCombatVictory(settings.playerName);
+      if (isWin === true)  state.pvpKills  = (state.pvpKills  || 0) + 1;
+      else if (isWin === false) state.pvpDeaths = (state.pvpDeaths || 0) + 1;
+      // null → undeterminable; don't touch stats.
 
       // Set next attack time if smart break
       if (settings.pvpSmartBreak) {
         const delay = (settings.pvpDelay + (Math.random() * 2 - 1) * settings.pvpMargin) * 60 * 1000;
         state.pvpNextAttack = Date.now() + Math.max(delay, 60000);
       }
+      // Result delivered → drop the 'hunting' marker so the no-opponents
+      // guard on the next /robbery/index landing doesn't false-positive.
+      state.pvpState = 'navigating';
+      // Whitelist round complete — reset the tried-names ledger so the
+      // next round starts fresh from the first name.
+      state.pvpWhitelistTried = [];
       saveState(state);
-      botLog(isWin ? 'ok' : 'warn', `PvP: ${isWin ? 'Win' : 'Loss'} (${state.pvpKills}W/${state.pvpDeaths}L)`);
+      if (isWin === null) {
+        botLog('warn', 'PvP: Result detected but player name not configured — set "Your in-game player name" in the PvP tab to enable win/loss counting.');
+      } else {
+        botLog(isWin ? 'ok' : 'warn', `PvP: ${isWin ? 'Win' : 'Loss'} (${state.pvpKills}W/${state.pvpDeaths}L)`);
+      }
       updatePvPUI(settings, state);
 
       // Navigate back to PvP page for next search
@@ -4275,22 +4537,56 @@
     if (isPvPSearchResultPage()) {
       // Look for attack button/link
       const attackLink = document.querySelector('a[href*="/robbery/attack"], a[href*="robbery/dofight"]');
-      // Language-independent: find the attack form submit button by form action
+      // Language-independent: find the attack form submit button by form action.
+      // CRITICAL: must NOT match `form[action*="robbery/henchmanattack"]` (different
+      // form, different button) — the substring "robbery/attack" doesn't appear
+      // contiguously inside "robbery/henchmanattack", so the existing selector
+      // is already safe.
       const attackForm = document.querySelector('form[action*="robbery/attack"], form[action*="robbery/dofight"]');
       const attackBtn = attackForm ? attackForm.querySelector('input[type="submit"], button[type="submit"]') : null;
+      // v1.6.19 — also detect a disabled PvP "Attack" button (the game ships
+      // it with class="btndisable" when the target is unfightable for the
+      // current player). Treated the same as "no attack option" → skip.
+      const disabledAttackBtn = document.querySelector('button.btndisable, input.btndisable');
 
-      // Check whitelist — if the found player is whitelisted, skip
-      // v1.6.10 — use token-based matcher so "Tomler" matches "Upír Tomler"
-      // (regardless of server language).
-      if (settings.pvpWhitelist) {
-        const wl = settings.pvpWhitelist.split(',').map(n => n.trim().toLowerCase()).filter(Boolean);
-        if (wl.length > 0) {
-          const playerName = (document.querySelector('.reportTable td b, h2, .username, #profileName') || {}).textContent || '';
-          if (matchPlayerByNameList(playerName, wl)) {
-            botLog('info', `PvP: Player "${playerName.trim()}" is whitelisted → searching for another`);
-            botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
-            return;
-          }
+      // Pull the player's display name once for both blacklist and (in mode 3)
+      // whitelist match-tracking. Token-based matcher handles race prefixes
+      // ("Upír Tomler" → matches "Tomler") regardless of server language.
+      const playerNameEl = document.querySelector('.reportTable td b, h2, .username, #profileName');
+      const playerName = (playerNameEl ? playerNameEl.textContent : '') || '';
+      const playerNameTrim = playerName.trim();
+
+      // v1.6.19 — BLACKLIST = "avoid this player" (semantics now match Henchman
+      // and what the UI label promises). Previously `pvpWhitelist` carried the
+      // "do-not-attack" semantics, which was the opposite of the user-facing
+      // label — this confused everyone, including the legacy comment block.
+      // Field migration is performed once at refreshUI time; see migration
+      // block tagged "PVP_LIST_SWAP_V1_6_19".
+      const blacklistRaw = settings.pvpBlacklist || '';
+      const bl = blacklistRaw.split(',').map(n => n.trim().toLowerCase()).filter(Boolean);
+      const isBlacklisted = bl.length > 0 && matchPlayerByNameList(playerName, bl);
+
+      // Helper: leave this profile page without burning the next tick on the
+      // no-opponents guard. Resets `state.pvpState` so the next /robbery/index
+      // landing is treated as a fresh navigation, not a stuck search.
+      const leaveProfile = (reason) => {
+        state.pvpState = 'navigating';
+        saveState(state);
+        botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
+      };
+
+      if (isBlacklisted) {
+        botLog('info', `PvP: Player "${playerNameTrim}" is on the blacklist → skipping`);
+        leaveProfile('blacklisted');
+        return;
+      }
+
+      // Mode 3 (whitelist by name): record this player as TRIED so the
+      // iteration in the hunt-page branch advances on the next round.
+      if ((settings.pvpMode === 3 || settings.pvpMode === '3') && playerNameTrim) {
+        const last = (state.pvpLastTriedWhitelistName || '').toLowerCase();
+        if (last && !(state.pvpWhitelistTried || []).includes(last)) {
+          state.pvpWhitelistTried = (state.pvpWhitelistTried || []).concat([last]);
         }
       }
 
@@ -4309,40 +4605,141 @@
         return;
       }
 
-      // No attack button found — maybe no suitable opponent, go back
-      botLog('warn', 'PvP: Attack button not found → searching again');
-      botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1500, 3000));
+      // No attack option — could be a disabled Attack button (player out of
+      // BV range / level lock) or the page simply offers henchman-only.
+      // Either way: skip cleanly with the same state-reset path used for
+      // blacklisted players, so the no-opponents guard doesn't false-positive.
+      botLog('warn', disabledAttackBtn
+        ? `PvP: "${playerNameTrim}" cannot be attacked (disabled) → searching again`
+        : 'PvP: Attack option not available → searching again');
+      leaveProfile('no-attack');
       return;
     }
 
     // ── On /robbery/index — submit the correct PvP form ──
     if (isPvPHuntPage()) {
-
-      // MODE 3: Blacklist — attack specific player by name
-      if (settings.pvpMode === 3 || settings.pvpMode === '3') {
-        const names = (settings.pvpBlacklist || '').split(',').map(n => n.trim()).filter(Boolean);
-        if (names.length > 0) {
-          const nameForm = findPvPNameSearchForm();
-          if (nameForm) {
-            const targetName = names[Math.floor(Math.random() * names.length)];
-            const nameInput = nameForm.querySelector('input[type="text"]');
-            if (nameInput) {
-              nameInput.value = targetName;
-              state.pvpState = 'hunting';
-              saveState(state);
-              botLog('info', `PvP: Searching for player "${targetName}" (namesearch)`);
-              botSetTimeout(() => {
-                const submitBtn = nameForm.querySelector('input[name="namesearch"][type="submit"], input[type="submit"], button[type="submit"]');
-                if (submitBtn) submitBtn.click();
-                else nameForm.submit();
-              }, randomDelay(500, 1200));
-              return;
-            }
+      // v1.6.19 — No-opponents guard for PvP (port of the henchman guard
+      // added in v1.6.12). Two signals, OR-ed together:
+      //   (a) the distinctive bold "no victim found" status line the game
+      //       emits after an empty random search — matched by INLINE-STYLE
+      //       fingerprint (font-size:1.8em) so it works on any language;
+      //   (b) state.pvpState === 'hunting' — we just clicked a search
+      //       button and landed back on the hunt page (instead of being
+      //       redirected to a player profile). Either signal → arm a
+      //       cooldown so we don't burn cycles re-clicking forever.
+      // The exception is mode 3 (whitelist by name): there, "back on hunt
+      // page with pvpState === 'hunting'" actually means *the just-tried
+      // whitelist name was not found* — not "empty server". The whitelist
+      // branch below handles that case by recording the failed name and
+      // trying the next one, so we skip THIS guard for mode 3.
+      const isWhitelistMode = (settings.pvpMode === 3 || settings.pvpMode === '3');
+      if (!isWhitelistMode) {
+        const noOppEl = hasNoHenchmanOpponentsMsg(); // same structural marker
+        const stuckInHunt = (state.pvpState === 'hunting');
+        if (noOppEl || stuckInHunt) {
+          let cooldownMs;
+          if (settings.pvpSmartBreak) {
+            cooldownMs = (settings.pvpDelay + (Math.random() * 2 - 1) * settings.pvpMargin) * 60 * 1000;
+            cooldownMs = Math.max(cooldownMs, 60000);
+          } else {
+            cooldownMs = randomDelay(3 * 60 * 1000, 5 * 60 * 1000);
           }
-          botLog('warn', 'PvP: Namesearch form not found');
-        } else {
-          botLog('warn', 'PvP: Blacklist is empty — enter player names');
+          state.pvpState = 'waiting';
+          state.pvpNextAttack = Date.now() + cooldownMs;
+          saveState(state);
+          const why = noOppEl ? 'no opponent found' : 'search returned no result';
+          botLog('warn', `PvP: ${why} — cooldown ${Math.ceil(cooldownMs/60000)} min`);
+          updatePvPUI(settings, state);
+          botSetTimeout(() => { loadState(st => { loadSettings(se => { pvpTick(st, se); }); }); }, Math.min(cooldownMs + 1000, 300000));
+          return;
         }
+      }
+      // Cooldown elapsed but state still 'waiting' — drop to 'navigating'.
+      if (state.pvpState === 'waiting') {
+        state.pvpState = 'navigating';
+        saveState(state);
+      }
+
+      // MODE 3: Whitelist — namesearch through the configured list, one name
+      // at a time, in order. v1.6.19 semantics swap: the "priority targets"
+      // list is now `pvpWhitelist` (used to be `pvpBlacklist` under the old
+      // confusing labelling; migration runs once at refreshUI time).
+      if (isWhitelistMode) {
+        const names = (settings.pvpWhitelist || '').split(',').map(n => n.trim()).filter(Boolean);
+        if (names.length === 0) {
+          botLog('warn', 'PvP: Whitelist is empty — enter player names to attack');
+          // Same cooldown as no-opp so we don't spin.
+          const cd = randomDelay(3 * 60 * 1000, 5 * 60 * 1000);
+          state.pvpState = 'waiting';
+          state.pvpNextAttack = Date.now() + cd;
+          saveState(state);
+          botSetTimeout(() => { loadState(st => { loadSettings(se => { pvpTick(st, se); }); }); }, Math.min(cd + 1000, 300000));
+          return;
+        }
+
+        // If we just came back from a failed namesearch (state === 'hunting'
+        // AND we have a recorded last-tried name), record that name as TRIED
+        // so the next pick skips over it. The same path also triggers when
+        // we land here after the page reloaded with no profile match — the
+        // game just stays on /robbery/index.
+        if (state.pvpState === 'hunting' && state.pvpLastTriedWhitelistName) {
+          const last = state.pvpLastTriedWhitelistName.toLowerCase();
+          if (!(state.pvpWhitelistTried || []).map(s => s.toLowerCase()).includes(last)) {
+            state.pvpWhitelistTried = (state.pvpWhitelistTried || []).concat([state.pvpLastTriedWhitelistName]);
+            botLog('info', `PvP: "${state.pvpLastTriedWhitelistName}" not found → trying next whitelist entry`);
+          }
+          state.pvpLastTriedWhitelistName = '';
+          // fall through to pick next
+        }
+
+        // Build the set of untried names (case-insensitive).
+        const triedLC = (state.pvpWhitelistTried || []).map(s => String(s).trim().toLowerCase());
+        const remaining = names.filter(n => !triedLC.includes(n.toLowerCase()));
+
+        if (remaining.length === 0) {
+          // Whole list exhausted this round → cooldown, then reset.
+          let cooldownMs;
+          if (settings.pvpSmartBreak) {
+            cooldownMs = (settings.pvpDelay + (Math.random() * 2 - 1) * settings.pvpMargin) * 60 * 1000;
+            cooldownMs = Math.max(cooldownMs, 60000);
+          } else {
+            cooldownMs = randomDelay(3 * 60 * 1000, 5 * 60 * 1000);
+          }
+          state.pvpState = 'waiting';
+          state.pvpNextAttack = Date.now() + cooldownMs;
+          state.pvpWhitelistTried = []; // reset for next round
+          state.pvpLastTriedWhitelistName = '';
+          saveState(state);
+          botLog('warn', `PvP: All ${names.length} whitelist names tried — cooldown ${Math.ceil(cooldownMs/60000)} min`);
+          updatePvPUI(settings, state);
+          botSetTimeout(() => { loadState(st => { loadSettings(se => { pvpTick(st, se); }); }); }, Math.min(cooldownMs + 1000, 300000));
+          return;
+        }
+
+        // Pick the FIRST remaining name (deterministic ordering — the user
+        // explicitly asked for "iterate through the list, skip ones that
+        // can't be found, don't loop forever").
+        const targetName = remaining[0];
+        const nameForm = findPvPNameSearchForm();
+        if (!nameForm) {
+          botLog('warn', 'PvP: Namesearch form not found');
+          return;
+        }
+        const nameInput = nameForm.querySelector('input[type="text"]');
+        if (!nameInput) {
+          botLog('warn', 'PvP: Namesearch input not found');
+          return;
+        }
+        nameInput.value = targetName;
+        state.pvpState = 'hunting';
+        state.pvpLastTriedWhitelistName = targetName;
+        saveState(state);
+        botLog('info', `PvP: Searching whitelist for "${targetName}" (${triedLC.length + 1}/${names.length})`);
+        botSetTimeout(() => {
+          const submitBtn = nameForm.querySelector('input[name="namesearch"][type="submit"], input[type="submit"], button[type="submit"]');
+          if (submitBtn) submitBtn.click();
+          else nameForm.submit();
+        }, randomDelay(500, 1200));
         return;
       }
 
@@ -4507,23 +4904,28 @@
 
     // ── On battle result page — parse result and go back ──
     if (isPvPBattleResultPage()) {
-      const reportResult = document.querySelector('#reportResult, .reportResult, .combatResultHeader');
-      const won = reportResult ? (
-        reportResult.classList.contains('resultVictory') ||
-        reportResult.classList.contains('won') ||
-        !!reportResult.querySelector('.victory, img[src*="victory"], img[src*="win"]')
-      ) : false;
-      const wonFallback = !won && !!document.querySelector('.reportTable .winner, .report-winner');
-      const isWin = won || wonFallback;
-      if (isWin) state.henchmanKills = (state.henchmanKills || 0) + 1;
-      else state.henchmanDeaths = (state.henchmanDeaths || 0) + 1;
+      // v1.6.19 — winner-name-based detection (shared with PvP).
+      const isWin = detectCombatVictory(settings.playerName);
+      if (isWin === true)  state.henchmanKills  = (state.henchmanKills  || 0) + 1;
+      else if (isWin === false) state.henchmanDeaths = (state.henchmanDeaths || 0) + 1;
+      // null → undeterminable; don't touch stats.
 
       if (settings.henchmanSmartBreak) {
         const delay = (settings.henchmanDelay + (Math.random() * 2 - 1) * settings.henchmanMargin) * 60 * 1000;
         state.henchmanNextAttack = Date.now() + Math.max(delay, 60000);
       }
+      // Result delivered → drop the 'hunting' marker so the no-opponents
+      // guard on the next /robbery/index landing doesn't false-positive.
+      state.henchmanState = 'navigating';
+      // Whitelist round complete — reset the tried-names ledger so the
+      // next round starts fresh from the first name.
+      state.henchmanWhitelistTried = [];
       saveState(state);
-      botLog(isWin ? 'ok' : 'warn', `Henchman: ${isWin ? 'Win' : 'Loss'} (${state.henchmanKills}W/${state.henchmanDeaths}L)`);
+      if (isWin === null) {
+        botLog('warn', 'Henchman: Result detected but player name not configured — set "Your in-game player name" in the PvP tab to enable win/loss counting.');
+      } else {
+        botLog(isWin ? 'ok' : 'warn', `Henchman: ${isWin ? 'Win' : 'Loss'} (${state.henchmanKills}W/${state.henchmanDeaths}L)`);
+      }
       updateHenchmanUI(settings, state);
 
       botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, getSpeedDelay(settings));
@@ -4532,20 +4934,67 @@
 
     // ── On search-result (player profile) page — click henchman attack ──
     if (isPvPSearchResultPage()) {
-      // v1.6.10 semantics: BLACKLIST = skip these. Whitelist is NOT used here
-      // because in mode 2 ("Whitelist only") we already used namesearch on a
-      // whitelisted name, so the result IS a whitelisted player by definition.
-      // In mode 1 ("Anyone"), filter out anyone on the blacklist.
+      // Pull the player's display name once for blacklist match-tracking
+      // and (in mode 2) whitelist iteration. Token-based matcher handles
+      // race prefixes ("Upír Tomler" → matches "Tomler") regardless of
+      // server language.
+      const playerNameEl = document.querySelector('.reportTable td b, h2, .username, #profileName');
+      const playerName = (playerNameEl ? playerNameEl.textContent : '') || '';
+      const playerNameTrim = playerName.trim();
+
+      // v1.6.19 — Skip helper: prefer clicking the `henchmanfightsearch`
+      // button that the game ships ON the attack page itself ("hľadaj
+      // znova" / "search again" — it's a POST to /robbery/index whose
+      // submit name re-runs the henchman search). This avoids the bug
+      // we shipped in v1.6.18: when bot returned to /robbery/index via
+      // window.location, state.henchmanState was still 'hunting', so the
+      // no-opponents guard on the next tick mistakenly fired ("search
+      // returned no result") even though we'd actually been on a perfectly
+      // valid profile and just chose to skip. Clicking the in-page search
+      // button keeps the state consistent (it IS a fresh search) AND saves
+      // a full page load. The fallback path still works in case the game
+      // ever drops that button from the profile layout — there we reset
+      // henchmanState to 'navigating' so the guard doesn't false-positive.
+      const skipAndSearchAgain = (reason) => {
+        const inPageSearchBtn = document.querySelector('input[name="henchmanfightsearch"][type="submit"]');
+        if (inPageSearchBtn) {
+          // Keep state === 'hunting' — clicking the in-page button is itself
+          // a fresh search, so the next landing should treat us as actively
+          // searching (not "stuck in hunt"). If THAT search comes up empty,
+          // the no-opponents guard on /robbery/index will fire correctly.
+          state.henchmanState = 'hunting';
+          saveState(state);
+          botSetTimeout(() => { inPageSearchBtn.click(); }, randomDelay(500, 1200));
+        } else {
+          // Fallback: navigate back to /robbery/index, but FIRST clear the
+          // 'hunting' marker so the next tick's no-opp guard doesn't
+          // false-positive on a perfectly normal landing.
+          state.henchmanState = 'navigating';
+          saveState(state);
+          botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
+        }
+      };
+
+      // BLACKLIST = "avoid this player" (semantics unchanged — already
+      // intuitive on Henchman). In mode 2 (whitelist only) the user has
+      // explicitly opted in to attacking the namesearched targets, so the
+      // blacklist filter is ignored there.
       if (settings.henchmanMode !== 2 && settings.henchmanMode !== '2' &&
           settings.henchmanBlacklist) {
         const bl = settings.henchmanBlacklist.split(',').map(n => n.trim().toLowerCase()).filter(Boolean);
-        if (bl.length > 0) {
-          const playerName = (document.querySelector('.reportTable td b, h2, .username, #profileName') || {}).textContent || '';
-          if (matchPlayerByNameList(playerName, bl)) {
-            botLog('info', `Henchman: Player "${playerName.trim()}" is blacklisted → searching for another`);
-            botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
-            return;
-          }
+        if (bl.length > 0 && matchPlayerByNameList(playerName, bl)) {
+          botLog('info', `Henchman: Player "${playerNameTrim}" is blacklisted → searching for another`);
+          skipAndSearchAgain('blacklisted');
+          return;
+        }
+      }
+
+      // Mode 2 (whitelist by name): record this player as TRIED so the
+      // iteration in the hunt-page branch advances on the next round.
+      if ((settings.henchmanMode === 2 || settings.henchmanMode === '2') && playerNameTrim) {
+        const last = (state.henchmanLastTriedWhitelistName || '').toLowerCase();
+        if (last && !(state.henchmanWhitelistTried || []).map(s => String(s).toLowerCase()).includes(last)) {
+          state.henchmanWhitelistTried = (state.henchmanWhitelistTried || []).concat([state.henchmanLastTriedWhitelistName]);
         }
       }
 
@@ -4566,7 +5015,7 @@
 
         if (isOwnRaceBtn && !settings.henchmanAttackOwnRace) {
           botLog('info', 'Henchman: Same-race target detected → skipping (enable "Attack own race" to fight)');
-          botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
+          skipAndSearchAgain('same-race');
           return;
         }
 
@@ -4612,6 +5061,9 @@
               } else {
                 if (closeLink) closeLink.click();
                 botLog('info', 'Henchman: Unexpected modal closed (own-race attack disabled)');
+                // State-safe nav back (same fix as blacklist skip).
+                state.henchmanState = 'navigating';
+                saveState(state);
                 botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(800, 1500));
               }
             }, 1200);
@@ -4620,10 +5072,10 @@
         return;
       }
 
-      // No henchman attack button — opponent might be on a "search again" page
-      // (e.g. profile shown without a fight option). Re-search.
+      // No henchman attack button — opponent might be on a "search again"
+      // page (e.g. profile shown without a fight option). Re-search cleanly.
       botLog('warn', 'Henchman: Henchman attack button not found → searching again');
-      botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1500, 3000));
+      skipAndSearchAgain('no-attack-btn');
       return;
     }
 
@@ -4640,55 +5092,109 @@
       // Either signal → arm a cooldown (using Smart Break delay if enabled,
       // else 3–5 min default) and bail out, so we don't burn cycles
       // re-clicking the search button forever.
-      const noOppEl = hasNoHenchmanOpponentsMsg();
-      const stuckInHunt = (state.henchmanState === 'hunting');
-      if (noOppEl || stuckInHunt) {
-        let cooldownMs;
-        if (settings.henchmanSmartBreak) {
-          cooldownMs = (settings.henchmanDelay + (Math.random() * 2 - 1) * settings.henchmanMargin) * 60 * 1000;
-          cooldownMs = Math.max(cooldownMs, 60000);
-        } else {
-          // Default 3–5 min cooldown when Smart Break is off — long enough
-          // not to hammer the server, short enough to resume promptly.
-          cooldownMs = randomDelay(3 * 60 * 1000, 5 * 60 * 1000);
+      // v1.6.19 — Skip this guard entirely in mode 2 (whitelist by name):
+      // there, "back on hunt page with state=='hunting'" means *the just-
+      // tried whitelist name was not found*, not "empty server". The
+      // whitelist branch handles that case by recording the failed name
+      // and trying the next one (same pattern as PvP mode 3).
+      const isWhitelistMode = (settings.henchmanMode === 2 || settings.henchmanMode === '2');
+      if (!isWhitelistMode) {
+        const noOppEl = hasNoHenchmanOpponentsMsg();
+        const stuckInHunt = (state.henchmanState === 'hunting');
+        if (noOppEl || stuckInHunt) {
+          let cooldownMs;
+          if (settings.henchmanSmartBreak) {
+            cooldownMs = (settings.henchmanDelay + (Math.random() * 2 - 1) * settings.henchmanMargin) * 60 * 1000;
+            cooldownMs = Math.max(cooldownMs, 60000);
+          } else {
+            // Default 3–5 min cooldown when Smart Break is off — long enough
+            // not to hammer the server, short enough to resume promptly.
+            cooldownMs = randomDelay(3 * 60 * 1000, 5 * 60 * 1000);
+          }
+          state.henchmanState = 'waiting';
+          state.henchmanNextAttack = Date.now() + cooldownMs;
+          saveState(state);
+          const why = noOppEl ? 'no opponent found' : 'search returned no result';
+          botLog('warn', `Henchman: ${why} — cooldown ${Math.ceil(cooldownMs/60000)} min`);
+          updateHenchmanUI(settings, state);
+          botSetTimeout(() => { loadState(st => { loadSettings(se => { henchmanTick(st, se); }); }); }, Math.min(cooldownMs + 1000, 300000));
+          return;
         }
-        state.henchmanState = 'waiting';
-        state.henchmanNextAttack = Date.now() + cooldownMs;
-        saveState(state);
-        const why = noOppEl ? 'no opponent found' : 'search returned no result';
-        botLog('warn', `Henchman: ${why} — cooldown ${Math.ceil(cooldownMs/60000)} min`);
-        updateHenchmanUI(settings, state);
-        botSetTimeout(() => { loadState(st => { loadSettings(se => { henchmanTick(st, se); }); }); }, Math.min(cooldownMs + 1000, 300000));
-        return;
       }
 
-      // MODE 2 (v1.6.10): Whitelist only — attack ONLY players from the
-      // whitelist, using the shared namesearch form. Blacklist is ignored
-      // here since the user has explicitly chosen these targets.
-      if (settings.henchmanMode === 2 || settings.henchmanMode === '2') {
+      // MODE 2 (v1.6.10, iteration added in v1.6.19): Whitelist by name.
+      // Iterates through the entire list in order, namesearching each name
+      // once. Names that the game can't locate are silently skipped — the
+      // bot moves on to the next entry instead of looping forever or
+      // attacking an unrelated random player. When the whole list is
+      // exhausted with no successful fight, we cooldown.
+      if (isWhitelistMode) {
         const names = (settings.henchmanWhitelist || '').split(',').map(n => n.trim()).filter(Boolean);
-        if (names.length > 0) {
-          const nameForm = findPvPNameSearchForm();
-          if (nameForm) {
-            const targetName = names[Math.floor(Math.random() * names.length)];
-            const nameInput = nameForm.querySelector('input[type="text"]');
-            if (nameInput) {
-              nameInput.value = targetName;
-              state.henchmanState = 'hunting';
-              saveState(state);
-              botLog('info', `Henchman: Searching for whitelisted player "${targetName}" (namesearch)`);
-              botSetTimeout(() => {
-                const submitBtn = nameForm.querySelector('input[name="namesearch"][type="submit"], input[type="submit"], button[type="submit"]');
-                if (submitBtn) submitBtn.click();
-                else nameForm.submit();
-              }, randomDelay(500, 1200));
-              return;
-            }
-          }
-          botLog('warn', 'Henchman: Namesearch form not found');
-        } else {
+        if (names.length === 0) {
           botLog('warn', 'Henchman: Whitelist is empty — enter player names to attack');
+          // Same cooldown as no-opp so we don't spin.
+          const cd = randomDelay(3 * 60 * 1000, 5 * 60 * 1000);
+          state.henchmanState = 'waiting';
+          state.henchmanNextAttack = Date.now() + cd;
+          saveState(state);
+          botSetTimeout(() => { loadState(st => { loadSettings(se => { henchmanTick(st, se); }); }); }, Math.min(cd + 1000, 300000));
+          return;
         }
+
+        // If we just came back from a failed namesearch (state === 'hunting'
+        // AND we have a recorded last-tried name), record that name as TRIED.
+        if (state.henchmanState === 'hunting' && state.henchmanLastTriedWhitelistName) {
+          const last = state.henchmanLastTriedWhitelistName.toLowerCase();
+          if (!(state.henchmanWhitelistTried || []).map(s => String(s).toLowerCase()).includes(last)) {
+            state.henchmanWhitelistTried = (state.henchmanWhitelistTried || []).concat([state.henchmanLastTriedWhitelistName]);
+            botLog('info', `Henchman: "${state.henchmanLastTriedWhitelistName}" not found → trying next whitelist entry`);
+          }
+          state.henchmanLastTriedWhitelistName = '';
+        }
+
+        const triedLC = (state.henchmanWhitelistTried || []).map(s => String(s).trim().toLowerCase());
+        const remaining = names.filter(n => !triedLC.includes(n.toLowerCase()));
+
+        if (remaining.length === 0) {
+          let cooldownMs;
+          if (settings.henchmanSmartBreak) {
+            cooldownMs = (settings.henchmanDelay + (Math.random() * 2 - 1) * settings.henchmanMargin) * 60 * 1000;
+            cooldownMs = Math.max(cooldownMs, 60000);
+          } else {
+            cooldownMs = randomDelay(3 * 60 * 1000, 5 * 60 * 1000);
+          }
+          state.henchmanState = 'waiting';
+          state.henchmanNextAttack = Date.now() + cooldownMs;
+          state.henchmanWhitelistTried = [];
+          state.henchmanLastTriedWhitelistName = '';
+          saveState(state);
+          botLog('warn', `Henchman: All ${names.length} whitelist names tried — cooldown ${Math.ceil(cooldownMs/60000)} min`);
+          updateHenchmanUI(settings, state);
+          botSetTimeout(() => { loadState(st => { loadSettings(se => { henchmanTick(st, se); }); }); }, Math.min(cooldownMs + 1000, 300000));
+          return;
+        }
+
+        const targetName = remaining[0];
+        const nameForm = findPvPNameSearchForm();
+        if (!nameForm) {
+          botLog('warn', 'Henchman: Namesearch form not found');
+          return;
+        }
+        const nameInput = nameForm.querySelector('input[type="text"]');
+        if (!nameInput) {
+          botLog('warn', 'Henchman: Namesearch input not found');
+          return;
+        }
+        nameInput.value = targetName;
+        state.henchmanState = 'hunting';
+        state.henchmanLastTriedWhitelistName = targetName;
+        saveState(state);
+        botLog('info', `Henchman: Searching whitelist for "${targetName}" (${triedLC.length + 1}/${names.length})`);
+        botSetTimeout(() => {
+          const submitBtn = nameForm.querySelector('input[name="namesearch"][type="submit"], input[type="submit"], button[type="submit"]');
+          if (submitBtn) submitBtn.click();
+          else nameForm.submit();
+        }, randomDelay(500, 1200));
         return;
       }
 
@@ -5342,10 +5848,11 @@
     panel.id = 'bf-bot-panel';
     panel.innerHTML = `
       <div id="bf-bot-header">
-        <span>🤖 BF Bot <span style="font-size:0.55rem;opacity:0.4;margin-left:4px">v1.6.13 · ${SERVER_ID}</span></span>
+        <span>🤖 BF Bot <span style="font-size:0.55rem;opacity:0.4;margin-left:4px">v1.6.15.4 · ${SERVER_ID}</span></span>
         <div style="display:flex;gap:4px;align-items:center">
           <span id="bf-player-badge" style="font-size:0.52rem;color:#9a7a5a;opacity:0.7">${PLAYER_ID ? '👤 #' + PLAYER_ID : ''}</span>
           <button id="bf-bot-pin" title="Pin panel (stays open after reload)">📌</button>
+          <button id="bf-bot-fullscreen" title="Fullscreen">⛶</button>
           <button id="bf-bot-close">✕</button>
         </div>
       </div>
@@ -5662,10 +6169,32 @@
                 Fast
               </label>
             </div>
+            <!-- v1.6.18 — Mode hint + Fast budget control -->
+            <div id="bf-ruins-opt-mode-hint" style="font-size:0.55rem;color:#5a7a4a;margin-top:3px;line-height:1.35;font-style:italic">
+              <strong>Deep:</strong> tests every viable formation (no cap with Parallel).
+              Slower, finds the truly optimal pick. It may freeze your browser.<br>
+              <strong>Fast:</strong> tests up to N candidates sorted by power, stops after finding
+              enough winners. Use for low layers where exact-best doesn't matter.
+            </div>
+            <div class="bf-bot-row" id="bf-ruins-opt-fastsims-row" style="margin-top:4px;display:none;flex-wrap:wrap;gap:4px;align-items:center">
+              <span class="bf-bot-label" style="min-width:0;flex:0 0 auto">Fast: max sims:</span>
+              <input type="number" class="bf-bot-input" id="bf-ruins-opt-fastsims"
+                value="50000" min="1000" max="5000000" step="5000" style="width:80px">
+              <span style="color:#5a7a4a;font-size:0.55rem;flex:1;min-width:120px">candidates tested</span>
+            </div>
+            <div id="bf-ruins-opt-fastsims-hint" style="font-size:0.55rem;color:#5a7a4a;margin-top:3px;line-height:1.35;display:none">
+              <span style="color:#7ad19a">💡 50,000</span> = recommended for layers 1–20
+              (typical losses 0–5 units).<br>
+              <span style="color:#e6a060">⚠</span> For layer 21+ either bump to <strong>200,000+</strong> or
+              switch to <strong>Deep</strong> mode — coverage of 50k is insufficient at high layers.
+            </div>
             <label class="bf-bot-checkbox">
               <input type="checkbox" id="bf-ruins-opt-parallel" checked>
               Parallel Workers
             </label>
+            <div style="font-size:0.55rem;color:#5a7a4a;margin-top:2px;line-height:1.3;font-style:italic">
+              Splits work across CPU cores via Web Workers. Page stays responsive. Recommended ON.
+            </div>
             <div class="bf-bot-row" style="margin-top:4px">
               <span class="bf-bot-label" style="min-width:55px">Warm-start:</span>
               <select class="bf-bot-select" id="bf-ruins-warm-source" style="flex:1">
@@ -5673,6 +6202,11 @@
                 <option value="smart">Smart Preset (simulator)</option>
                 <option value="preset">Preset Formations (this layer)</option>
               </select>
+            </div>
+            <div style="font-size:0.55rem;color:#5a7a4a;margin-top:2px;line-height:1.35;font-style:italic">
+              Narrows the search to ±N units around a known-good formation.
+              Smart preset = auto-learned per layer; Preset = your saved formations.
+              Faster runs, but only as good as the seed.
             </div>
             <div class="bf-bot-row" id="bf-ruins-warm-range-row" style="display:none;margin-top:3px">
               <span class="bf-bot-label" style="min-width:55px">Range:</span>
@@ -5694,13 +6228,17 @@
                 <span style="display:block;font-size:0.55rem;color:#5a7a4a">Skip preset matching entirely. Presets requiring locked tiers are auto-skipped regardless.</span>
               </span>
             </label>
-            <div class="bf-bot-row" style="margin-bottom:4px">
-              <span class="bf-bot-label">Level:</span>
-              <select class="bf-bot-select" id="bf-preset-level" style="flex:1"></select>
+            <div class="bf-bot-row" style="margin-bottom:6px;background:#0d1110;border:1px solid #2a4a2a;border-radius:4px;padding:4px 6px;align-items:center;gap:6px">
+              <span class="bf-bot-label" style="color:#d4e4c0;font-weight:bold;min-width:auto;font-size:0.66rem">📁 Level:</span>
+              <select class="bf-bot-select" id="bf-preset-level" style="flex:1;appearance:none;-webkit-appearance:none;-moz-appearance:none;background-color:#1a2520;background-image:url(&quot;data:image/svg+xml;utf8,&lt;svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'&gt;&lt;path d='M0 0 L5 6 L10 0 Z' fill='%237ad19a'/&gt;&lt;/svg&gt;&quot;);background-repeat:no-repeat;background-position:right 8px center;background-size:9px 5px;border:1px solid #4a7a4a;color:#e4f4d0;padding:4px 22px 4px 8px;min-height:24px;font-size:0.7rem;cursor:pointer;border-radius:3px;font-family:'Cinzel',serif;outline:none"></select>
             </div>
             <div id="bf-preset-list" style="max-height:140px;overflow-y:auto;margin-bottom:4px"></div>
             <div class="bf-preset-add-form" id="bf-preset-add" style="display:none">
-              <div style="font-size:0.6rem;color:#e0a030;margin-bottom:3px">➕ New preset for level <span id="bf-preset-add-lvl">?</span></div>
+              <div style="font-size:0.6rem;color:#e0a030;margin-bottom:3px">➕ New preset</div>
+              <div class="bf-bot-row">
+                <span class="bf-bot-label" style="min-width:65px">Level:</span>
+                <input type="number" class="bf-bot-input" id="bf-preset-add-lvl" min="1" max="999" value="1" style="flex:1" title="Layer number this preset applies to (1–999). Defaults to whatever the filter above shows.">
+              </div>
               <div class="bf-bot-row">
                 <span class="bf-bot-label" style="min-width:65px">Enemy:</span>
                 <input type="text" class="bf-bot-input" id="bf-preset-enemy" placeholder="E1:2,E2:8" style="flex:1">
@@ -5716,9 +6254,17 @@
             </div>
             <button class="bf-bot-btn" id="bf-preset-add-btn" style="font-size:0.6rem;padding:3px 8px;width:100%">➕ Add Preset</button>
             <div class="bf-bot-row" style="gap:4px;margin-top:4px">
-              <button class="bf-bot-btn" id="bf-preset-export" style="flex:1;font-size:0.58rem;padding:3px 6px">📤 Export CSV</button>
-              <button class="bf-bot-btn" id="bf-preset-import-btn" style="flex:1;font-size:0.58rem;padding:3px 6px">📥 Import CSV</button>
+              <button class="bf-bot-btn" id="bf-preset-export" style="flex:1;font-size:0.58rem;padding:3px 6px">📤 CSV</button>
+              <button class="bf-bot-btn" id="bf-preset-import-btn" style="flex:1;font-size:0.58rem;padding:3px 6px">📥 CSV</button>
               <input type="file" id="bf-preset-import-file" accept=".csv,.txt" style="display:none">
+            </div>
+            <div class="bf-bot-row" style="gap:4px;margin-top:2px">
+              <button class="bf-bot-btn" id="bf-preset-export-xlsx" style="flex:1;font-size:0.58rem;padding:3px 6px;border-color:#217346;color:#7ad19a" title="Export presets as an Excel-compatible .xlsx file (pure-JS, no external libraries)">📤 XLSX</button>
+              <button class="bf-bot-btn" id="bf-preset-import-xlsx-btn" style="flex:1;font-size:0.58rem;padding:3px 6px;border-color:#217346;color:#7ad19a" title="Import an Excel .xlsx file. Accepts files from Excel, LibreOffice, Google Sheets.">📥 XLSX</button>
+              <input type="file" id="bf-preset-import-xlsx-file" accept=".xlsx" style="display:none">
+            </div>
+            <div class="bf-bot-row" style="gap:4px;margin-top:4px">
+              <button class="bf-bot-btn" id="bf-preset-delete-all" style="flex:1;font-size:0.58rem;padding:3px 6px;border-color:#a02020;color:#ff8a80;background:rgba(160,32,32,0.15)" title="Delete ALL ruins presets (every level, every formation). Requires two-step confirmation.">🗑 Delete all presets</button>
             </div>
             <div id="bf-preset-import-status" style="font-size:0.55rem;color:#e0a030;margin-top:3px;display:none"></div>
           </div>
@@ -6050,6 +6596,20 @@
             <div class="bf-bot-info-cell"><span class="label">HP:</span> <span class="value" id="bf-p-hp">–</span></div>
           </div>
 
+          <!-- v1.6.19 — Player name (shared by PvP + Henchman for win detection).
+               Game writes the winner as the only displayed name in the
+               h3 element ("Víťaz: NAME") — the label text is localised
+               but the value (NAME) is universal. We compare that against
+               this configured name. -->
+          <div class="bf-bot-group" style="background:rgba(46,204,113,0.05);border-color:#2a5a3a">
+            <div class="bf-bot-group-title" style="color:#7ad19a">👤 Your in-game player name</div>
+            <input type="text" class="bf-bot-input" id="bf-player-name" placeholder="e.g. Kladivom" style="width:100%">
+            <div style="font-size:0.55rem;color:#8aa07a;margin-top:3px;line-height:1.4">
+              Required for the bot to correctly count wins / losses in <b>PvP</b> and <b>Henchman</b> Statistics.
+              The game reports the winner by name only — without this field the bot can't tell whether <i>you</i> won.
+            </div>
+          </div>
+
           <button class="bf-bot-btn bf-bot-toggle-top" id="bf-pvp-toggle">▶ Start PvP Bot</button>
 
           <div class="bf-bot-status">
@@ -6062,10 +6622,10 @@
             <div class="bf-bot-row">
               <span class="bf-bot-label" style="min-width:70px">Attack:</span>
               <select class="bf-bot-select" id="bf-pvp-mode">
-                <option value="1">Anyone</option>
-                <option value="2">Stronger or equal</option>
-                <option value="3">Blacklisted players (by name)</option>
-                <option value="4">By battle value (range)</option>
+                <option value="1">Anyone (skip blacklist)</option>
+                <option value="2">Stronger or equal (skip blacklist)</option>
+                <option value="3">Whitelist only (by name)</option>
+                <option value="4">By battle value (range, skip blacklist)</option>
               </select>
             </div>
             <div class="bf-bot-row" id="bf-pvp-bv-row" style="display:none;margin-top:4px">
@@ -6086,15 +6646,19 @@
           </div>
 
           <div class="bf-bot-group" id="bf-pvp-wl-group">
-            <div class="bf-bot-group-title">📋 Whitelist (do not attack)</div>
+            <div class="bf-bot-group-title">📋 Whitelist (priority – attack by name)</div>
             <input type="text" class="bf-bot-input" id="bf-pvp-whitelist" placeholder="Player1, Player2, ..." style="width:100%">
-            <div style="font-size:0.56rem;color:#5a7a4a;margin:2px 0">Comma-separated</div>
+            <div style="font-size:0.56rem;color:#5a7a4a;margin:2px 0">
+              Comma-separated. Used by "Whitelist only" mode — each name is namesearched in order; names that aren't found are skipped.
+            </div>
           </div>
 
           <div class="bf-bot-group" id="bf-pvp-bl-group">
-            <div class="bf-bot-group-title" style="color:#e74c3c">📋 Blacklist (attack)</div>
+            <div class="bf-bot-group-title" style="color:#e74c3c">📋 Blacklist (do not attack)</div>
             <input type="text" class="bf-bot-input" id="bf-pvp-blacklist" placeholder="Player1, Player2, ..." style="width:100%">
-            <div style="font-size:0.56rem;color:#5a7a4a;margin:2px 0">Comma-separated (for mode 3)</div>
+            <div style="font-size:0.56rem;color:#5a7a4a;margin:2px 0">
+              Comma-separated. Used by all modes — random results matching these names get skipped.
+            </div>
           </div>
 
           <div class="bf-bot-group">
@@ -6587,6 +7151,46 @@
       panel.style.display = 'none';
     });
 
+    // Fullscreen toggle (v1.6.19) — mirrors the simulator panel's button.
+    // Stores the panel's previous size/position so collapsing back returns
+    // it exactly where the user had it.
+    {
+      let isFullscreen = false;
+      const fsBtn = document.getElementById('bf-bot-fullscreen');
+      const savedStyle = {};
+      fsBtn?.addEventListener('click', () => {
+        isFullscreen = !isFullscreen;
+        if (isFullscreen) {
+          savedStyle.top    = panel.style.top;
+          savedStyle.left   = panel.style.left;
+          savedStyle.right  = panel.style.right;
+          savedStyle.bottom = panel.style.bottom;
+          savedStyle.width  = panel.style.width;
+          savedStyle.height = panel.style.height;
+          savedStyle.maxHeight = panel.style.maxHeight;
+          panel.classList.add('bf-bot-fullscreen');
+          panel.style.top = '0';
+          panel.style.left = '0';
+          panel.style.right = '0';
+          panel.style.bottom = '0';
+          panel.style.width = '100vw';
+          panel.style.height = '100vh';
+          panel.style.maxHeight = '100vh';
+          fsBtn.title = 'Exit Fullscreen';
+        } else {
+          panel.classList.remove('bf-bot-fullscreen');
+          panel.style.top    = savedStyle.top    || '';
+          panel.style.left   = savedStyle.left   || '';
+          panel.style.right  = savedStyle.right  || 'auto';
+          panel.style.bottom = savedStyle.bottom || 'auto';
+          panel.style.width  = savedStyle.width  || '';
+          panel.style.height = savedStyle.height || '';
+          panel.style.maxHeight = savedStyle.maxHeight || '';
+          fsBtn.title = 'Fullscreen';
+        }
+      });
+    }
+
     // Tabs (with persistence)
     panel.addEventListener('click', (e) => {
       const tab = e.target.closest('.bf-bot-tab[data-tab]');
@@ -6787,6 +7391,9 @@
         settings.ruinsOptStratKillE3 = document.getElementById('bf-ruins-opt-killE3')?.checked ?? false;
         settings.ruinsOptMode = document.querySelector('input[name="bf-ruins-opt-mode"]:checked')?.value || 'deep';
         settings.ruinsOptParallel = document.getElementById('bf-ruins-opt-parallel')?.checked ?? true;
+        // v1.6.18 — Fast scan budget (clamped 1k..5M; 50k default)
+        settings.ruinsOptFastMaxSims = Math.max(1000, Math.min(5000000,
+          parseInt(document.getElementById('bf-ruins-opt-fastsims')?.value) || 50000));
         settings.ruinsWarmStartSource = document.getElementById('bf-ruins-warm-source')?.value || 'none';
         settings.ruinsWarmStartRange = parseInt(document.getElementById('bf-ruins-warm-range')?.value) || 15;
         // v1.5.8 — T4 short action
@@ -6826,7 +7433,31 @@
     function getPresetsKey() { return SK('ruinsPresets'); }
 
     function loadPresets(cb) {
-      sGet([getPresetsKey()], r => cb(r[getPresetsKey()] || {}));
+      sGet([getPresetsKey()], r => {
+        const raw = r[getPresetsKey()] || {};
+        // v1.6.15.4 — Auto-purge corrupted entries (empty enemy or empty
+        // formation). These slipped in during pre-v1.6.15.4 testing when
+        // garbage input parsed to {} and an empty preset was silently saved.
+        // Silent cleanup — no alert, no log spam. Persists if anything changed
+        // so next load is fast.
+        let dirty = false;
+        for (const lvl of Object.keys(raw)) {
+          if (!Array.isArray(raw[lvl])) { delete raw[lvl]; dirty = true; continue; }
+          const before = raw[lvl].length;
+          raw[lvl] = raw[lvl].filter(p =>
+            p && typeof p === 'object'
+            && typeof p.enemy === 'string' && p.enemy.length > 0
+            && p.formation && typeof p.formation === 'object'
+            && Object.keys(p.formation).length > 0
+          );
+          if (raw[lvl].length !== before) dirty = true;
+          if (raw[lvl].length === 0) { delete raw[lvl]; dirty = true; }
+        }
+        if (dirty) {
+          try { sSet({ [getPresetsKey()]: raw }); } catch(e) {}
+        }
+        cb(raw);
+      });
     }
 
     function savePresets(presets) {
@@ -6849,39 +7480,138 @@
     }
 
     // Populate level dropdown
-    function initPresetLevelDropdown() {
+    // v1.6.15 — Range extended from 1–30 → 1–50 to match the Ruins level grid,
+    // and any custom levels already present in stored presets (e.g. >50) are
+    // appended automatically so they're filterable too.
+    // v1.6.15.1 — Two-phase population to fix dropdown becoming inert:
+    //   1) SYNC: populate options 1–50 + bind change handler IMMEDIATELY,
+    //      so even if the user clicks before storage I/O finishes, the
+    //      dropdown is responsive.
+    //   2) ASYNC: once presets are loaded, append any custom layers (>50)
+    //      and decorate option text with preset counts when non-zero.
+    // v1.6.15.2 — Restored v0.9.4 visual: default is "Level 1", labels are
+    // plain "Level N", and the "(All layers)" view is moved to the BOTTOM of
+    // the dropdown as an optional convenience (not the default). This matches
+    // what users expect from the original Preset Formations UI.
+    function initPresetLevelDropdown(cb) {
       const sel = document.getElementById('bf-preset-level');
-      if (!sel) return;
+      if (!sel) { if (cb) cb(); return; }
+
+      // Preserve current selection across rebuilds (e.g. after import).
+      const prev = sel.value;
+
+      // ── Phase 1: synchronous skeleton ──
+      // Options match the original v0.9.4 layout: Level 1, Level 2, ... Level 50.
       sel.innerHTML = '';
-      for (let i = 1; i <= 30; i++) {
+      for (let i = 1; i <= 50; i++) {
         const opt = document.createElement('option');
         opt.value = String(i);
         opt.textContent = `Level ${i}`;
         sel.appendChild(opt);
       }
-      sel.addEventListener('change', () => renderPresetList());
+      // "(All layers)" sentinel — value '*' is handled by renderPresetList.
+      // Placed at the END so the default Level 1 selection matches v0.9.4.
+      const allOpt = document.createElement('option');
+      allOpt.value = '*';
+      allOpt.textContent = '(All layers)';
+      sel.appendChild(allOpt);
+
+      // Restore prior selection or default to '1' (like v0.9.4).
+      if (prev && Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
+      else sel.value = '1';
+
+      // Bind onchange BEFORE the async append so the dropdown is reactive
+      // immediately. Idempotent (replaces any prior handler) so safe to
+      // call this function multiple times without leaking listeners.
+      sel.onchange = () => renderPresetList();
+
+      // ── Phase 2: async enrichment ──
+      loadPresets(presets => {
+        // Append any custom layers > 50 found in storage (rare)
+        const existingValues = new Set(Array.from(sel.options).map(o => o.value));
+        Object.keys(presets).forEach(k => {
+          const n = parseInt(k, 10);
+          if (!Number.isFinite(n) || n < 1 || n > 999) return;
+          if (existingValues.has(String(n))) return;
+          const opt = document.createElement('option');
+          opt.value = String(n);
+          opt.textContent = `Level ${n} (custom)`;
+          // Insert in sorted order — but always BEFORE the (All layers) sentinel
+          let inserted = false;
+          for (const existing of Array.from(sel.options)) {
+            if (existing.value === '*') { sel.insertBefore(opt, existing); inserted = true; break; }
+            const ev = parseInt(existing.value, 10);
+            if (Number.isFinite(ev) && ev > n) { sel.insertBefore(opt, existing); inserted = true; break; }
+          }
+          if (!inserted) sel.appendChild(opt);
+        });
+        // Decorate options that have presets with their count.
+        // Empty layers keep the plain "Level N" label (less visual noise).
+        let total = 0;
+        Array.from(sel.options).forEach(opt => {
+          if (opt.value === '*') return;
+          const count = (presets[opt.value] || []).length;
+          total += count;
+          const n = parseInt(opt.value, 10);
+          const baseLabel = n > 50 ? `Level ${opt.value} (custom)` : `Level ${opt.value}`;
+          opt.textContent = count > 0 ? `${baseLabel} — ${count}` : baseLabel;
+        });
+        allOpt.textContent = total > 0 ? `(All layers — ${total})` : '(All layers)';
+        // Re-assert selection (insertions/sorting may have shifted index)
+        if (prev && Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
+        if (cb) cb();
+      });
     }
 
     function renderPresetList() {
+      // Default to '1' (matches v0.9.4 behavior) when the dropdown is not yet
+      // populated. (All layers) is opt-in via the dropdown's '*' option.
       const lvl = document.getElementById('bf-preset-level')?.value || '1';
       const container = document.getElementById('bf-preset-list');
       if (!container) return;
 
       loadPresets(presets => {
-        const items = presets[lvl] || [];
-        if (!items.length) {
-          container.innerHTML = '<div style="font-size:0.58rem;color:#444;padding:4px;text-align:center">No presets for this level</div>';
-          return;
+        // ── (All layers) view ──
+        // Shows every preset grouped by layer in one scrollable list.
+        // Each preset still has its individual delete button.
+        if (lvl === '*') {
+          const layerKeys = Object.keys(presets)
+            .filter(k => Array.isArray(presets[k]) && presets[k].length > 0)
+            .sort((a, b) => Number(a) - Number(b));
+          if (!layerKeys.length) {
+            container.innerHTML = '<div style="font-size:0.58rem;color:#444;padding:4px;text-align:center">No presets stored yet</div>';
+            return;
+          }
+          let html = '';
+          for (const l of layerKeys) {
+            html += `<div style="font-size:0.58rem;color:#e0a030;padding:3px 2px 1px;border-top:1px solid #1a1a1a;margin-top:2px">Level ${l} — ${presets[l].length}</div>`;
+            html += presets[l].map((p, i) => `
+              <div class="bf-preset-card">
+                <div class="bf-preset-enemy">👹 ${p.enemy}</div>
+                <div class="bf-preset-form">⚔ ${qtyToString(p.formation)}</div>
+                <button class="bf-preset-del" data-lvl="${l}" data-idx="${i}" title="Remove">🗑</button>
+              </div>
+            `).join('');
+          }
+          container.innerHTML = html;
+        } else {
+          // ── Single-layer view ──
+          const items = presets[lvl] || [];
+          if (!items.length) {
+            container.innerHTML = '<div style="font-size:0.58rem;color:#444;padding:4px;text-align:center">No presets for this level</div>';
+            return;
+          }
+          container.innerHTML = items.map((p, i) => `
+            <div class="bf-preset-card">
+              <div class="bf-preset-enemy">👹 ${p.enemy}</div>
+              <div class="bf-preset-form">⚔ ${qtyToString(p.formation)}</div>
+              <button class="bf-preset-del" data-lvl="${lvl}" data-idx="${i}" title="Remove">🗑</button>
+            </div>
+          `).join('');
         }
-        container.innerHTML = items.map((p, i) => `
-          <div class="bf-preset-card">
-            <div class="bf-preset-enemy">👹 ${p.enemy}</div>
-            <div class="bf-preset-form">⚔ ${qtyToString(p.formation)}</div>
-            <button class="bf-preset-del" data-lvl="${lvl}" data-idx="${i}" title="Remove">🗑</button>
-          </div>
-        `).join('');
 
-        // Delete handlers
+        // Delete handlers (shared between both views — data-lvl carries the
+        // correct layer for each card)
         container.querySelectorAll('.bf-preset-del').forEach(btn => {
           btn.addEventListener('click', () => {
             const l = btn.getAttribute('data-lvl');
@@ -6889,7 +7619,8 @@
             loadPresets(pr => {
               if (pr[l]) { pr[l].splice(idx, 1); if (!pr[l].length) delete pr[l]; }
               savePresets(pr);
-              renderPresetList();
+              // Rebuild dropdown counts after deletion (also re-renders list)
+              initPresetLevelDropdown(() => renderPresetList());
             });
           });
         });
@@ -6900,12 +7631,20 @@
     renderPresetList();
 
     // Add preset button
+    // v1.6.15 — `bf-preset-add-lvl` is now an editable <input type="number">,
+    // not a display-only span. We seed it with the currently-filtered level
+    // (so "click filter level → click Add Preset" still works as before),
+    // but the user can override it to any value 1–999 before saving.
+    // v1.6.15.1 — When the filter is on '(All layers)' (*), default the new
+    // preset's level to 1 instead of inserting the literal '*' into the input.
     document.getElementById('bf-preset-add-btn').addEventListener('click', () => {
-      const lvl = document.getElementById('bf-preset-level')?.value || '1';
-      document.getElementById('bf-preset-add-lvl').textContent = lvl;
+      const filterLvl = document.getElementById('bf-preset-level')?.value;
+      const seed = (filterLvl && filterLvl !== '*') ? filterLvl : '1';
+      const lvlInput = document.getElementById('bf-preset-add-lvl');
+      if (lvlInput) lvlInput.value = seed;
       document.getElementById('bf-preset-add').style.display = 'block';
       document.getElementById('bf-preset-add-btn').style.display = 'none';
-      // Pre-fill from last bot encounter if on ruins page
+      // Pre-fill empty (no auto-fill from last encounter — user must enter explicitly)
       document.getElementById('bf-preset-enemy').value = '';
       document.getElementById('bf-preset-form').value = '';
     });
@@ -6916,7 +7655,16 @@
     });
 
     document.getElementById('bf-preset-save').addEventListener('click', () => {
-      const lvl = document.getElementById('bf-preset-level')?.value || '1';
+      // v1.6.15 — Read level from the editable input INSIDE the form,
+      // not from the filter dropdown above. This is what fixes the
+      // "can only add Layer 1" bug from earlier versions.
+      const lvlRaw = document.getElementById('bf-preset-add-lvl')?.value;
+      const lvlNum = parseInt(lvlRaw, 10);
+      if (!Number.isFinite(lvlNum) || lvlNum < 1 || lvlNum > 999) {
+        alert('Level must be a number between 1 and 999.');
+        return;
+      }
+      const lvl = String(lvlNum);
       const enemyStr = document.getElementById('bf-preset-enemy').value.trim();
       const formStr = document.getElementById('bf-preset-form').value.trim();
       if (!enemyStr || !formStr) { alert('Fill in both enemy and formation'); return; }
@@ -6924,6 +7672,15 @@
       const enemyObj = parseQtyString(enemyStr);
       const formObj = parseQtyString(formStr);
       const canonicalEnemy = enemyFingerprint(enemyObj);
+
+      // v1.6.15.4 — Post-parse validation. The raw-string check above only
+      // rejects empty input; garbage like "abc" passes it but parseQtyString
+      // returns {} → enemyFingerprint returns '' → an empty preset gets saved
+      // and renders as "👹  / ⚔" in the list. This catches that.
+      if (!canonicalEnemy || Object.keys(formObj).length === 0) {
+        alert('Could not parse enemy or formation.\n\nUse format: TYPE:COUNT[,TYPE:COUNT]\nExamples:\n  Enemy:    E1:5,E2:3\n  Formation: T1:20,T3:38');
+        return;
+      }
 
       loadPresets(presets => {
         if (!presets[lvl]) presets[lvl] = [];
@@ -6934,7 +7691,16 @@
         botLog('ok', `Preset saved: Level ${lvl}, ${canonicalEnemy} → ${qtyToString(formObj)}`);
         document.getElementById('bf-preset-add').style.display = 'none';
         document.getElementById('bf-preset-add-btn').style.display = 'block';
-        renderPresetList();
+        // v1.6.15 — Rebuild the filter dropdown so newly-added custom layers
+        // (>50) appear in the picker, then switch the filter to the saved
+        // level so the user sees their entry immediately.
+        initPresetLevelDropdown(() => {
+          const sel = document.getElementById('bf-preset-level');
+          if (sel && Array.from(sel.options).some(o => o.value === lvl)) {
+            sel.value = lvl;
+          }
+          renderPresetList();
+        });
       });
     });
 
@@ -6952,7 +7718,7 @@
       // Validation. Bail silently on malformed payloads — this protects
       // against unrelated messages on shared windows / dev tools etc.
       const lvl = parseInt(m.level, 10);
-      if (isNaN(lvl) || lvl < 1 || lvl > 30) {
+      if (isNaN(lvl) || lvl < 1 || lvl > 999) {
         botLog('warn', 'Preset import: invalid level ' + m.level);
         return;
       }
@@ -7087,7 +7853,10 @@
           if (fields.length < 3) { errors++; continue; }
 
           const lvl = String(parseInt(fields[0].trim()));
-          if (isNaN(parseInt(lvl)) || parseInt(lvl) < 1 || parseInt(lvl) > 30) { errors++; continue; }
+          // v1.6.15 — Cap lifted from 30 to 999. The old hard limit silently
+          // dropped any imported row for layer 31+ even though the ruins grid
+          // supports up to 50 + arbitrary custom layers.
+          if (isNaN(parseInt(lvl)) || parseInt(lvl) < 1 || parseInt(lvl) > 999) { errors++; continue; }
 
           const enemyStr = fields[1].trim();
           const formStr = fields[2].trim();
@@ -7123,7 +7892,10 @@
             }
           }
           savePresets(existing);
-          renderPresetList();
+          // v1.6.15 — Rebuild dropdown so any imported custom layers (>50)
+          // become filterable. renderPresetList is called from the dropdown
+          // init callback so the list reflects the (possibly re-selected) level.
+          initPresetLevelDropdown(() => renderPresetList());
           const msg = `✅ Imported ${imported} presets.` + (errors > 0 ? ` ${errors} row(s) skipped.` : '');
           importStatus.textContent = msg;
           importStatus.style.color = errors > 0 ? '#e0a030' : '#5a7a4a';
@@ -7159,6 +7931,510 @@
       fields.push(current);
       return fields;
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // ── PRESET XLSX EXPORT / IMPORT (v1.6.15 — re-added) ────────────
+    // Pure-JS implementation, no external libraries. Originally added in
+    // v0.9.6 but lost during the v1.0.0 simulator-engine refactor; this
+    // is a clean re-implementation in the same spirit:
+    //   • Export: build OpenXML strings + pack as ZIP with STORE method
+    //     (no compression). Output is a valid .xlsx that opens in Excel,
+    //     LibreOffice and Google Sheets.
+    //   • Import: parse ZIP local-file-header chain; DEFLATE entries are
+    //     decompressed via browser-native DecompressionStream (so files
+    //     produced by Excel/LibreOffice work). Reads sharedStrings.xml +
+    //     worksheets/sheet1.xml and reuses the same validation as CSV.
+    // Format: 1 sheet "Presets", columns: Level | Enemy | Formation.
+    // ─────────────────────────────────────────────────────────────────
+
+    // ---- ZIP builder (STORE method, no compression) ----
+    // CRC-32 table — computed once. Used for ZIP per-file integrity.
+    const _CRC32_TABLE = (() => {
+      const t = new Uint32Array(256);
+      for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        t[n] = c >>> 0;
+      }
+      return t;
+    })();
+    function crc32(bytes) {
+      let c = 0xFFFFFFFF;
+      for (let i = 0; i < bytes.length; i++) c = _CRC32_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+      return (c ^ 0xFFFFFFFF) >>> 0;
+    }
+    function strToBytes(s) {
+      // Compatible with all Latin/Cyrillic/CJK content via UTF-8
+      return new TextEncoder().encode(s);
+    }
+    function bytesToStr(bytes) {
+      return new TextDecoder('utf-8').decode(bytes);
+    }
+    // Build a STORE-method ZIP from { name: Uint8Array } map.
+    // Each file: local header + raw data; then central directory; then EOCD.
+    function buildStoreZip(files) {
+      const chunks = [];
+      const central = [];
+      let offset = 0;
+      const dosTime = 0, dosDate = 0x21; // fixed 1980-01-01 (xlsx readers ignore)
+      Object.keys(files).forEach(name => {
+        const nameBytes = strToBytes(name);
+        const data = files[name];
+        const crc = crc32(data);
+        // Local file header (signature 0x04034b50)
+        const lh = new Uint8Array(30 + nameBytes.length);
+        const dv = new DataView(lh.buffer);
+        dv.setUint32(0, 0x04034b50, true);
+        dv.setUint16(4, 20, true);           // version needed
+        dv.setUint16(6, 0, true);            // flags
+        dv.setUint16(8, 0, true);            // method = STORE
+        dv.setUint16(10, dosTime, true);
+        dv.setUint16(12, dosDate, true);
+        dv.setUint32(14, crc, true);
+        dv.setUint32(18, data.length, true); // compressed = uncompressed
+        dv.setUint32(22, data.length, true);
+        dv.setUint16(26, nameBytes.length, true);
+        dv.setUint16(28, 0, true);           // extra field length
+        lh.set(nameBytes, 30);
+        chunks.push(lh, data);
+        // Central directory entry (signature 0x02014b50)
+        const cd = new Uint8Array(46 + nameBytes.length);
+        const cv = new DataView(cd.buffer);
+        cv.setUint32(0, 0x02014b50, true);
+        cv.setUint16(4, 20, true);           // version made by
+        cv.setUint16(6, 20, true);           // version needed
+        cv.setUint16(8, 0, true);
+        cv.setUint16(10, 0, true);
+        cv.setUint16(12, dosTime, true);
+        cv.setUint16(14, dosDate, true);
+        cv.setUint32(16, crc, true);
+        cv.setUint32(20, data.length, true);
+        cv.setUint32(24, data.length, true);
+        cv.setUint16(28, nameBytes.length, true);
+        cv.setUint16(30, 0, true);
+        cv.setUint16(32, 0, true);
+        cv.setUint16(34, 0, true);
+        cv.setUint16(36, 0, true);
+        cv.setUint32(38, 0, true);
+        cv.setUint32(42, offset, true);
+        cd.set(nameBytes, 46);
+        central.push(cd);
+        offset += lh.length + data.length;
+      });
+      const cdStart = offset;
+      let cdSize = 0;
+      central.forEach(cd => { chunks.push(cd); cdSize += cd.length; });
+      // End-of-central-directory (signature 0x06054b50)
+      const eocd = new Uint8Array(22);
+      const ev = new DataView(eocd.buffer);
+      ev.setUint32(0, 0x06054b50, true);
+      ev.setUint16(4, 0, true);
+      ev.setUint16(6, 0, true);
+      ev.setUint16(8, central.length, true);
+      ev.setUint16(10, central.length, true);
+      ev.setUint32(12, cdSize, true);
+      ev.setUint32(16, cdStart, true);
+      ev.setUint16(20, 0, true);
+      chunks.push(eocd);
+      // Concatenate all chunks
+      let total = 0;
+      chunks.forEach(c => { total += c.length; });
+      const out = new Uint8Array(total);
+      let p = 0;
+      chunks.forEach(c => { out.set(c, p); p += c.length; });
+      return out;
+    }
+
+    // ---- ZIP reader (walks local file headers) ----
+    // Supports STORE (method 0) and DEFLATE (method 8). For DEFLATE we use
+    // the browser-native DecompressionStream — handles real Excel files.
+    async function readZip(buf) {
+      const bytes = (buf instanceof Uint8Array) ? buf : new Uint8Array(buf);
+      // Scope DataView to bytes.byteOffset/byteLength — defensive against
+      // pooled buffers (in case callers pass a Uint8Array view over a larger
+      // ArrayBuffer). For File.arrayBuffer() this is a no-op but it's free.
+      const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const out = {};
+      let i = 0;
+      while (i + 30 <= bytes.length) {
+        const sig = dv.getUint32(i, true);
+        if (sig !== 0x04034b50) break; // not a local file header
+        const method = dv.getUint16(i + 8, true);
+        const compSize = dv.getUint32(i + 18, true);
+        const uncompSize = dv.getUint32(i + 22, true);
+        const nameLen = dv.getUint16(i + 26, true);
+        const extraLen = dv.getUint16(i + 28, true);
+        const name = bytesToStr(bytes.slice(i + 30, i + 30 + nameLen));
+        const dataStart = i + 30 + nameLen + extraLen;
+        const dataEnd = dataStart + compSize;
+        const data = bytes.slice(dataStart, dataEnd);
+        if (method === 0) {
+          out[name] = data;
+        } else if (method === 8) {
+          // Raw DEFLATE → use DecompressionStream('deflate-raw') when available.
+          // Falls back to wrapping in a zlib header — DecompressionStream('deflate')
+          // expects a zlib stream, not raw deflate, so we'd have to construct it.
+          // Modern browsers (Chrome 113+, Firefox 113+) support 'deflate-raw' directly.
+          try {
+            const ds = new DecompressionStream('deflate-raw');
+            const stream = new Response(data).body.pipeThrough(ds);
+            const ab = await new Response(stream).arrayBuffer();
+            out[name] = new Uint8Array(ab);
+          } catch (err) {
+            // Older browsers without 'deflate-raw' — try regular 'deflate' as a fallback.
+            // Most xlsx files from Excel use deflate-raw inside the zip, so this is best-effort.
+            try {
+              const ds2 = new DecompressionStream('deflate');
+              const stream2 = new Response(data).body.pipeThrough(ds2);
+              const ab2 = await new Response(stream2).arrayBuffer();
+              out[name] = new Uint8Array(ab2);
+            } catch (err2) {
+              throw new Error('Browser does not support DEFLATE decompression for ' + name);
+            }
+          }
+        } else {
+          throw new Error('Unsupported ZIP compression method ' + method + ' for ' + name);
+        }
+        i = dataEnd;
+        if (uncompSize === 0 && compSize === 0) break;
+      }
+      return out;
+    }
+
+    // ---- OpenXML helpers ----
+    function xmlEscape(s) {
+      return String(s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+    }
+    // Build minimal valid OpenXML xlsx with one sheet.
+    // rows: array of arrays of strings/numbers. First row is header.
+    function buildXlsxBytes(sheetName, rows) {
+      // Build shared strings table — every text cell points here so the sheet
+      // XML stays compact. Numbers go inline (Excel-friendly).
+      const sst = [];
+      const sstIdx = new Map();
+      function internStr(s) {
+        const key = String(s);
+        if (sstIdx.has(key)) return sstIdx.get(key);
+        const idx = sst.length;
+        sst.push(key);
+        sstIdx.set(key, idx);
+        return idx;
+      }
+      // Pre-intern all text cells. Numeric cells stay as numbers.
+      const cellTypes = rows.map(row => row.map(v => {
+        if (typeof v === 'number' && Number.isFinite(v)) return { t: 'n', v };
+        const idx = internStr(v == null ? '' : v);
+        return { t: 's', v: idx };
+      }));
+      function colName(n) {
+        // 1-indexed column number → 'A', 'B', ..., 'AA', ...
+        let s = '';
+        while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); }
+        return s;
+      }
+      // Build sheet1.xml
+      let sheetXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        + '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        + '<sheetData>';
+      cellTypes.forEach((row, rIdx) => {
+        const r = rIdx + 1;
+        sheetXml += `<row r="${r}">`;
+        row.forEach((cell, cIdx) => {
+          const ref = colName(cIdx + 1) + r;
+          if (cell.t === 's') sheetXml += `<c r="${ref}" t="s"><v>${cell.v}</v></c>`;
+          else                 sheetXml += `<c r="${ref}"><v>${cell.v}</v></c>`;
+        });
+        sheetXml += '</row>';
+      });
+      sheetXml += '</sheetData></worksheet>';
+
+      // Build sharedStrings.xml
+      let sstXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        + `<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${sst.length}" uniqueCount="${sst.length}">`;
+      sst.forEach(s => { sstXml += '<si><t xml:space="preserve">' + xmlEscape(s) + '</t></si>'; });
+      sstXml += '</sst>';
+
+      // Build workbook.xml
+      const workbookXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        + '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+        + ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        + `<sheets><sheet name="${xmlEscape(sheetName)}" sheetId="1" r:id="rId1"/></sheets>`
+        + '</workbook>';
+
+      const workbookRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+        + '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>'
+        + '</Relationships>';
+
+      const rootRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+        + '</Relationships>';
+
+      const contentTypes = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        + '<Default Extension="xml" ContentType="application/xml"/>'
+        + '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        + '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        + '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>'
+        + '</Types>';
+
+      const files = {
+        '[Content_Types].xml': strToBytes(contentTypes),
+        '_rels/.rels': strToBytes(rootRels),
+        'xl/_rels/workbook.xml.rels': strToBytes(workbookRels),
+        'xl/workbook.xml': strToBytes(workbookXml),
+        'xl/sharedStrings.xml': strToBytes(sstXml),
+        'xl/worksheets/sheet1.xml': strToBytes(sheetXml),
+      };
+      return buildStoreZip(files);
+    }
+
+    // ---- XLSX → rows of strings ----
+    // Returns an array of arrays. Cells are decoded to strings; numeric
+    // cells get toString() so the downstream CSV-style parsing works
+    // unchanged on Level/Enemy/Formation columns.
+    async function parseXlsx(arrayBuffer) {
+      const entries = await readZip(arrayBuffer);
+      const sstBytes = entries['xl/sharedStrings.xml'];
+      const sheetBytes = entries['xl/worksheets/sheet1.xml']
+        || entries['xl/worksheets/sheet.xml']
+        || Object.keys(entries).filter(k => /^xl\/worksheets\/sheet\d+\.xml$/i.test(k)).sort().map(k => entries[k])[0];
+      if (!sheetBytes) throw new Error('No sheet found in xlsx');
+      // Parse shared strings (if present)
+      const sst = [];
+      if (sstBytes) {
+        const sstXml = bytesToStr(sstBytes);
+        // Match each <si> ... </si>, concatenate inner <t> contents
+        const siRe = /<si\b[^>]*>([\s\S]*?)<\/si>/g;
+        const tRe = /<t\b[^>]*>([\s\S]*?)<\/t>/g;
+        let m;
+        while ((m = siRe.exec(sstXml)) !== null) {
+          let txt = '';
+          let tm;
+          tRe.lastIndex = 0;
+          while ((tm = tRe.exec(m[1])) !== null) txt += xmlUnescape(tm[1]);
+          sst.push(txt);
+        }
+      }
+      // Parse sheet rows
+      const sheetXml = bytesToStr(sheetBytes);
+      const rowRe = /<row\b[^>]*>([\s\S]*?)<\/row>/g;
+      const cellRe = /<c\b([^>]*)>([\s\S]*?)<\/c>|<c\b([^>]*)\/>/g;
+      const rows = [];
+      let rm;
+      while ((rm = rowRe.exec(sheetXml)) !== null) {
+        const inner = rm[1];
+        const row = [];
+        let cm;
+        cellRe.lastIndex = 0;
+        while ((cm = cellRe.exec(inner)) !== null) {
+          const attrs = cm[1] || cm[3] || '';
+          const body = cm[2] || '';
+          const refM = attrs.match(/r="([A-Z]+)(\d+)"/);
+          const tM = attrs.match(/t="([^"]+)"/);
+          const valM = body.match(/<v\b[^>]*>([\s\S]*?)<\/v>/);
+          const isM = body.match(/<is\b[^>]*>([\s\S]*?)<\/is>/);
+          let value = '';
+          if (tM && tM[1] === 's' && valM) {
+            const idx = parseInt(valM[1], 10);
+            value = sst[idx] !== undefined ? sst[idx] : '';
+          } else if (tM && tM[1] === 'inlineStr' && isM) {
+            const tmIn = isM[1].match(/<t\b[^>]*>([\s\S]*?)<\/t>/);
+            value = tmIn ? xmlUnescape(tmIn[1]) : '';
+          } else if (valM) {
+            value = xmlUnescape(valM[1]);
+          }
+          // Place in correct column by ref (handles sparse cells)
+          if (refM) {
+            const col = colLetterToIndex(refM[1]); // 0-based
+            while (row.length < col) row.push('');
+            row[col] = value;
+          } else {
+            row.push(value);
+          }
+        }
+        rows.push(row);
+      }
+      return rows;
+    }
+    function xmlUnescape(s) {
+      return String(s)
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+    }
+    function colLetterToIndex(letters) {
+      let n = 0;
+      for (let i = 0; i < letters.length; i++) n = n * 26 + (letters.charCodeAt(i) - 64);
+      return n - 1;
+    }
+
+    // ─── XLSX EXPORT ────────────────────────────────────────────────
+    document.getElementById('bf-preset-export-xlsx')?.addEventListener('click', () => {
+      loadPresets(presets => {
+        const rows = [['Level', 'Enemy', 'Formation']];
+        const levels = Object.keys(presets).sort((a, b) => Number(a) - Number(b));
+        let total = 0;
+        for (const lvl of levels) {
+          for (const p of presets[lvl]) {
+            rows.push([Number(lvl), p.enemy, qtyToString(p.formation)]);
+            total++;
+          }
+        }
+        if (total === 0) { alert('No presets to export.'); return; }
+        try {
+          const bytes = buildXlsxBytes('Presets', rows);
+          const blob = new Blob([bytes], {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+          });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `bf-presets-${new Date().toISOString().slice(0,10)}.xlsx`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          botLog('ok', `Exported ${total} presets to XLSX.`);
+        } catch (err) {
+          botLog('err', 'XLSX export failed: ' + err.message);
+          alert('XLSX export failed: ' + err.message);
+        }
+      });
+    });
+
+    // ─── XLSX IMPORT ────────────────────────────────────────────────
+    const importXlsxInput = document.getElementById('bf-preset-import-xlsx-file');
+    document.getElementById('bf-preset-import-xlsx-btn')?.addEventListener('click', () => {
+      if (!importXlsxInput) return;
+      importXlsxInput.value = '';
+      importXlsxInput.click();
+    });
+    importXlsxInput?.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const statusEl = document.getElementById('bf-preset-import-status');
+      try {
+        const buf = await file.arrayBuffer();
+        const rows = await parseXlsx(buf);
+        if (!rows.length) {
+          statusEl.textContent = '⚠ XLSX is empty.';
+          statusEl.style.color = '#e04040';
+          statusEl.style.display = 'block';
+          return;
+        }
+        // Detect header row by checking if first cell looks like "Level"
+        const first = (rows[0][0] || '').toString().trim().toLowerCase();
+        const startIdx = (first === 'level' || first === 'lvl' || first === 'layer') ? 1 : 0;
+
+        let imported = 0, errors = 0;
+        const newPresets = {};
+        for (let i = startIdx; i < rows.length; i++) {
+          const row = rows[i];
+          if (!row || row.length < 3) { errors++; continue; }
+          const lvlNum = parseInt(String(row[0]).trim(), 10);
+          if (!Number.isFinite(lvlNum) || lvlNum < 1 || lvlNum > 999) { errors++; continue; }
+          const enemyStr = String(row[1] || '').trim();
+          const formStr = String(row[2] || '').trim();
+          if (!enemyStr || !formStr) { errors++; continue; }
+          const enemyObj = parseQtyString(enemyStr);
+          const formObj = parseQtyString(formStr);
+          const canonicalEnemy = enemyFingerprint(enemyObj);
+          if (!canonicalEnemy || Object.keys(formObj).length === 0) { errors++; continue; }
+          const lvl = String(lvlNum);
+          if (!newPresets[lvl]) newPresets[lvl] = [];
+          newPresets[lvl] = newPresets[lvl].filter(p => p.enemy !== canonicalEnemy);
+          newPresets[lvl].push({ enemy: canonicalEnemy, formation: formObj });
+          imported++;
+        }
+        if (imported === 0) {
+          statusEl.textContent = `⚠ No valid presets found. ${errors} error(s).`;
+          statusEl.style.color = '#e04040';
+          statusEl.style.display = 'block';
+          return;
+        }
+        loadPresets(existing => {
+          for (const lvl of Object.keys(newPresets)) {
+            if (!existing[lvl]) existing[lvl] = [];
+            for (const np of newPresets[lvl]) {
+              existing[lvl] = existing[lvl].filter(p => p.enemy !== np.enemy);
+              existing[lvl].push(np);
+            }
+          }
+          savePresets(existing);
+          // Refresh dropdown so any new custom layers appear
+          initPresetLevelDropdown(() => renderPresetList());
+          const msg = `✅ Imported ${imported} presets from XLSX.` + (errors > 0 ? ` ${errors} row(s) skipped.` : '');
+          statusEl.textContent = msg;
+          statusEl.style.color = errors > 0 ? '#e0a030' : '#5a7a4a';
+          statusEl.style.display = 'block';
+          botLog('ok', msg);
+          setTimeout(() => { statusEl.style.display = 'none'; }, 5000);
+        });
+      } catch (err) {
+        statusEl.textContent = '⚠ XLSX import failed: ' + err.message;
+        statusEl.style.color = '#e04040';
+        statusEl.style.display = 'block';
+        botLog('err', 'XLSX import failed: ' + err.message);
+      }
+    });
+
+    // ─── DELETE ALL PRESETS (v1.6.19) ───────────────────────────────
+    // Two-step confirmation: first click warns; second click within 4s
+    // actually wipes every preset across every level. We don't use
+    // window.confirm() to keep behaviour consistent with the rest of the
+    // panel (the game frame can be sandboxed and native dialogs are
+    // sometimes blocked). Visual feedback is shown in the import-status
+    // box that already lives in the preset group.
+    let _presetDeleteArmedAt = 0;
+    document.getElementById('bf-preset-delete-all')?.addEventListener('click', () => {
+      const statusEl = document.getElementById('bf-preset-import-status');
+      const btn = document.getElementById('bf-preset-delete-all');
+      const now = Date.now();
+      if (now - _presetDeleteArmedAt > 4000) {
+        // Step 1 — arm
+        _presetDeleteArmedAt = now;
+        if (statusEl) {
+          statusEl.textContent = '⚠ Click again within 4s to DELETE ALL presets (cannot be undone).';
+          statusEl.style.color = '#ff8a80';
+          statusEl.style.display = 'block';
+        }
+        if (btn) {
+          const origText = btn.textContent;
+          btn.textContent = '⚠ Click again to CONFIRM delete';
+          setTimeout(() => {
+            if (Date.now() - _presetDeleteArmedAt >= 4000) {
+              btn.textContent = origText;
+              if (statusEl) statusEl.style.display = 'none';
+            }
+          }, 4100);
+        }
+        return;
+      }
+      // Step 2 — confirmed within window. Count first so we can report.
+      loadPresets(existing => {
+        let total = 0;
+        for (const lvl of Object.keys(existing)) {
+          if (Array.isArray(existing[lvl])) total += existing[lvl].length;
+        }
+        savePresets({}); // empty object = no presets at any level
+        _presetDeleteArmedAt = 0;
+        if (btn) btn.textContent = '🗑 Delete all presets';
+        if (statusEl) {
+          statusEl.textContent = `✅ Deleted ${total} preset${total === 1 ? '' : 's'}.`;
+          statusEl.style.color = '#7ad19a';
+          statusEl.style.display = 'block';
+          setTimeout(() => { statusEl.style.display = 'none'; }, 4000);
+        }
+        botLog('ok', `Deleted ${total} ruins preset(s) on user confirmation.`);
+        // Refresh preset list UI so the change is visible immediately.
+        initPresetLevelDropdown(() => renderPresetList());
+      });
+    });
 
     // Min units checkbox toggle
     document.getElementById('bf-ruins-stop-min-units')?.addEventListener('change', (e) => {
@@ -7276,6 +8552,9 @@
     document.getElementById('bf-pvp-toggle').addEventListener('click', () => {
       loadSettings((settings) => {
         settings.pvpEnabled = !settings.pvpEnabled;
+        // v1.6.19 — capture the user's in-game name for the result parser.
+        // Trim only — names are case-sensitive on Bitefight, so we preserve case.
+        settings.playerName = (document.getElementById('bf-player-name')?.value || '').trim();
         settings.pvpMode = parseInt(document.getElementById('bf-pvp-mode')?.value) || 1;
         settings.pvpMinHP = parseInt(document.getElementById('bf-pvp-minhp')?.value) || 50;
         settings.pvpWhitelist = document.getElementById('bf-pvp-whitelist')?.value || '';
@@ -7297,6 +8576,11 @@
           loadState((state) => {
             state.pvpState = 'navigating';
             state.henchmanState = 'idle';
+            // v1.6.19 — clear stale whitelist-iteration ledger so the new
+            // session starts from the first name in the list.
+            state.pvpWhitelistTried = [];
+            state.pvpLastTriedWhitelistName = '';
+            state.pvpNextAttack = 0; // clear stale cooldown
             saveState(state);
             botLog('ok', 'PvP Bot STARTED');
             updatePvPUI(settings, state);
@@ -7318,6 +8602,8 @@
     document.getElementById('bf-henchman-toggle')?.addEventListener('click', () => {
       loadSettings((settings) => {
         settings.henchmanEnabled = !settings.henchmanEnabled;
+        // v1.6.19 — same shared playerName field used by both bots' win detection
+        settings.playerName = (document.getElementById('bf-player-name')?.value || '').trim();
         settings.henchmanMode = parseInt(document.getElementById('bf-henchman-mode')?.value) || 1;
         settings.henchmanWhitelist = document.getElementById('bf-henchman-whitelist')?.value || '';
         settings.henchmanBlacklist = document.getElementById('bf-henchman-blacklist')?.value || '';
@@ -7335,6 +8621,11 @@
           loadState((state) => {
             state.henchmanState = 'navigating';
             state.pvpState = 'idle';
+            // v1.6.19 — clear stale whitelist-iteration ledger so the new
+            // session starts from the first name in the list.
+            state.henchmanWhitelistTried = [];
+            state.henchmanLastTriedWhitelistName = '';
+            state.henchmanNextAttack = 0; // clear stale cooldown
             saveState(state);
             botLog('ok', 'Henchman Bot STARTED');
             updateHenchmanUI(settings, state);
@@ -7669,13 +8960,13 @@
       });
     });
 
-    // PvP mode change — show/hide BV range row and blacklist group
+    // PvP mode change — show/hide BV range row.
+    // v1.6.19 — both lists (whitelist + blacklist) are always visible now;
+    // semantics mirror Henchman so the per-mode hide is no longer correct.
     document.getElementById('bf-pvp-mode')?.addEventListener('change', (e) => {
       const mode = parseInt(e.target.value);
       const bvRow = document.getElementById('bf-pvp-bv-row');
-      const blGroup = document.getElementById('bf-pvp-bl-group');
       if (bvRow) bvRow.style.display = (mode === 4) ? 'flex' : 'none';
-      if (blGroup) blGroup.style.display = (mode === 3) ? '' : 'none';
     });
 
     // v1.6.10 — Auto-persist PvP/Henchman config fields on any change.
@@ -7685,6 +8976,8 @@
     function persistPvPHenchmanFromDOM() {
       loadSettings((se) => {
         const get = (id) => document.getElementById(id);
+        // v1.6.19 — shared player name field (PvP+Henchman win detection)
+        if (get('bf-player-name')) se.playerName = (get('bf-player-name').value || '').trim();
         if (get('bf-pvp-mode'))      se.pvpMode      = parseInt(get('bf-pvp-mode').value) || 1;
         if (get('bf-pvp-minhp'))     se.pvpMinHP     = parseInt(get('bf-pvp-minhp').value) || 50;
         if (get('bf-pvp-whitelist')) se.pvpWhitelist = get('bf-pvp-whitelist').value || '';
@@ -7712,6 +9005,7 @@
       _pvpPersistTimer = setTimeout(persistPvPHenchmanFromDOM, 300);
     }
     [
+      'bf-player-name',
       'bf-pvp-mode','bf-pvp-minhp','bf-pvp-whitelist','bf-pvp-blacklist',
       'bf-pvp-bv-from','bf-pvp-bv-to','bf-pvp-inactive','bf-pvp-break',
       'bf-pvp-delay','bf-pvp-margin',
@@ -7857,6 +9151,16 @@
     document.getElementById('bf-ruins-warm-source')?.addEventListener('change', (e) => {
       const row = document.getElementById('bf-ruins-warm-range-row');
       if (row) row.style.display = (e.target.value === 'none') ? 'none' : 'flex';
+    });
+    // v1.6.18 — Mode radios toggle the Fast budget row + hint visibility
+    document.querySelectorAll('input[name="bf-ruins-opt-mode"]').forEach(radio => {
+      radio.addEventListener('change', () => {
+        const isFast = document.getElementById('bf-ruins-opt-mode-fast')?.checked;
+        const fastRow = document.getElementById('bf-ruins-opt-fastsims-row');
+        const fastHint = document.getElementById('bf-ruins-opt-fastsims-hint');
+        if (fastRow) fastRow.style.display = isFast ? 'flex' : 'none';
+        if (fastHint) fastHint.style.display = isFast ? 'block' : 'none';
+      });
     });
     // Kill E3 R1 toggle → update T4 info / T4 short action visibility
     document.getElementById('bf-ruins-opt-killE3')?.addEventListener('change', () => {
@@ -8860,6 +10164,13 @@
     if (modeRadio) modeRadio.checked = true;
     const optPar = document.getElementById('bf-ruins-opt-parallel');
     if (optPar) optPar.checked = settings.ruinsOptParallel !== false;
+    // v1.6.18 — Fast budget input + show/hide its row based on selected mode
+    const fastSims = document.getElementById('bf-ruins-opt-fastsims');
+    if (fastSims) fastSims.value = settings.ruinsOptFastMaxSims || 50000;
+    const fastRow = document.getElementById('bf-ruins-opt-fastsims-row');
+    const fastHint = document.getElementById('bf-ruins-opt-fastsims-hint');
+    if (fastRow) fastRow.style.display = (optMode === 'fast') ? 'flex' : 'none';
+    if (fastHint) fastHint.style.display = (optMode === 'fast') ? 'block' : 'none';
     const wSrc = document.getElementById('bf-ruins-warm-source');
     if (wSrc) wSrc.value = settings.ruinsWarmStartSource || 'none';
     const wRng = document.getElementById('bf-ruins-warm-range');
@@ -8957,6 +10268,10 @@
     if (gChurchAP) gChurchAP.value = settings.grottoChurchAP || 15;
 
     // ── PVP SETTINGS ──
+    // v1.6.19 — shared in-game player name (used by both PvP & Henchman
+    // result-page parsers to identify the user).
+    const pName = document.getElementById('bf-player-name');
+    if (pName) pName.value = settings.playerName || '';
     const pMode = document.getElementById('bf-pvp-mode');
     if (pMode) pMode.value = String(settings.pvpMode || 1);
     const pMinHP = document.getElementById('bf-pvp-minhp');
@@ -8980,9 +10295,11 @@
     // Show/hide BV row based on mode
     const bvRow = document.getElementById('bf-pvp-bv-row');
     if (bvRow) bvRow.style.display = (parseInt(settings.pvpMode) === 4) ? 'flex' : 'none';
-    // Show/hide blacklist group based on mode
-    const blGroup = document.getElementById('bf-pvp-bl-group');
-    if (blGroup) blGroup.style.display = (parseInt(settings.pvpMode) === 3) ? '' : 'none';
+    // v1.6.19 — blacklist is now ALWAYS visible (semantics changed to match
+    // Henchman: it's "do not attack", relevant in every mode). The per-mode
+    // hide on mode 3 has been removed. Old hide-by-mode code:
+    //   const blGroup = document.getElementById('bf-pvp-bl-group');
+    //   if (blGroup) blGroup.style.display = (parseInt(settings.pvpMode) === 3) ? '' : 'none';
 
     // ── HENCHMAN SETTINGS (v1.6.9, semantics flipped v1.6.10) ──
     // Legacy mode 3 (old "blacklist by name") maps onto the new mode 2
