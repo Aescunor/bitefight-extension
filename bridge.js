@@ -17,6 +17,8 @@ window.addEventListener('message', (event) => {
   if (pl) window._bf_lastPowerLimit = pl;
 
   updateGameBar(s);
+  // v1.6.26 — unit names / artwork / race
+  if ((s.origin || s.units) && typeof window.setSimUnitCtx === 'function') window.setSimUnitCtx(s.origin, s.units);
 
   // s.ally  = { units: [{id,name,owned,selected,power}], powerLimit, source }
   // s.enemy = { enemies: [{name,qty,tier,pos}], source, powerLimit }
@@ -226,4 +228,3 @@ window.addEventListener('load', () => {
     window.parent.postMessage({ type: 'BF_PANEL_READY' }, '*');
   }
 });
-
