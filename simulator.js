@@ -269,6 +269,66 @@ function currentAutoDelay() {
 ALLY_TIERS.forEach(t => allyQuantities[t.id] = 0);
 ENEMY_TIERS.forEach(t => enemyQuantities[t.id] = 0);
 
+// ===================== UNIT IDENTITY (v1.6.26) =====================
+// Names + artwork per race from js/unit_catalog.js (window.BFUnits).
+// The tier codes (T1…, E1…) stay the primary label everywhere; the name
+// and picture are added next to them. Context arrives from the game page
+// via bridge.js (BF_GAME_STATE.origin / .units) and is cached locally so
+// the panel keeps its look between opens.
+const LS_KEY_UNIT_CTX   = 'bf_sim_unitctx';
+const LS_KEY_SIM_RACE   = 'bf_sim_race';    // 'auto' | '1' | '2'
+const LS_KEY_SIM_NAMES  = 'bf_sim_names';   // 'both' | 'code'
+let UNIT_CTX = Object.assign({ origin: null, race: null, names: null }, lsGet(LS_KEY_UNIT_CTX) || {});
+function simRace() {
+  const ov = lsGet(LS_KEY_SIM_RACE);
+  if (ov === '1' || ov === '2') return parseInt(ov);
+  return UNIT_CTX.race || 1;
+}
+function simShowNames() { return lsGet(LS_KEY_SIM_NAMES) !== 'code'; }
+function simUnitName(id) {
+  return window.BFUnits ? window.BFUnits.name(id, simRace(), UNIT_CTX.names) : '';
+}
+function simUnitImg(id, cls) {
+  if (!window.BFUnits || !UNIT_CTX.origin) return '';
+  const url = window.BFUnits.imgUrl(id, simRace(), UNIT_CTX.origin);
+  return url ? `<img class="${cls || 'unit-img'}" src="${url}" alt="" loading="lazy" draggable="false">` : '';
+}
+function tierHeadHtml(tier, side) {
+  const nm = simShowNames() ? simUnitName(tier.id) : '';
+  return `<div class="tier-head">${simUnitImg(tier.id, 'tier-img')}<div class="tier-head-txt">`
+    + `<span class="tier-label">${tier.id}</span>`
+    + (nm ? `<span class="tier-name" title="${tier.label}">${nm}</span>` : '')
+    + `</div></div>`;
+}
+// Called by bridge.js whenever the game page pushes state
+window.setSimUnitCtx = function (origin, units) {
+  let changed = false;
+  if (origin && origin !== UNIT_CTX.origin) { UNIT_CTX.origin = origin; changed = true; }
+  if (units) {
+    if (units.race && units.race !== UNIT_CTX.race) { UNIT_CTX.race = units.race; changed = true; }
+    if (units.names && JSON.stringify(units.names) !== JSON.stringify(UNIT_CTX.names)) { UNIT_CTX.names = units.names; changed = true; }
+  }
+  if (!changed) return;
+  lsSet(LS_KEY_UNIT_CTX, UNIT_CTX);
+  refreshUnitLook();
+};
+function refreshUnitLook() {
+  renderUnitLookBar();
+  renderBuilder();
+  if (battleState) renderBattlefield();
+}
+function renderUnitLookBar() {
+  const bar = document.getElementById('unit-look-bar');
+  if (!bar) return;
+  const ov = lsGet(LS_KEY_SIM_RACE) || 'auto';
+  const auto = UNIT_CTX.race ? (window.BFUnits ? window.BFUnits.RACE_LABEL[UNIT_CTX.race] : '') : '?';
+  const mk = (v, lbl) => `<button class="ulook-btn${ov === v ? ' on' : ''}" data-ulook-race="${v}">${lbl}</button>`;
+  const names = simShowNames();
+  bar.innerHTML = `<span class="ulook-lbl">RACE:</span>${mk('auto', 'Auto (' + auto + ')')}${mk('1', '🦇 Vampire')}${mk('2', '🐺 Werewolf')}`
+    + `<span class="ulook-sep"></span><button class="ulook-btn${names ? ' on' : ''}" data-ulook-names="1" title="Show unit names next to tier codes">Names</button>`
+    + (UNIT_CTX.origin ? '' : `<span class="ulook-hint" title="Open the simulator from a game page once — artwork is loaded from the game server.">no artwork offline</span>`);
+}
+
 function toggleUnlock(side, id) {
   const set = side === 'ally' ? unlockedAllyTiers : unlockedEnemyTiers;
   const qtys = side === 'ally' ? allyQuantities : enemyQuantities;
@@ -339,7 +399,7 @@ function renderAllyTiers() {
     const div = document.createElement('div');
     div.className = 'tier-card' + (qty > 0 ? ' selected' : '');
     div.innerHTML = `
-      <span class="tier-label">${tier.label}</span>
+      ${tierHeadHtml(tier, 'ally')}
       <div class="tier-info-row">
         <span class="stat-badge">⚔<span class="val">${tier.dmg}</span></span>
         <span class="stat-badge">❤<span class="val">${tier.hp}</span></span>
@@ -372,7 +432,7 @@ function renderEnemyTiers() {
     const div = document.createElement('div');
     div.className = 'tier-card' + (qty > 0 ? ' enemy-selected' : '');
     div.innerHTML = `
-      <span class="tier-label">${tier.label}</span>
+      ${tierHeadHtml(tier, 'enemy')}
       <div class="tier-info-row">
         <span class="stat-badge">⚔<span class="val">${tier.dmg}</span></span>
         <span class="stat-badge">❤<span class="val">${tier.hp}</span></span>
@@ -708,7 +768,14 @@ function applyEvent(ev) {
       break;
     case 'skill': {
       // Generic skill log: lookup by key
-      const text = T(ev.key, ev.mult, ev.deaths);
+      // v1.6.20 — keys whose {0} is a GROUP (not a multiplier) previously
+      // rendered "undefined" (e.g. "Tier 4 banshees: undefined attacks…").
+      const grp = id => (battleState && battleState.groupsById && battleState.groupsById[id]) || null;
+      let text;
+      if (ev.key === 't4Debuff')              text = T(ev.key, labelWithSide(grp(ev.targetId), true));
+      else if (ev.key === 'debuffedAttacker') text = T(ev.key, labelWithSide(grp(ev.attackerId), false));
+      else if (ev.key === 'cultistBuff')      text = T(ev.key, labelWithSide(grp(ev.targetId), true), ev.mult);
+      else                                    text = T(ev.key, ev.mult, ev.deaths);
       addLog(`<span class="log-skill">✦ ${text}</span>`);
       break;
     }
@@ -808,7 +875,7 @@ function createUnitEl(group, side) {
 
   div.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:4px;flex-wrap:wrap">
-      <span class="bf-unit-name">${group.label}</span>
+      <span class="bf-unit-name">${simUnitImg(group.id, 'bf-unit-img')}${group.label}${simShowNames() && simUnitName(group.id) ? `<span class="bf-unit-sub">${simUnitName(group.id)}</span>` : ''}</span>
       <div style="display:flex;gap:3px;flex-wrap:wrap">${statusBadge}${buffBadge}</div>
     </div>
     <div style="display:flex;gap:6px;font-size:0.65rem;color:var(--text-dim);margin-bottom:3px">
@@ -836,6 +903,7 @@ function renderTurnOrder(groups) {
     badge.className = 'turn-badge ' + g.side;
     if (i === 0) badge.className += ' active';
     badge.textContent = g.label + ' (💨' + g.tier.spd + ')';
+    badge.title = simUnitName(g.id) || g.label;
     bar.appendChild(badge);
     if (i < groups.length - 1) {
       const arrow = document.createElement('span');
@@ -903,7 +971,15 @@ function buildLogExportText() {
   // mark as "in progress". battleState is the live structure managed by
   // executeRound; .done flips true when one side is wiped.
   let outcomeLine = 'Outcome:        in progress';
-  if (battleState && battleState.done) {
+  // v1.6.20 — battleState never carried victory/draw flags, so every finished
+  // battle was exported as "DEFEAT". Read them from the engine result instead.
+  const _fr = battleState && battleState.finalResult;
+  if (battleState && battleState.done && _fr) {
+    const r = _fr.rounds || battleState.round || '?';
+    if (_fr.draw)         outcomeLine = 'Outcome:        ⚔ DRAW after ' + r + ' rounds';
+    else if (_fr.victory) outcomeLine = 'Outcome:        🏆 VICTORY after ' + r + ' rounds';
+    else                  outcomeLine = 'Outcome:        💀 DEFEAT after ' + r + ' rounds';
+  } else if (battleState && battleState.done) {
     if (battleState.draw)      outcomeLine = 'Outcome:        ⚔ DRAW after ' + (battleState.round || '?') + ' rounds';
     else if (battleState.victory) outcomeLine = 'Outcome:        🏆 VICTORY after ' + (battleState.round || '?') + ' rounds';
     else                       outcomeLine = 'Outcome:        💀 DEFEAT after ' + (battleState.round || '?') + ' rounds';
@@ -923,7 +999,7 @@ function buildLogExportText() {
     '================================================================',
     ' BiteFight Battle Simulator — Log Export',
     '================================================================',
-    'Version:        v1.6.10',
+    'Version:        v' + (function () { try { return chrome.runtime.getManifest().version; } catch (_) { return '1.6.27'; } })(),
     'Exported:       ' + isoLocal,
     'Power limit:    ' + (ARMY_POWER_LIMIT || '?'),
     'Allies:         ' + compactQtys(allyQuantities, ALLY_TIERS),
@@ -2806,6 +2882,1693 @@ function ensurePresetAckListener() {
     const entries = Array.from(_presetAckPending.entries());
     if (entries.length === 0) return;
     const [btn] = entries[0];
+    _presetAckPending.delete(e="color:var(--gold-light)">${r.totalCost} 🩸</b></span>
+          <span>☠ Loss: <b style="color:#e74c3c">${r.essenceLost} 🩸</b></span>
+          <span>✓ Survived: <b style="color:#2ecc71">${r.unitsSurvived} units</b></span>
+          ${r.e3KilledRound1 ? '<span style="color:#9b59b6;font-family:Cinzel,serif;font-size:0.65rem">☠ E3 round 1</span>' : ''}
+          <button class="opt-apply-btn" data-formation='${JSON.stringify(r.allyQtys)}'
+            style="margin-left:auto;font-family:Cinzel,serif;font-size:0.65rem;padding:3px 10px;border:1px solid var(--gold);background:transparent;color:var(--gold);cursor:pointer;border-radius:2px;transition:all 0.15s">
+            ← Apply
+          </button>
+        </div>
+      </div>`;
+  });
+
+  container.innerHTML = html;
+}
+
+function applyFormation(qtysObj) {
+  ALLY_TIERS.forEach(t => { allyQuantities[t.id] = qtysObj[t.id] || 0; });
+  renderBuilder();
+  closeOptimizer();
+}
+
+// ============================================================================
+// SIMULATION HISTORY — last N manual simulations
+// ============================================================================
+// Triggered only from startBattle() (manual ⚔ Start Battle), NOT from the
+// optimizer's silent batch simulations. Each entry stores the formation,
+// power limit, and result summary so the user can review and reapply.
+
+// In-memory selection state for the Compare feature. Holds 0–2 history
+// indices. Not persisted — if the user reloads the iframe, selection
+// resets, which is fine because the history list itself may have rotated
+// new entries to the front.
+let _compareSelection = [];
+
+function toggleCompareSelection(idx) {
+  const pos = _compareSelection.indexOf(idx);
+  if (pos >= 0) {
+    _compareSelection.splice(pos, 1);
+  } else {
+    if (_compareSelection.length >= 2) {
+      // Already 2 selected — silently no-op. The checkbox in the UI is
+      // disabled in this state, but a fast double-click could still get
+      // through, so guard here too.
+      return false;
+    }
+    _compareSelection.push(idx);
+  }
+  renderHistory();
+  return true;
+}
+
+function pushHistory(allyQtys, enemyQtys, powerLimit, engineResult) {
+  if (!engineResult) return;
+
+  // Engine returns lossesPerTier { T1: {lost, survived, qty}, ... } for ally side.
+  // For enemy per-tier we build the same shape from engineResult.finalState,
+  // which lists every group on both sides with end-of-battle aliveUnits.
+  const allyLosses = {};
+  ALLY_TIERS.forEach(t => {
+    const q = allyQtys[t.id] || 0;
+    if (q === 0) return;
+    const eng = engineResult.lossesPerTier && engineResult.lossesPerTier[t.id];
+    if (eng) {
+      allyLosses[t.id] = { qty: eng.qty, survived: eng.survived, lost: eng.lost };
+    } else {
+      // Defensive fallback — should never happen since engine iterates all ally groups
+      allyLosses[t.id] = { qty: q, survived: 0, lost: q };
+    }
+  });
+
+  // Enemy per-tier from finalState. Only include tiers that started > 0
+  // (E9S spiderlings that may spawn mid-battle are skipped — they're not
+  // part of the user's tracked enemy composition).
+  const enemyLosses = {};
+  const finalById = {};
+  if (Array.isArray(engineResult.finalState)) {
+    engineResult.finalState.forEach(fs => {
+      if (fs.side === 'enemy') finalById[fs.id] = fs;
+    });
+  }
+  ENEMY_TIERS.forEach(t => {
+    const q = enemyQtys[t.id] || 0;
+    if (q === 0) return;
+    const fs = finalById[t.id];
+    const survived = fs ? (fs.alive ? fs.aliveUnits : 0) : 0;
+    enemyLosses[t.id] = { qty: q, survived: survived, lost: q - survived };
+  });
+
+  // Roll-up totals (used for the card header summary)
+  let totalAllyStart = 0, totalAllySurv = 0;
+  Object.values(allyLosses).forEach(v => { totalAllyStart += v.qty; totalAllySurv += v.survived; });
+  let totalEnemyStart = 0, totalEnemyKilled = 0;
+  Object.values(enemyLosses).forEach(v => { totalEnemyStart += v.qty; totalEnemyKilled += v.lost; });
+
+  const entry = {
+    t: Date.now(),
+    ally:  { ...allyQtys },
+    enemy: { ...enemyQtys },
+    powerLimit: powerLimit,
+    victory: !!engineResult.victory,
+    draw:    !!engineResult.draw,
+    rounds:  engineResult.rounds || 0,
+    essenceLost: (engineResult.essenceLost != null) ? engineResult.essenceLost : 0,
+    // v2 fields — per-tier breakdown
+    allyLosses:  allyLosses,
+    enemyLosses: enemyLosses,
+    totalAllyStart: totalAllyStart,
+    totalAllySurv:  totalAllySurv,
+    totalEnemyStart: totalEnemyStart,
+    totalEnemyKilled: totalEnemyKilled,
+  };
+  const list = lsGet(LS_KEY_HISTORY) || [];
+  list.unshift(entry);
+
+  // Pinned-aware FIFO eviction. Strategy:
+  //   1. While there are more than LS_HISTORY_MAX *unpinned* entries, drop
+  //      the oldest unpinned one (i.e. the last unpinned entry in the
+  //      newest-first array).
+  //   2. As a last-resort safety, if the total still exceeds
+  //      LS_HISTORY_TOTAL_CAP (extremely rare — implies many pins), drop
+  //      the oldest entry of any kind. Better to lose a pin than to grow
+  //      unbounded in localStorage.
+  let unpinnedCount = list.filter(e => !e.pinned).length;
+  while (unpinnedCount > LS_HISTORY_MAX) {
+    // Find last (oldest) unpinned entry, since list is newest-first.
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (!list[i].pinned) { list.splice(i, 1); break; }
+    }
+    unpinnedCount--;
+  }
+  while (list.length > LS_HISTORY_TOTAL_CAP) {
+    list.pop();
+  }
+
+  lsSet(LS_KEY_HISTORY, list);
+  // pushHistory shifts all existing indexes by +1 (unshift), and may evict
+  // the oldest entry. Easiest correct behaviour: clear the selection — the
+  // user has just run a new battle and almost certainly wants to compare
+  // against THAT, not whatever they had selected before.
+  _compareSelection = [];
+  renderHistory();
+}
+
+// Load and sort history for display. Pinned entries always come first
+// (with newest pinned at the top of the pinned group), then unpinned
+// (newest first). All consumers use this view, so `data-history-idx` in
+// the DOM corresponds to a position in the SORTED array — which is what
+// the user sees. We pass the sorted index everywhere; lookups back into
+// the raw LS array go through this helper too.
+function loadHistorySorted() {
+  const raw = lsGet(LS_KEY_HISTORY) || [];
+  // Stable sort: pinned first, then by timestamp descending.
+  // Both branches return the same comparator if pinned status matches.
+  return raw.slice().sort((a, b) => {
+    const ap = a.pinned ? 1 : 0;
+    const bp = b.pinned ? 1 : 0;
+    if (ap !== bp) return bp - ap;        // pinned first
+    return (b.t || 0) - (a.t || 0);       // newest first within group
+  });
+}
+
+// Helpers for write paths — given a sorted-view index, find the entry's
+// position in the raw LS array so we can mutate it in place.
+function rawIndexForSortedIndex(sortedIdx) {
+  const sorted = loadHistorySorted();
+  const entry = sorted[sortedIdx];
+  if (!entry) return -1;
+  const raw = lsGet(LS_KEY_HISTORY) || [];
+  // Use timestamp as the unique key — pushHistory stamps Date.now() and
+  // even sub-millisecond duplicates would still resolve to one entry first.
+  return raw.findIndex(e => e.t === entry.t);
+}
+
+// ============================================================================
+// PIN HISTORY ENTRY
+// ----------------------------------------------------------------------------
+// Pinned entries are exempt from FIFO eviction in pushHistory. They still
+// participate in reapply, compare, and clear-all. Toggle only writes to LS
+// and re-renders — no side effects on simulator state.
+function toggleHistoryPin(sortedIdx) {
+  const raw = lsGet(LS_KEY_HISTORY) || [];
+  const rawIdx = rawIndexForSortedIndex(sortedIdx);
+  if (rawIdx < 0) return;
+  raw[rawIdx].pinned = !raw[rawIdx].pinned;
+  lsSet(LS_KEY_HISTORY, raw);
+  // Pin toggle re-orders the list (sorted view), so any active compare
+  // selection on sorted indexes is now stale. Clearing is the safest
+  // option — the user can re-select after seeing the new order.
+  _compareSelection = [];
+  renderHistory();
+}
+
+
+function humanAgo(ts) {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60)    return s + 's ago';
+  if (s < 3600)  return Math.floor(s / 60) + 'min ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+
+function renderHistory() {
+  const container = document.getElementById('sim-history-list');
+  if (!container) return;
+  const list = loadHistorySorted();
+  if (list.length === 0) {
+    container.innerHTML = '<span style="font-size:0.66rem;color:var(--text-dim);'
+      + 'font-style:italic">No simulations yet — click ⚔ Start Battle.</span>';
+    return;
+  }
+
+  // Helper: render one side's per-tier loss table (ally or enemy).
+  // For ally: green = all survived, orange = partial loss, red = wiped.
+  // For enemy: green = all killed (good), red = some survived (bad).
+  function tierRowsHtml(losses, side) {
+    const ids = side === 'ally'
+      ? ALLY_TIERS.map(t => t.id)
+      : ENEMY_TIERS.map(t => t.id);
+    const rows = [];
+    ids.forEach(id => {
+      const v = losses[id];
+      if (!v || v.qty === 0) return;
+      let color, marker;
+      if (side === 'ally') {
+        // From the user's perspective: surviving allies is good.
+        if (v.survived === v.qty)      { color = '#2ecc71'; marker = '✓'; }
+        else if (v.survived === 0)     { color = '#e74c3c'; marker = '☠ wiped'; }
+        else                           { color = '#e67e22'; marker = '−' + v.lost + ' ☠'; }
+      } else {
+        // For enemies, the good outcome is total annihilation.
+        if (v.survived === 0)          { color = '#2ecc71'; marker = '✓ killed'; }
+        else if (v.survived === v.qty) { color = '#e74c3c'; marker = '✗ all alive'; }
+        else                           { color = '#f39c12'; marker = v.survived + ' alive'; }
+      }
+      rows.push(''
+        + '<div style="display:flex;justify-content:space-between;align-items:center;'
+        +   'font-size:0.62rem;line-height:1.45;padding:1px 0">'
+        +   '<span style="color:var(--text-dim);min-width:26px;font-family:Cinzel,serif">' + id + '</span>'
+        +   '<span style="color:' + color + ';flex:1;text-align:center">'
+        +     v.survived + '/' + v.qty
+        +   '</span>'
+        +   '<span style="color:' + color + ';font-size:0.6rem;text-align:right;min-width:64px">' + marker + '</span>'
+        + '</div>');
+    });
+    return rows.join('') || '<div style="font-size:0.6rem;color:var(--text-dim);font-style:italic">none</div>';
+  }
+
+  // Pre-compute outside the map: if 2 cards are already selected, the
+  // others' checkboxes are visually disabled (prevents a 3rd selection).
+  const selectionFull = _compareSelection.length >= 2;
+
+  container.innerHTML = list.map((e, idx) => {
+    const isSelected = _compareSelection.indexOf(idx) >= 0;
+    const status = e.draw
+      ? { icon: '⚔', color: '#f39c12', text: 'DRAW' }
+      : e.victory
+        ? { icon: '🏆', color: '#2ecc71', text: 'VICTORY' }
+        : { icon: '💀', color: '#e74c3c', text: 'DEFEAT' };
+    const ago = humanAgo(e.t);
+    const pl  = e.powerLimit ? ('PL ' + e.powerLimit + ' · ') : '';
+
+    // v2 entries have per-tier loss data; if a v1 entry somehow survived
+    // an LS-key bump (or this is a future-format entry) we fall back to
+    // an empty breakdown table rather than crashing.
+    const allyLosses  = e.allyLosses  || {};
+    const enemyLosses = e.enemyLosses || {};
+    const totalAllyStart  = e.totalAllyStart  != null ? e.totalAllyStart  : 0;
+    const totalAllySurv   = e.totalAllySurv   != null ? e.totalAllySurv   : 0;
+    const totalEnemyStart = e.totalEnemyStart != null ? e.totalEnemyStart : 0;
+    const totalEnemyKill  = e.totalEnemyKilled != null ? e.totalEnemyKilled : 0;
+
+    return ''
+      + '<div class="sim-history-card" data-history-idx="' + idx + '" '
+      + 'style="background:rgba(0,0,0,0.3);border:1px solid '
+      +   (isSelected ? '#9b59b6' : (e.pinned ? '#c9a84c' : 'var(--border)')) + ';'
+      + 'border-radius:3px;padding:7px 9px;display:flex;flex-direction:column;'
+      + 'gap:5px;min-width:230px;flex:1 1 250px;max-width:320px;'
+      + 'position:relative;'
+      + 'box-shadow:' + (isSelected
+          ? '0 0 0 1pxlue) || 20;
+  ARMY_POWER_LIMIT = Math.max(1, val);
+  renderBuilder();
+}
+
+// Tier definitions come from the shared engine. simulator.js cannot exist
+// without sim_engine.js being loaded first (manifest order).
+if (typeof window === 'undefined' || !window.BFEngine) {
+  console.error('[bitefight] sim_engine.js must be loaded before simulator.js');
+}
+const ALLY_TIERS  = (window.BFEngine && window.BFEngine.ALLY_TIERS)  || [];
+const ENEMY_TIERS = (window.BFEngine && window.BFEngine.ENEMY_TIERS) || [];
+
+// ===================== STATE =====================
+let allyQuantities = {};
+let enemyQuantities = {};
+// By default all tiers unlocked; user can toggle. Last selection is persisted
+// to localStorage (LS_KEY_UNLOCK_*) and restored here on every simulator open.
+let unlockedAllyTiers, unlockedEnemyTiers;
+(function loadUnlockedFromStorage() {
+  const savedAlly  = lsGet(LS_KEY_UNLOCK_ALLY);
+  const savedEnemy = lsGet(LS_KEY_UNLOCK_ENEMY);
+  const allyIds  = new Set(ALLY_TIERS.map(t => t.id));
+  const enemyIds = new Set(ENEMY_TIERS.map(t => t.id));
+  // Accept saved value only if it is a non-empty array of known ids. Empty
+  // array would lock the user out entirely, so we fall back to defaults.
+  unlockedAllyTiers = (Array.isArray(savedAlly) && savedAlly.length > 0 && savedAlly.every(id => allyIds.has(id)))
+    ? new Set(savedAlly)
+    : new Set(ALLY_TIERS.map(t => t.id));
+  unlockedEnemyTiers = (Array.isArray(savedEnemy) && savedEnemy.length > 0 && savedEnemy.every(id => enemyIds.has(id)))
+    ? new Set(savedEnemy)
+    : new Set(ENEMY_TIERS.map(t => t.id));
+})();
+let battleState = null;
+let autoTimer = null;
+let isRunning = false;
+// Auto-play speed multiplier. Loaded from LS at startup (defaults to 1×);
+// changed via the ⏩ AUTO SPEED button row; persisted on every change.
+let autoSpeed = (function () {
+  const saved = lsGet(LS_KEY_AUTO_SPEED);
+  // Accept only known values; anything else falls back to 1×.
+  return (AUTO_SPEED_OPTIONS.indexOf(saved) >= 0) ? saved : 1;
+})();
+function currentAutoDelay() {
+  // Lower bound at 50ms — even with future user-configurable speeds this
+  // keeps the UI responsive (faster than the engine can render anyway).
+  return Math.max(50, Math.round(AUTO_BASE_DELAY_MS / autoSpeed));
+}
+
+ALLY_TIERS.forEach(t => allyQuantities[t.id] = 0);
+ENEMY_TIERS.forEach(t => enemyQuantities[t.id] = 0);
+
+// ===================== UNIT IDENTITY (v1.6.26) =====================
+// Names + artwork per race from js/unit_catalog.js (window.BFUnits).
+// The tier codes (T1…, E1…) stay the primary label everywhere; the name
+// and picture are added next to them. Context arrives from the game page
+// via bridge.js (BF_GAME_STATE.origin / .units) and is cached locally so
+// the panel keeps its look between opens.
+const LS_KEY_UNIT_CTX   = 'bf_sim_unitctx';
+const LS_KEY_SIM_RACE   = 'bf_sim_race';    // 'auto' | '1' | '2'
+const LS_KEY_SIM_NAMES  = 'bf_sim_names';   // 'both' | 'code'
+let UNIT_CTX = Object.assign({ origin: null, race: null, names: null }, lsGet(LS_KEY_UNIT_CTX) || {});
+function simRace() {
+  const ov = lsGet(LS_KEY_SIM_RACE);
+  if (ov === '1' || ov === '2') return parseInt(ov);
+  return UNIT_CTX.race || 1;
+}
+function simShowNames() { return lsGet(LS_KEY_SIM_NAMES) !== 'code'; }
+function simUnitName(id) {
+  return window.BFUnits ? window.BFUnits.name(id, simRace(), UNIT_CTX.names) : '';
+}
+function simUnitImg(id, cls) {
+  if (!window.BFUnits || !UNIT_CTX.origin) return '';
+  const url = window.BFUnits.imgUrl(id, simRace(), UNIT_CTX.origin);
+  return url ? `<img class="${cls || 'unit-img'}" src="${url}" alt="" loading="lazy" draggable="false">` : '';
+}
+function tierHeadHtml(tier, side) {
+  const nm = simShowNames() ? simUnitName(tier.id) : '';
+  return `<div class="tier-head">${simUnitImg(tier.id, 'tier-img')}<div class="tier-head-txt">`
+    + `<span class="tier-label">${tier.id}</span>`
+    + (nm ? `<span class="tier-name" title="${tier.label}">${nm}</span>` : '')
+    + `</div></div>`;
+}
+// Called by bridge.js whenever the game page pushes state
+window.setSimUnitCtx = function (origin, units) {
+  let changed = false;
+  if (origin && origin !== UNIT_CTX.origin) { UNIT_CTX.origin = origin; changed = true; }
+  if (units) {
+    if (units.race && units.race !== UNIT_CTX.race) { UNIT_CTX.race = units.race; changed = true; }
+    if (units.names && JSON.stringify(units.names) !== JSON.stringify(UNIT_CTX.names)) { UNIT_CTX.names = units.names; changed = true; }
+  }
+  if (!changed) return;
+  lsSet(LS_KEY_UNIT_CTX, UNIT_CTX);
+  refreshUnitLook();
+};
+function refreshUnitLook() {
+  renderUnitLookBar();
+  renderBuilder();
+  if (battleState) renderBattlefield();
+}
+function renderUnitLookBar() {
+  const bar = document.getElementById('unit-look-bar');
+  if (!bar) return;
+  const ov = lsGet(LS_KEY_SIM_RACE) || 'auto';
+  const auto = UNIT_CTX.race ? (window.BFUnits ? window.BFUnits.RACE_LABEL[UNIT_CTX.race] : '') : '?';
+  const mk = (v, lbl) => `<button class="ulook-btn${ov === v ? ' on' : ''}" data-ulook-race="${v}">${lbl}</button>`;
+  const names = simShowNames();
+  bar.innerHTML = `<span class="ulook-lbl">RACE:</span>${mk('auto', 'Auto (' + auto + ')')}${mk('1', '🦇 Vampire')}${mk('2', '🐺 Werewolf')}`
+    + `<span class="ulook-sep"></span><button class="ulook-btn${names ? ' on' : ''}" data-ulook-names="1" title="Show unit names next to tier codes">Names</button>`
+    + (UNIT_CTX.origin ? '' : `<span class="ulook-hint" title="Open the simulator from a game page once — artwork is loaded from the game server.">no artwork offline</span>`);
+}
+
+function toggleUnlock(side, id) {
+  const set = side === 'ally' ? unlockedAllyTiers : unlockedEnemyTiers;
+  const qtys = side === 'ally' ? allyQuantities : enemyQuantities;
+  if (set.has(id)) {
+    set.delete(id);
+    qtys[id] = 0; // reset qty when locked
+  } else {
+    set.add(id);
+  }
+  // Persist to localStorage so the next open restores this selection.
+  lsSet(side === 'ally' ? LS_KEY_UNLOCK_ALLY : LS_KEY_UNLOCK_ENEMY, [...set]);
+  renderBuilder();
+}
+
+function renderUnlockBars() {
+  // Ally
+  const allyBar = document.getElementById('ally-unlock-bar');
+  allyBar.innerHTML = '<span style="font-family:Cinzel,serif;font-size:0.62rem;color:var(--text-dim);letter-spacing:.1em;margin-right:2px">UNLOCKED:</span>';
+  ALLY_TIERS.forEach(tier => {
+    const unlocked = unlockedAllyTiers.has(tier.id);
+    const btn = document.createElement('button');
+    btn.textContent = tier.label;
+    btn.title = unlocked ? 'Klikni na zamknutie' : 'Klikni na odomknutie';
+    btn.style.cssText = `
+      font-family:Cinzel,serif;font-size:0.65rem;padding:2px 9px;border-radius:10px;cursor:pointer;
+      transition:all 0.15s;border:1px solid;
+      background:${unlocked ? 'rgba(201,168,76,0.15)' : 'rgba(255,255,255,0.03)'};
+      color:${unlocked ? 'var(--gold-light)' : 'var(--text-dim)'};
+      border-color:${unlocked ? 'var(--gold)' : '#2a1218'};
+    `;
+    btn.onclick = () => toggleUnlock('ally', tier.id);
+    allyBar.appendChild(btn);
+  });
+
+  // Enemy
+  const enemyBar = document.getElementById('enemy-unlock-bar');
+  enemyBar.innerHTML = '<span style="font-family:Cinzel,serif;font-size:0.62rem;color:var(--text-dim);letter-spacing:.1em;margin-right:2px">UNLOCKED:</span>';
+  ENEMY_TIERS.forEach(tier => {
+    const unlocked = unlockedEnemyTiers.has(tier.id);
+    const btn = document.createElement('button');
+    btn.textContent = tier.label;
+    btn.title = unlocked ? 'Klikni na zamknutie' : 'Klikni na odomknutie';
+    btn.style.cssText = `
+      font-family:Cinzel,serif;font-size:0.65rem;padding:2px 9px;border-radius:10px;cursor:pointer;
+      transition:all 0.15s;border:1px solid;
+      background:${unlocked ? 'rgba(192,57,43,0.15)' : 'rgba(255,255,255,0.03)'};
+      color:${unlocked ? '#e74c3c' : 'var(--text-dim)'};
+      border-color:${unlocked ? 'var(--crimson)' : '#2a1218'};
+    `;
+    btn.onclick = () => toggleUnlock('enemy', tier.id);
+    enemyBar.appendChild(btn);
+  });
+}
+
+// ===================== RENDER BUILDER =====================
+function renderBuilder() {
+  renderUnlockBars();
+  renderAllyTiers();
+  renderEnemyTiers();
+  updatePower();
+}
+
+function renderAllyTiers() {
+  const container = document.getElementById('ally-tiers');
+  container.innerHTML = '';
+  ALLY_TIERS.filter(tier => unlockedAllyTiers.has(tier.id)).forEach(tier => {
+    const qty = allyQuantities[tier.id];
+    const div = document.createElement('div');
+    div.className = 'tier-card' + (qty > 0 ? ' selected' : '');
+    div.innerHTML = `
+      ${tierHeadHtml(tier, 'ally')}
+      <div class="tier-info-row">
+        <span class="stat-badge">⚔<span class="val">${tier.dmg}</span></span>
+        <span class="stat-badge">❤<span class="val">${tier.hp}</span></span>
+        <span class="stat-badge">💨<span class="val">${tier.spd}</span></span>
+        <span class="stat-badge">⚡<span class="val">${tier.power}</span></span>
+        <span class="stat-badge" style="color:#c9a84c">🩸<span class="val" style="color:#f0d080">${tier.cost}</span></span>
+        <span class="type-badge type-${tier.type}">${tier.type}</span>
+        <span class="pos-badge pos-${tier.pos}">${tier.pos === 'Vanguard' ? 'Vanguard' : 'Rearguard'}</span>
+        <span class="skill-icon">?<span class="tooltip">${tier.skill}</span></span>
+      </div>
+      <div class="qty-control">
+        <button class="qty-btn" data-side="ally" data-tier="${tier.id}" data-delta="-10" style="font-size:0.6rem;padding:0 4px">−10</button>
+        <button class="qty-btn" data-side="ally" data-tier="${tier.id}" data-delta="-1">−</button>
+        <input type="number" class="qty-input" min="0" value="${qty}"
+          data-side="ally" data-tier="${tier.id}">
+        <button class="qty-btn" data-side="ally" data-tier="${tier.id}" data-delta="1">+</button>
+        <button class="qty-btn" data-side="ally" data-tier="${tier.id}" data-delta="10" style="font-size:0.6rem;padding:0 4px">+10</button>
+      </div>
+      <div class="skill-tip">${tier.skill}</div>
+    `;
+    container.appendChild(div);
+  });
+}
+
+function renderEnemyTiers() {
+  const container = document.getElementById('enemy-tiers');
+  container.innerHTML = '';
+  ENEMY_TIERS.filter(tier => unlockedEnemyTiers.has(tier.id)).forEach(tier => {
+    const qty = enemyQuantities[tier.id];
+    const div = document.createElement('div');
+    div.className = 'tier-card' + (qty > 0 ? ' enemy-selected' : '');
+    div.innerHTML = `
+      ${tierHeadHtml(tier, 'enemy')}
+      <div class="tier-info-row">
+        <span class="stat-badge">⚔<span class="val">${tier.dmg}</span></span>
+        <span class="stat-badge">❤<span class="val">${tier.hp}</span></span>
+        <span class="stat-badge">💨<span class="val">${tier.spd}</span></span>
+        <span class="type-badge type-${tier.type.trim()}">${tier.type.trim()}</span>
+        <span class="pos-badge pos-${tier.pos}">${tier.pos === 'Vanguard' ? 'Vanguard' : 'Rearguard'}</span>
+        <span class="skill-icon">?<span class="tooltip">${tier.skill}</span></span>
+      </div>
+      <div class="qty-control">
+        <button class="qty-btn" data-side="enemy" data-tier="${tier.id}" data-delta="-10" style="font-size:0.6rem;padding:0 4px">−10</button>
+        <button class="qty-btn" data-side="enemy" data-tier="${tier.id}" data-delta="-1">−</button>
+        <input type="number" class="qty-input" min="0" value="${qty}"
+          data-side="enemy" data-tier="${tier.id}">
+        <button class="qty-btn" data-side="enemy" data-tier="${tier.id}" data-delta="1">+</button>
+        <button class="qty-btn" data-side="enemy" data-tier="${tier.id}" data-delta="10" style="font-size:0.6rem;padding:0 4px">+10</button>
+      </div>
+      <div class="skill-tip">${tier.skill}</div>
+    `;
+    container.appendChild(div);
+  });
+}
+
+// Input typing — only save value, NO re-render (keeps focus)
+function qtyInputChange(side, id, input) {
+  const val = Math.max(0, parseInt(input.value) || 0);
+  if (side === 'ally') {
+    const tier = ALLY_TIERS.find(t => t.id === id);
+    const powerWithout = getAllyPower() - (allyQuantities[id] || 0) * tier.power;
+    const maxAllowed = Math.floor((ARMY_POWER_LIMIT - powerWithout) / tier.power) + (allyQuantities[id] || 0);
+    allyQuantities[id] = Math.min(val, Math.max(0, maxAllowed));
+  } else {
+    enemyQuantities[id] = val;
+  }
+  updatePower(); // update power bar without re-rendering tier cards
+}
+
+// On blur — sync input display value and re-render
+function qtyInputBlur(side, id, input) {
+  const stored = side === 'ally' ? (allyQuantities[id] || 0) : (enemyQuantities[id] || 0);
+  input.value = stored; // correct display if clamped
+  renderBuilder();
+}
+
+function changeQty(side, id, delta) {
+  if (side === 'ally') {
+    const tier = ALLY_TIERS.find(t => t.id === id);
+    const currentPower = getAllyPower() - (allyQuantities[id] || 0) * tier.power;
+    const maxAllowed = Math.floor((ARMY_POWER_LIMIT - currentPower) / tier.power);
+    const newVal = Math.max(0, Math.min((allyQuantities[id] || 0) + delta, maxAllowed));
+    allyQuantities[id] = newVal;
+  } else {
+    enemyQuantities[id] = Math.max(0, (enemyQuantities[id] || 0) + delta);
+  }
+  renderBuilder();
+}
+
+function getAllyPower() {
+  return ALLY_TIERS.reduce((sum, t) => sum + (allyQuantities[t.id] || 0) * t.power, 0);
+}
+
+function updatePower() {
+  const p = getAllyPower();
+  const pct = Math.min(100, (p / ARMY_POWER_LIMIT) * 100);
+  document.getElementById('ally-power-fill').style.width = pct + '%';
+  document.getElementById('ally-power-text').textContent = `${p} / ${ARMY_POWER_LIMIT}`;
+}
+
+// ===================== BATTLE ENGINE =====================
+function buildGroups(side, tierDefs, quantities) {
+  const groups = [];
+  tierDefs.forEach(tier => {
+    const qty = (quantities[tier.id] || 0);
+    if (qty === 0) return;
+    groups.push({
+      id: tier.id,
+      label: tier.label,
+      tier: tier,
+      qty: qty,
+      maxHp: tier.hp * qty,
+      currentHp: tier.hp * qty,
+      aliveUnits: qty,
+      alive: true,
+      side: side,
+      revived: false,
+      revivedThisRound: false,
+      revivedByAttackerId: null,
+      damageBuff: 1.0,
+      debuffed: false,
+      debuffRounds: 0,
+      attackedThisRound: false,
+    });
+  });
+  return groups;
+}
+
+function startBattle() {
+  stopAuto();
+  const allyGroups = buildGroups('ally', ALLY_TIERS, allyQuantities);
+  const enemyGroups = buildGroups('enemy', ENEMY_TIERS, enemyQuantities);
+
+  if (allyGroups.length === 0 || enemyGroups.length === 0) {
+    addLog('<span style="color:var(--crimson)">' + T('addUnitsBothSides') + '</span>');
+    return;
+  }
+
+  // Run the full simulation up-front via the shared engine.
+  // The UI then "replays" the resulting event log round-by-round for animation.
+  // earlyTermination is disabled here so the user sees the full battle even
+  // when it's a slow loss or stalemate — the optimizer path uses default ON.
+  const engineResult = window.BFEngine.simulate(allyQuantities, enemyQuantities, {
+    randomTarget: true,  // live UI uses random E3 target (matches Python v6)
+    collectLog: true,
+    maxRounds: 50,
+    earlyTermination: false,
+  });
+
+  if (!engineResult) {
+    addLog('<span style="color:var(--crimson)">Engine error</span>');
+    return;
+  }
+
+  // Save snapshot of this MANUAL simulation to history (last 3 are kept).
+  // Optimizer-driven batch simulations go through BFEngine directly and never
+  // reach startBattle(), so they correctly don't pollute the history.
+  pushHistory(allyQuantities, enemyQuantities, ARMY_POWER_LIMIT, engineResult);
+
+  // Group events by round for replay
+  const roundEvents = [];
+  let currentRound = -1;
+  for (const ev of engineResult.log) {
+    if (ev.type === 'roundStart') {
+      currentRound = ev.round;
+      roundEvents[currentRound] = { order: ev.order, events: [] };
+    } else if (currentRound >= 0 && ev.type !== 'battleStart' && ev.type !== 'battleEnd') {
+      roundEvents[currentRound].events.push(ev);
+    }
+  }
+
+  battleState = {
+    allies: allyGroups,
+    enemies: enemyGroups,
+    groupsById: {},
+    round: 0,
+    done: false,
+    roundEvents: roundEvents,
+    finalResult: engineResult,
+  };
+  // Build id lookup. Note: spiderlings (E9S) may appear later via spawn event.
+  [...allyGroups, ...enemyGroups].forEach(g => { battleState.groupsById[g.id] = g; });
+
+  clearLog();
+  addLog(`<span class="log-round">${T('battleBegins')}</span>`);
+  renderBattlefield();
+  isRunning = true;
+}
+
+function stepBattle() {
+  if (!battleState || battleState.done) { startBattle(); return; }
+  if (!isRunning) isRunning = true;
+  executeRound();
+}
+
+function autoPlay() {
+  if (!battleState || battleState.done) { startBattle(); }
+  stopAuto();
+  autoTimer = setInterval(() => {
+    if (!battleState || battleState.done) { stopAuto(); return; }
+    executeRound();
+  }, currentAutoDelay());
+}
+
+function stopAuto() {
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+}
+
+// ============================================================================
+// AUTO-PLAY SPEED CONTROL
+// ============================================================================
+// setAutoSpeed updates the multiplier, persists it, re-renders the button
+// row, and — if Auto is currently running — restarts the interval at the
+// new cadence so the user sees the change immediately. Called from the
+// click delegate when a speed button is pressed.
+function setAutoSpeed(mult) {
+  if (AUTO_SPEED_OPTIONS.indexOf(mult) < 0) return; // ignore garbage
+  autoSpeed = mult;
+  lsSet(LS_KEY_AUTO_SPEED, mult);
+  renderSpeedButtons();
+  // If Auto is running, restart with the new delay. We don't simply mutate
+  // the existing setInterval cadence (setInterval has no runtime adjust API)
+  // so a fresh interval is the cleanest way to apply the change without
+  // dropping or duplicating a round.
+  if (autoTimer) {
+    stopAuto();
+    autoTimer = setInterval(() => {
+      if (!battleState || battleState.done) { stopAuto(); return; }
+      executeRound();
+    }, currentAutoDelay());
+  }
+}
+
+function renderSpeedButtons() {
+  const host = document.getElementById('speed-buttons');
+  if (!host) return;
+  host.innerHTML = AUTO_SPEED_OPTIONS.map(mult => {
+    const active = (mult === autoSpeed);
+    return ''
+      + '<button class="auto-speed-btn" data-speed="' + mult + '" '
+      +   'title="' + Math.round(AUTO_BASE_DELAY_MS / mult) + ' ms per round" '
+      +   'style="font-family:Cinzel,serif;font-size:0.62rem;'
+      +     'padding:2px 9px;border-radius:10px;cursor:pointer;'
+      +     'background:' + (active ? 'rgba(155,89,182,0.25)' : 'rgba(255,255,255,0.03)') + ';'
+      +     'border:1px solid ' + (active ? '#9b59b6' : 'var(--border)') + ';'
+      +     'color:' + (active ? '#9b59b6' : 'var(--text-dim)') + ';'
+      +     'font-weight:' + (active ? 'bold' : 'normal') + '">'
+      +   mult + '×</button>';
+  }).join('');
+}
+
+function resetBattle() {
+  stopAuto();
+  document.getElementById('result-banner').className = '';
+  battleState = null;
+  isRunning = false;
+  clearLog();
+  addLog('<span style="color:var(--text-dim);font-style:italic">' + T('buildArmiesStart') + '</span>');
+  renderBattlefield();
+  document.getElementById('turn-order-bar').style.display = 'none';
+}
+
+// ===================== EVENT REPLAY (live UI battle from engine log) =====================
+
+// Lookup display group by id; create lazily if engine emitted a group we don't have yet
+// (e.g. spiderlings spawned during battle).
+function ensureGroup(id) {
+  const bs = battleState;
+  if (bs.groupsById[id]) return bs.groupsById[id];
+  const tier = window.BFEngine.tierById(id);
+  if (!tier) return null;
+  const g = {
+    id: tier.id, label: tier.label, tier: tier, qty: 0,
+    maxHp: 0, currentHp: 0, aliveUnits: 0, alive: false, side: 'enemy',
+    revived: false, revivedThisRound: false, damageBuff: 1.0,
+    debuffed: false, debuffRounds: 0, attackedThisRound: false,
+  };
+  bs.groupsById[id] = g;
+  if (id === 'E9S') bs.enemies.push(g);  // spiderlings live with enemies
+  return g;
+}
+
+function applyEvent(ev) {
+  const bs = battleState;
+  const g = ev.groupId ? bs.groupsById[ev.groupId] : null;
+  const src = ev.sourceId ? (bs.groupsById[ev.sourceId] || ensureGroup(ev.sourceId)) : null;
+  const tgt = ev.targetId ? (bs.groupsById[ev.targetId] || ensureGroup(ev.targetId)) : null;
+  const atk = ev.attackerId ? (bs.groupsById[ev.attackerId] || ensureGroup(ev.attackerId)) : null;
+
+  switch (ev.type) {
+    case 'attack': {
+      if (atk) atk.attackedThisRound = true;
+      if (tgt) {
+        tgt.currentHp = ev.targetHp;
+        tgt.aliveUnits = Math.max(0, Math.ceil(tgt.currentHp / tgt.tier.hp));
+      }
+      const a = atk ? labelWithSide(atk) : ev.attackerId;
+      const t = tgt ? labelWithSide(tgt, true) : ev.targetId;
+      addLog(`<span class="log-attack">${T('attackLine', a, t, ev.damage, ev.targetHp, ev.targetMaxHp || (tgt && tgt.maxHp))}</span>`);
+      break;
+    }
+    case 'death': {
+      if (g) { g.alive = false; g.currentHp = 0; g.aliveUnits = 0; }
+      addLog(`<span class="log-death">${T('defeated', g ? g.label : ev.groupId)}</span>`);
+      break;
+    }
+    case 'revive': {
+      if (g) {
+        g.revived = true;
+        g.currentHp = ev.qty;
+        g.maxHp = ev.qty;
+        g.aliveUnits = ev.qty;
+        g.alive = true;
+        g.revivedThisRound = true;
+      }
+      addLog(`<span class="log-skill">✦ ${T('e2Revives', ev.qty)}</span>`);
+      break;
+    }
+    case 'thorns': {
+      if (atk) {
+        atk.currentHp = Math.max(0, atk.currentHp - ev.damage);
+        atk.aliveUnits = Math.max(0, Math.ceil(atk.currentHp / atk.tier.hp));
+      }
+      addLog(`<span class="log-skill">✦ ${T('e5Thorns', ev.damage, atk ? atk.label : ev.attackerId)}</span>`);
+      break;
+    }
+    case 'splash': {
+      if (tgt) {
+        tgt.currentHp = Math.max(0, tgt.currentHp - ev.damage);
+        tgt.aliveUnits = Math.max(0, Math.ceil(tgt.currentHp / tgt.tier.hp));
+      }
+      const key = ev.kind === 'liches' ? 'lichSplash' : 'witchesSplash';
+      addLog(`<span class="log-skill">✦ ${T(key, ev.damage)}</span>`);
+      break;
+    }
+    case 'overkill': {
+      if (tgt) {
+        tgt.currentHp = Math.max(0, tgt.currentHp - ev.damage);
+        tgt.aliveUnits = Math.max(0, Math.ceil(tgt.currentHp / tgt.tier.hp));
+      }
+      addLog(`<span class="log-skill">✦ ${T('rotmawsOverkill', ev.damage, tgt ? tgt.label : ev.targetId)}</span>`);
+      break;
+    }
+    case 'spawn': {
+      const spider = ensureGroup(ev.targetId);
+      if (spider) {
+        spider.qty += ev.qty;
+        spider.aliveUnits += ev.qty;
+        spider.currentHp += ev.qty * spider.tier.hp;
+        spider.maxHp += ev.qty * spider.tier.hp;
+        spider.alive = true;
+      }
+      addLog(`<span class="log-skill">✦ ${T('spawn', ev.qty)}</span>`);
+      break;
+    }
+    case 'speedDebuff': {
+      if (atk) atk.currentSpd = ev.newSpd;
+      addLog(`<span class="log-skill">✦ ${T('gargoylesDebuff', ev.newSpd)}</span>`);
+      break;
+    }
+    case 'typeAdv':
+      addLog(`<span class="log-skill">✦ ${T('typeAdv', ev.mult, ev.attacker, ev.target)}</span>`);
+      break;
+    case 'typeDisadv':
+      addLog(`<span class="log-skill">✦ ${T('typeDisadv', ev.mult, ev.attacker, ev.target)}</span>`);
+      break;
+    case 'skill': {
+      // Generic skill log: lookup by key
+      // v1.6.20 — keys whose {0} is a GROUP (not a multiplier) previously
+      // rendered "undefined" (e.g. "Tier 4 banshees: undefined attacks…").
+      const grp = id => (battleState && battleState.groupsById && battleState.groupsById[id]) || null;
+      let text;
+      if (ev.key === 't4Debuff')              text = T(ev.key, labelWithSide(grp(ev.targetId), true));
+      else if (ev.key === 'debuffedAttacker') text = T(ev.key, labelWithSide(grp(ev.attackerId), false));
+      else if (ev.key === 'cultistBuff')      text = T(ev.key, labelWithSide(grp(ev.targetId), true), ev.mult);
+      else                                    text = T(ev.key, ev.mult, ev.deaths);
+      addLog(`<span class="log-skill">✦ ${text}</span>`);
+      break;
+    }
+  }
+}
+
+function labelWithSide(group, isTarget) {
+  if (!group) return '?';
+  const cls = isTarget
+    ? (group.side === 'enemy' ? 'target' : 'ally-target')
+    : (group.side === 'ally' ? 'attacker' : 'ally-attacker');
+  return `<span class="${cls}">${group.label}</span>`;
+}
+
+function executeRound() {
+  const bs = battleState;
+  bs.round++;
+
+  // If engine had no event for this round, the battle is over
+  const roundData = bs.roundEvents[bs.round];
+  if (!roundData) {
+    finishBattle();
+    return;
+  }
+
+  addLog(`<div class="log-round">${T('roundHeader', bs.round)}</div>`);
+
+  // Reset per-round flags on display groups
+  for (const id in bs.groupsById) {
+    const g = bs.groupsById[id];
+    g.attackedThisRound = false;
+    g.revivedThisRound = false;
+  }
+
+  // Build turn order from engine order, mapped to display groups
+  const turnOrder = roundData.order
+    .map(id => bs.groupsById[id] || ensureGroup(id))
+    .filter(Boolean);
+  renderTurnOrder(turnOrder);
+
+  // Apply all events for this round
+  for (const ev of roundData.events) applyEvent(ev);
+
+  renderBattlefield();
+
+  // End check
+  const alliesAlive = bs.allies.some(g => g.alive);
+  const enemiesAlive = bs.enemies.some(g => g.alive);
+  if (!alliesAlive || !enemiesAlive || bs.round >= bs.roundEvents.length - 1) {
+    finishBattle();
+  }
+}
+
+function finishBattle() {
+  const bs = battleState;
+  bs.done = true;
+  stopAuto();
+  isRunning = false;
+  renderBattlefield();
+
+  const r = bs.finalResult;
+  if (r.draw) showResult('draw', T('draw'), T('bothFell'));
+  else if (r.victory) showResult('victory', T('victory'), T('enemiesDefeated', r.rounds));
+  else showResult('defeat', T('defeat'), T('armyDestroyed', r.rounds));
+}
+
+
+// ===================== RENDER BATTLEFIELD =====================
+function renderBattlefield() {
+  const alliesEl = document.getElementById('bf-allies');
+  const enemiesEl = document.getElementById('bf-enemies');
+  alliesEl.innerHTML = '';
+  enemiesEl.innerHTML = '';
+
+  if (!battleState) return;
+
+  battleState.allies.forEach(g => {
+    alliesEl.appendChild(createUnitEl(g, 'ally'));
+  });
+
+  battleState.enemies.forEach(g => {
+    enemiesEl.appendChild(createUnitEl(g, 'enemy'));
+  });
+}
+
+function createUnitEl(group, side) {
+  const div = document.createElement('div');
+  div.className = 'bf-unit' + (group.alive ? '' : ' dead');
+  div.id = 'unit-' + group.id;
+
+  const hpPct = group.maxHp > 0 ? Math.max(0, (group.currentHp / group.maxHp) * 100) : 0;
+  const fillClass = side === 'ally' ? 'hp-fill ally' : 'hp-fill';
+  const aliveUnits = group.alive ? (group.aliveUnits || Math.max(1, Math.ceil(group.currentHp / group.tier.hp))) : 0;
+  const totalDmg = group.tier.dmg * aliveUnits;
+  const statusBadge = group.debuffed ? '<span class="status-badge">Oslabený</span>' : '';
+  const buffBadge = group.damageBuff > 1.0 ? `<span class="status-badge" style="color:#e67e22;background:rgba(230,126,34,0.2)">+${Math.round((group.damageBuff-1)*100)}% DMG</span>` : '';
+
+  div.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:4px;flex-wrap:wrap">
+      <span class="bf-unit-name">${simUnitImg(group.id, 'bf-unit-img')}${group.label}${simShowNames() && simUnitName(group.id) ? `<span class="bf-unit-sub">${simUnitName(group.id)}</span>` : ''}</span>
+      <div style="display:flex;gap:3px;flex-wrap:wrap">${statusBadge}${buffBadge}</div>
+    </div>
+    <div style="display:flex;gap:6px;font-size:0.65rem;color:var(--text-dim);margin-bottom:3px">
+      <span style="color:var(--gold-light)">×${aliveUnits}</span>
+      <span>⚔${group.tier.dmg}<span style="color:var(--gold-light);font-size:0.6rem"> (=${totalDmg})</span></span>
+      <span>💨${group.tier.spd}</span>
+      <span class="type-badge type-${group.tier.type.trim()}" style="padding:0 4px">${group.tier.type.trim()}</span>
+      <span class="pos-badge pos-${group.tier.pos}" style="padding:0 4px">${group.tier.pos === 'Vanguard' ? 'Vanguard' : 'Rearguard'}</span>
+    </div>
+    <div class="hp-bar-wrap">
+      <div class="hp-bar"><div class="${fillClass}" style="width:${hpPct}%"></div></div>
+      <div class="hp-text">${Math.max(0, group.currentHp)} / ${group.maxHp} HP</div>
+    </div>
+  `;
+
+  return div;
+}
+
+function renderTurnOrder(groups) {
+  const bar = document.getElementById('turn-order-bar');
+  bar.style.display = 'flex';
+  bar.innerHTML = '<span style="color:var(--text-dim);font-size:0.68rem;font-family:Cinzel,serif;letter-spacing:.1em">PORADIE:</span> ';
+  groups.forEach((g, i) => {
+    const badge = document.createElement('span');
+    badge.className = 'turn-badge ' + g.side;
+    if (i === 0) badge.className += ' active';
+    badge.textContent = g.label + ' (💨' + g.tier.spd + ')';
+    badge.title = simUnitName(g.id) || g.label;
+    bar.appendChild(badge);
+    if (i < groups.length - 1) {
+      const arrow = document.createElement('span');
+      arrow.textContent = '→';
+      arrow.style.color = 'var(--text-dim)';
+      arrow.style.fontSize = '0.65rem';
+      bar.appendChild(arrow);
+    }
+  });
+}
+
+// ===================== LOG =====================
+function addLog(html) {
+  const container = document.getElementById('log-container');
+  const line = document.createElement('div');
+  line.innerHTML = html;
+  container.appendChild(line);
+  container.scrollTop = container.scrollHeight;
+}
+
+function clearLog() {
+  document.getElementById('log-container').innerHTML = '';
+}
+
+// ============================================================================
+// LOG EXPORT — copy to clipboard / download as .txt
+// ============================================================================
+// Strategy:
+//   1. Walk #log-container's children and pull textContent from each line —
+//      this drops all <span> markup and emoji-class colouring cleanly.
+//   2. Prepend a metadata block so a pasted log is self-describing:
+//        - Extension version (from manifest, hardcoded mirror here)
+//        - Local timestamp
+//        - Power limit at start of battle
+//        - Starting ally + enemy formations (compact form)
+//        - Outcome if battle has finished
+//   3. Copy: navigator.clipboard.writeText (Promise). Fallback for older
+//      browsers uses a hidden textarea + document.execCommand('copy').
+//   4. Download: Blob + URL.createObjectURL + temporary <a> element.
+
+function buildLogExportText() {
+  const container = document.getElementById('log-container');
+  if (!container) return '';
+
+  // Walk lines — each addLog() creates a <div> wrapper. The very first
+  // "Build your armies..." placeholder is a bare <span>, so we walk all
+  // direct children regardless of tag.
+  const lines = [];
+  for (const child of container.children) {
+    const txt = (child.textContent || '').trim();
+    if (txt) lines.push(txt);
+  }
+
+  // Compact formation summary (only non-zero tiers)
+  function compactQtys(qtys, tiers) {
+    const parts = [];
+    tiers.forEach(t => {
+      const q = qtys[t.id] || 0;
+      if (q > 0) parts.push(t.id + '×' + q);
+    });
+    return parts.join(' ') || '—';
+  }
+
+  // Outcome line — pull from current battleState if it ended, otherwise
+  // mark as "in progress". battleState is the live structure managed by
+  // executeRound; .done flips true when one side is wiped.
+  let outcomeLine = 'Outcome:        in progress';
+  // v1.6.20 — battleState never carried victory/draw flags, so every finished
+  // battle was exported as "DEFEAT". Read them from the engine result instead.
+  const _fr = battleState && battleState.finalResult;
+  if (battleState && battleState.done && _fr) {
+    const r = _fr.rounds || battleState.round || '?';
+    if (_fr.draw)         outcomeLine = 'Outcome:        ⚔ DRAW after ' + r + ' rounds';
+    else if (_fr.victory) outcomeLine = 'Outcome:        🏆 VICTORY after ' + r + ' rounds';
+    else                  outcomeLine = 'Outcome:        💀 DEFEAT after ' + r + ' rounds';
+  } else if (battleState && battleState.done) {
+    if (battleState.draw)      outcomeLine = 'Outcome:        ⚔ DRAW after ' + (battleState.round || '?') + ' rounds';
+    else if (battleState.victory) outcomeLine = 'Outcome:        🏆 VICTORY after ' + (battleState.round || '?') + ' rounds';
+    else                       outcomeLine = 'Outcome:        💀 DEFEAT after ' + (battleState.round || '?') + ' rounds';
+  } else if (!battleState) {
+    outcomeLine = 'Outcome:        no battle started';
+  }
+
+  const stamp = new Date();
+  const isoLocal = stamp.getFullYear()
+    + '-' + String(stamp.getMonth() + 1).padStart(2, '0')
+    + '-' + String(stamp.getDate()).padStart(2, '0')
+    + ' ' + String(stamp.getHours()).padStart(2, '0')
+    + ':' + String(stamp.getMinutes()).padStart(2, '0')
+    + ':' + String(stamp.getSeconds()).padStart(2, '0');
+
+  const header = [
+    '================================================================',
+    ' BiteFight Battle Simulator — Log Export',
+    '================================================================',
+    'Version:        v' + (function () { try { return chrome.runtime.getManifest().version; } catch (_) { return '1.6.27'; } })(),
+    'Exported:       ' + isoLocal,
+    'Power limit:    ' + (ARMY_POWER_LIMIT || '?'),
+    'Allies:         ' + compactQtys(allyQuantities, ALLY_TIERS),
+    'Enemies:        ' + compactQtys(enemyQuantities, ENEMY_TIERS),
+    outcomeLine,
+    '----------------------------------------------------------------',
+    '',
+  ].join('\n');
+
+  const body = lines.length > 0
+    ? lines.join('\n')
+    : '(log is empty — start a battle to populate it)';
+
+  return header + body + '\n';
+}
+
+function flashButton(btn, color, msg, restoreMs) {
+  if (!btn) return;
+  const orig = {
+    bg:     btn.style.background,
+    color:  btn.style.color,
+    border: btn.style.borderColor,
+    html:   btn.innerHTML,
+  };
+  btn.style.background   = color.bg;
+  btn.style.color        = color.fg;
+  btn.style.borderColor  = color.border;
+  if (msg) btn.innerHTML = msg;
+  setTimeout(() => {
+    btn.style.background   = orig.bg;
+    btn.style.color        = orig.color;
+    btn.style.borderColor  = orig.border;
+    btn.innerHTML          = orig.html;
+  }, restoreMs || 1200);
+}
+
+function copyLogToClipboard() {
+  const text = buildLogExportText();
+  const btn  = document.getElementById('btn-copy-log');
+  const ok   = { bg: 'rgba(46,204,113,0.2)',  fg: '#2ecc71', border: '#27ae60' };
+  const err  = { bg: 'rgba(231,76,60,0.2)',  fg: '#e74c3c', border: '#c0392b' };
+
+  // Preferred: async clipboard API. Requires HTTPS / extension context,
+  // which we're always in (chrome-extension://) so this path almost always
+  // succeeds. The fallback handles older browsers and any unexpected denials.
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => flashButton(btn, ok, '✓ Copied'),
+      () => fallbackCopy(text, btn, ok, err)
+    );
+    return;
+  }
+  fallbackCopy(text, btn, ok, err);
+}
+
+function fallbackCopy(text, btn, ok, err) {
+  // Old-school path: hidden textarea + execCommand('copy'). Works back to
+  // pre-Chromium browsers; the user-gesture context (button click) is what
+  // makes it permitted.
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok2 = document.execCommand('copy');
+    document.body.removeChild(ta);
+    flashButton(btn, ok2 ? ok : err, ok2 ? '✓ Copied' : '✗ Failed');
+  } catch (e) {
+    flashButton(btn, err, '✗ Failed');
+  }
+}
+
+function downloadLogAsFile() {
+  const text = buildLogExportText();
+  const btn  = document.getElementById('btn-download-log');
+  try {
+    // Filename with ISO-style local timestamp. Colons replaced with dashes
+    // because Windows file systems reject them.
+    const t = new Date();
+    const stamp = t.getFullYear()
+      + '-' + String(t.getMonth() + 1).padStart(2, '0')
+      + '-' + String(t.getDate()).padStart(2, '0')
+      + '_' + String(t.getHours()).padStart(2, '0')
+      + '-' + String(t.getMinutes()).padStart(2, '0')
+      + '-' + String(t.getSeconds()).padStart(2, '0');
+    const filename = 'bf-battle-log-' + stamp + '.txt';
+
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    // Tiny defer before revoke — some browsers race the click event.
+    setTimeout(() => URL.revokeObjectURL(url), 250);
+    flashButton(btn, { bg: 'rgba(46,204,113,0.2)', fg: '#2ecc71', border: '#27ae60' }, '✓ Saved');
+  } catch (e) {
+    flashButton(btn, { bg: 'rgba(231,76,60,0.2)', fg: '#e74c3c', border: '#c0392b' }, '✗ Failed');
+  }
+}
+
+// ===================== RESULT =====================
+function showResult(type, title, sub) {
+  const banner = document.getElementById('result-banner');
+  const box = document.getElementById('result-box');
+  document.getElementById('result-title').textContent = title;
+  document.getElementById('result-sub').textContent = sub;
+  document.getElementById('result-icon').textContent = type === 'victory' ? '🏆' : type === 'defeat' ? '💀' : '⚔';
+  box.className = 'result-box' + (type === 'defeat' ? ' defeat-box' : '');
+
+  // Calculate ally casualties + Blood Essence cost
+  const bs = battleState;
+  let totalStart = 0, totalSurvived = 0, totalEssenceLost = 0;
+
+  let rowsHtml = '';
+  bs.allies.forEach(g => {
+    const startUnits = g.qty;
+    const survivedUnits = g.alive ? (g.aliveUnits || 0) : 0;
+    const lost = startUnits - survivedUnits;
+    const essenceLost = lost * g.tier.cost;
+    totalStart += startUnits;
+    totalSurvived += survivedUnits;
+    totalEssenceLost += essenceLost;
+
+    if (startUnits === 0) return;
+    const color = lost === 0 ? '#2ecc71' : lost === startUnits ? '#e74c3c' : '#e67e22';
+    rowsHtml += `
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.04)">
+        <span style="color:var(--text-dim);min-width:55px">${g.label}</span>
+        <span style="color:${color};flex:1">${survivedUnits}/${startUnits} survived</span>
+        <span style="color:#c0392b;min-width:30px;text-align:center">${lost > 0 ? '−'+lost+' ☠' : '—'}</span>
+        <span style="color:#c9a84c;min-width:70px;text-align:right">${essenceLost > 0 ? '−'+essenceLost+' 🩸' : '<span style="color:var(--text-dim)">—</span>'}</span>
+      </div>`;
+  });
+
+  const totalLost = totalStart - totalSurvived;
+  const survPct = totalStart > 0 ? Math.round((totalSurvived / totalStart) * 100) : 0;
+
+  const statsHtml = `
+    <div style="color:var(--gold);font-family:Cinzel,serif;font-size:0.7rem;letter-spacing:.12em;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid var(--border)">
+      ⚔ ALLY LOSSES
+    </div>
+    ${rowsHtml}
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;padding-top:6px;margin-top:2px">
+      <span style="color:var(--text-dim);font-family:Cinzel,serif;font-size:0.68rem">CELKOM</span>
+      <span style="color:var(--text);flex:1">${totalSurvived}/${totalStart} <span style="color:var(--text-dim);font-size:0.7rem">(${survPct}%)</span></span>
+      <span style="color:#c0392b;min-width:30px;text-align:center">${totalLost > 0 ? '−'+totalLost+' ☠' : '—'}</span>
+      <span style="color:#f0d080;font-weight:bold;min-width:70px;text-align:right">${totalEssenceLost > 0 ? '−'+totalEssenceLost+' 🩸' : '0 🩸'}</span>
+    </div>
+    <div style="margin-top:10px;padding:8px;background:rgba(139,0,0,0.15);border:1px solid rgba(192,57,43,0.3);border-radius:3px;text-align:center">
+      <span style="color:var(--text-dim);font-size:0.7rem;font-family:Cinzel,serif;letter-spacing:.1em">TOTAL LOSSES</span><br>
+      <span style="color:#f0d080;font-family:'Cinzel Decorative',cursive;font-size:1.3rem;text-shadow:0 0 12px rgba(201,168,76,0.5)">
+        ${totalEssenceLost} Blood Essence
+      </span>
+    </div>
+  `;
+
+  document.getElementById('result-stats').innerHTML = statsHtml;
+  banner.className = 'show';
+  addLog(`<div class="log-result ${type === 'victory' ? 'victory' : 'defeat'}">${title}: ${sub} | Strata: ${totalEssenceLost} Blood Essence</div>`);
+}
+
+function closeResult() {
+  document.getElementById('result-banner').className = '';
+}
+
+// ===================== OPTIMIZER CANCELLATION =====================
+// Module-level control object created fresh at the start of every
+// runOptimizer() invocation. The Cancel button reads/writes this via the
+// helpers below. Single-thread paths poll _optCtl.cancelled at every yield;
+// parallel path additionally tracks worker handles + pending resolver fns
+// so terminate() + force-resolve can unblock Promise.all immediately.
+let _optCtl = null;
+
+function newOptControl() {
+  _optCtl = {
+    cancelled: false,
+    workers: [],          // parallel: Worker instances spawned this run
+    pendingResolvers: [], // parallel: { idx, resolve } records still awaiting 'done'
+  };
+  return _optCtl;
+}
+
+function requestOptimizerCancel() {
+  if (!_optCtl || _optCtl.cancelled) return;
+  _optCtl.cancelled = true;
+  // Tear down any spawned workers. Each worker promise is then force-resolved
+  // (instead of left dangling) so Promise.all does not hang.
+  _optCtl.workers.forEach(w => { try { w.terminate(); } catch (_) {} });
+  _optCtl.pendingResolvers.slice().forEach(rec => {
+    try { rec.resolve({ cancelled: true }); } catch (_) {}
+  });
+  _optCtl.pendingResolvers.length = 0;
+
+  // UI feedback — single-thread paths still need their next yield to fully
+  // bail out, but the user sees immediate acknowledgement here.
+  const label = document.getElementById('opt-progress-label');
+  if (label) label.textContent = '⏹ Cancelled — finalizing in-flight work…';
+  const btnLabel = document.getElementById('opt-btn-label');
+  if (btnLabel) btnLabel.textContent = '⚙ Run Optimizer';
+  showCancelBtn(false);
+}
+
+function showCancelBtn(show) {
+  const btn = document.getElementById('btn-cancel-optimizer');
+  if (btn) btn.style.display = show ? 'inline-flex' : 'none';
+}
+
+// Convenience: register a worker + its resolver in the control object.
+// Returned wrapper resolves the inner promise AND removes the record from
+// pendingResolvers so subsequent cancels do not double-fire.
+function registerWorkerPromise(worker, idx, resolve) {
+  if (!_optCtl) return resolve;
+  _optCtl.workers.push(worker);
+  const rec = { idx, resolve };
+  _optCtl.pendingResolvers.push(rec);
+  return function wrappedResolve(value) {
+    const i = _optCtl.pendingResolvers.indexOf(rec);
+    if (i >= 0) _optCtl.pendingResolvers.splice(i, 1);
+    resolve(value);
+  };
+}
+
+// ===================== OPTIMIZER =====================
+function openOptimizer() {
+  const enemyGroups = buildGroups('enemy', ENEMY_TIERS, enemyQuantities);
+  if (enemyGroups.length === 0) {
+    alert('Set up the enemy army first!');
+    return;
+  }
+  document.getElementById('optimizer-modal').style.display = 'block';
+  document.getElementById('opt-results').innerHTML = '';
+  document.getElementById('opt-progress').style.display = 'none';
+
+  // Render max-per-tier inputs
+  const maxInputsBox = document.getElementById('opt-max-inputs');
+  maxInputsBox.innerHTML = '';
+  ALLY_TIERS.filter(t => unlockedAllyTiers.has(t.id)).forEach(tier => {
+    const hardMax = Math.floor(ARMY_POWER_LIMIT / tier.power);
+    const col = document.createElement('div');
+    col.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:3px;min-width:52px';
+    col.innerHTML = `
+      <span style="font-family:Cinzel,serif;font-size:0.62rem;color:var(--gold-light)">${tier.label}</span>
+      <input type="number" id="opt-max-${tier.id}" min="0" max="${hardMax}" value="${hardMax}"
+        class="opt-max-input"
+        style="width:48px;background:var(--dark);border:1px solid var(--border);color:var(--text);font-family:Cinzel,serif;font-size:0.75rem;padding:3px 5px;border-radius:2px;text-align:center">
+      <span style="font-size:0.6rem;color:var(--text-dim)">max ${hardMax}</span>`;
+    maxInputsBox.appendChild(col);
+  });
+  // Lazy combo count: do NOT enumerate combinations on open. At high power
+  // limits with many tiers this can take seconds (e.g. layer 52, power 530,
+  // 6 tiers ≈ 1.5B combinations to enumerate). The user clicks 🔢 Calculate
+  // when they actually want the estimate. After the first manual calculation,
+  // edits to the per-tier max inputs will auto-refresh the number.
+  resetComboCountUI();
+
+  // Render strategy checkboxes based on active enemy tiers
+  const stratBox = document.getElementById('opt-strategies');
+  stratBox.innerHTML = '';
+  const hasE3 = enemyGroups.some(g => g.tier.skillId === 'E3_BUFF_ALLY');
+  if (hasE3) {
+    stratBox.innerHTML = `
+      <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+        <input type="checkbox" id="strat-kill-e3" style="margin-top:3px;accent-color:#9b59b6;cursor:pointer">
+        <span>
+          <span style="font-family:Cinzel,serif;font-size:0.72rem;color:var(--text)">☠ Kill Tier e3 in round 1</span>
+          <span style="display:block;font-size:0.68rem;color:var(--text-dim);font-style:italic">Shows only formations where E3 dies in round 1 — prevents cumulative buffing. <span style="color:#9b59b6">Greatly improves result accuracy.</span></span>
+        </span>
+      </label>`;
+  } else {
+    stratBox.innerHTML = '<span style="font-size:0.72rem;color:var(--text-dim);font-style:italic">No strategies for current enemies.</span>';
+  }
+
+  // Update parallel info text with detected hardware concurrency
+  const parallelInfo = document.getElementById('opt-parallel-info');
+  if (parallelInfo) {
+    const hw = (navigator && navigator.hardwareConcurrency) || null;
+    if (hw) {
+      const willUse = Math.max(2, Math.min(8, hw));
+      parallelInfo.textContent = `Detected ${hw} CPU cores — will use up to ${willUse} parallel workers. UI stays responsive.`;
+    } else {
+      parallelInfo.textContent = 'Split work across CPU cores. UI stays responsive during search.';
+    }
+  }
+
+  // Load smart presets and try to detect current layer (set by bot if active)
+  refreshPresetCache(function () {
+    if (window.BFPresets && window.BFPresets.loadCurrentLayer) {
+      window.BFPresets.loadCurrentLayer(function (data) {
+        if (data && data.layer) {
+          const inp = document.getElementById('opt-preset-level');
+          if (inp && (!inp.dataset.touched || inp.dataset.touched === 'false')) {
+            inp.value = String(data.layer);
+          }
+        }
+        updateSmartPresetPreview();
+      });
+    } else {
+      updateSmartPresetPreview();
+    }
+  });
+}
+
+function closeOptimizer() {
+  document.getElementById('optimizer-modal').style.display = 'none';
+}
+
+// ============================================================================
+// SMART PRESET UI (warm-start optimization)
+// ============================================================================
+
+let _presetCache = null;  // populated on optimizer open
+
+function getActiveSmartPreset() {
+  // Returns {preset, level, range} if smart preset is enabled and valid; null otherwise
+  if (!window.BFPresets) return null;
+  const enabledEl = document.getElementById('opt-preset-enabled');
+  if (!enabledEl || !enabledEl.checked) return null;
+  const levelEl = document.getElementById('opt-preset-level');
+  const level = levelEl ? parseInt(levelEl.value) || 0 : 0;
+  if (level <= 0) return null;
+  const preset = _presetCache && _presetCache[String(level)];
+  if (!preset) return null;
+  const rangeEl = document.getElementById('opt-preset-range');
+  const range = rangeEl ? parseInt(rangeEl.value) || 15 : 15;
+  return { preset: preset, level: level, range: range };
+}
+
+function updateSmartPresetPreview() {
+  const previewEl = document.getElementById('opt-preset-preview');
+  const confEl = document.getElementById('opt-preset-confidence');
+  const enabledEl = document.getElementById('opt-preset-enabled');
+  const levelEl = document.getElementById('opt-preset-level');
+  const rangeEl = document.getElementById('opt-preset-range');
+  const rangeValEl = document.getElementById('opt-preset-range-val');
+  if (!previewEl || !levelEl) return;
+
+  const level = parseInt(levelEl.value) || 0;
+  const range = parseInt(rangeEl.value) || 15;
+  if (rangeValEl) rangeValEl.textContent = '±' + range;
+
+  const preset = (_presetCache && _presetCache[String(level)]) || null;
+
+  // Confidence badge
+  if (confEl) {
+    if (!preset) {
+      confEl.textContent = '🔴 no data';
+      confEl.style.background = 'rgba(231,76,60,0.2)';
+      confEl.style.color = '#e74c3c';
+    } else {
+      const c = preset.confidence || 'yellow';
+      const cmap = {
+        red:    { bg: 'rgba(231,76,60,0.2)',  fg: '#e74c3c', label: '🔴 low' },
+        yellow: { bg: 'rgba(243,156,18,0.2)', fg: '#f39c12', label: '🟡 limited' },
+        green:  { bg: 'rgba(46,204,113,0.2)', fg: '#2ecc71', label: '🟢 verified' },
+      };
+      const m = cmap[c] || cmap.yellow;
+      confEl.textContent = m.label;
+      confEl.style.background = m.bg;
+      confEl.style.color = m.fg;
+    }
+  }
+
+  if (!preset) {
+    previewEl.innerHTML = '<span style="color:var(--text-dim);font-style:italic">No preset saved for layer ' + level + '. Click "Manage…" to add one.</span>';
+    if (enabledEl) enabledEl.checked = false;
+    return;
+  }
+
+  // Build preview text
+  const stratKillE3El = document.getElementById('strat-kill-e3');
+  const stratKillE3 = !!(stratKillE3El && stratKillE3El.checked);
+  const ranges = window.BFPresets.buildRangesFromPreset(preset, {
+    range: range,
+    enemyQtys: { ...enemyQuantities },
+    stratKillE3: stratKillE3,
+  });
+
+  let html = '';
+  if (preset.note) {
+    html += '<div style="color:var(--gold-light);font-style:italic;margin-bottom:4px">' + escapeHtml(preset.note) + '</div>';
+  }
+  const parts = [];
+  Object.keys(ranges.computed).forEach(function (tid) {
+    const c = ranges.computed[tid];
+    if (c.mode === 'auto' && c.autoMin != null) {
+      parts.push('<span style="color:#9b59b6">' + tid + ' &ge; <b>' + c.autoMin + '</b> (auto min)</span>');
+    } else if (c.mode === 'range') {
+      parts.push('<span style="color:var(--text)">' + tid + ': ' + c.min + '–' + c.max + '</span>');
+    } else if (c.mode === 'zero') {
+      parts.push('<span style="color:#7f8c8d">' + tid + ': 0 (skipped)</span>');
+    } else if (c.mode === 'auto') {
+      parts.push('<span style="color:#7f8c8d">' + tid + ': auto (needs Kill E3 R1)</span>');
+    }
+  });
+  html += parts.join('&nbsp;&nbsp;');
+  previewEl.innerHTML = html || '<span style="color:var(--text-dim);font-style:italic">Empty preset.</span>';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function refreshPresetCache(callback) {
+  if (!window.BFPresets) {
+    _presetCache = {};
+    if (callback) callback();
+    return;
+  }
+  window.BFPresets.loadPresets(function (presets) {
+    _presetCache = presets;
+    window.BFPresets.setCached(presets);
+    if (callback) callback();
+  });
+}
+
+// ============================================================================
+// PRESET MANAGER MODAL
+// ============================================================================
+
+function openPresetManager() {
+  refreshPresetCache(function () {
+    renderPresetManagerInputs();
+    renderPresetManagerTable();
+    document.getElementById('preset-manager-modal').style.display = 'block';
+    // Pre-fill level from optimizer
+    const optLevel = document.getElementById('opt-preset-level');
+    const mgrLevel = document.getElementById('pmgr-level');
+    if (optLevel && mgrLevel) mgrLevel.value = optLevel.value;
+    loadPresetIntoForm(parseInt(mgrLevel.value) || 0);
+  });
+}
+
+function closePresetManager() {
+  document.getElementById('preset-manager-modal').style.display = 'none';
+  / rgba(155,89,182,0.4)'
+          : (e.pinned ? '0 0 0 1px rgba(201,168,76,0.25)' : 'none')) + '">'
+      // Pinned ribbon — small floating tag in the top-right corner.
+      // Positioned absolutely so it doesn't disturb the existing header layout.
+      + (e.pinned
+        ? '<span style="position:absolute;top:-8px;right:8px;'
+          + 'background:var(--card);border:1px solid #c9a84c;border-radius:3px;'
+          + 'padding:1px 6px;color:#c9a84c;font-family:Cinzel,serif;'
+          + 'font-size:0.55rem;letter-spacing:.12em;line-height:1.2">📌 PINNED</span>'
+        : '')
+      // Header row — checkbox + status + meta
+      +   '<div style="display:flex;align-items:center;gap:6px;justify-content:space-between">'
+      +     '<label style="display:flex;align-items:center;gap:5px;cursor:' + (selectionFull && !isSelected ? 'not-allowed' : 'pointer') + ';margin:0">'
+      +       '<input type="checkbox" class="sim-history-compare-cb" data-history-idx="' + idx + '" '
+      +         (isSelected ? 'checked' : '')
+      +         (selectionFull && !isSelected ? ' disabled' : '')
+      +         ' style="accent-color:#9b59b6;cursor:inherit;margin:0;width:13px;height:13px">'
+      +       '<span style="color:' + status.color + ';font-family:Cinzel,serif;'
+      +         'font-size:0.72rem;font-weight:bold">' + status.icon + ' ' + status.text + '</span>'
+      +     '</label>'
+      +     '<span style="font-size:0.58rem;color:var(--text-dim)">' + pl + 'R' + e.rounds + ' · ' + ago + '</span>'
+      +   '</div>'
+      // Allies block
+      +   '<div style="margin-top:1px">'
+      +     '<div style="display:flex;justify-content:space-between;align-items:center;'
+      +       'font-size:0.6rem;color:var(--gold-light);font-family:Cinzel,serif;'
+      +       'letter-spacing:.08em;padding-bottom:2px;border-bottom:1px solid rgba(201,168,76,0.12)">'
+      +       '<span>⚔ ALLIES</span>'
+      +       '<span style="color:' + (totalAllySurv === totalAllyStart ? '#2ecc71' : totalAllySurv === 0 ? '#e74c3c' : '#e67e22') + '">'
+      +         totalAllySurv + '/' + totalAllyStart + '</span>'
+      +     '</div>'
+      +     tierRowsHtml(allyLosses, 'ally')
+      +   '</div>'
+      // Enemies block
+      +   '<div>'
+      +     '<div style="display:flex;justify-content:space-between;align-items:center;'
+      +       'font-size:0.6rem;color:#e74c3c;font-family:Cinzel,serif;'
+      +       'letter-spacing:.08em;padding-bottom:2px;border-bottom:1px solid rgba(231,76,60,0.15)">'
+      +       '<span>💀 ENEMIES</span>'
+      +       '<span style="color:' + (totalEnemyKill === totalEnemyStart ? '#2ecc71' : totalEnemyKill === 0 ? '#e74c3c' : '#f39c12') + '">'
+      +         'killed ' + totalEnemyKill + '/' + totalEnemyStart + '</span>'
+      +     '</div>'
+      +     tierRowsHtml(enemyLosses, 'enemy')
+      +   '</div>'
+      // Essence + reapply
+      +   '<div style="display:flex;justify-content:space-between;align-items:center;'
+      +     'font-size:0.66rem;margin-top:2px;padding-top:4px;'
+      +     'border-top:1px solid rgba(255,255,255,0.05)">'
+      +     '<span style="color:var(--text-dim);font-family:Cinzel,serif;font-size:0.6rem;letter-spacing:.08em">BLOOD ESSENCE</span>'
+      +     '<span style="color:#f0d080;font-weight:bold">−' + e.essenceLost + ' 🩸</span>'
+      +   '</div>'
+      +   '<div style="display:flex;gap:5px;margin-top:1px">'
+      +     '<button class="sim-history-pin" data-history-idx="' + idx + '" '
+      +       'title="' + (e.pinned ? 'Unpin — allow FIFO eviction' : 'Pin — exempt from auto-eviction') + '" '
+      +       'style="flex:0 0 auto;background:' + (e.pinned ? 'rgba(201,168,76,0.2)' : 'rgba(201,168,76,0.05)') + ';'
+      +       'border:1px solid ' + (e.pinned ? '#c9a84c' : '#5a4a1a') + ';'
+      +       'color:' + (e.pinned ? '#c9a84c' : 'var(--text-dim)') + ';'
+      +       'font-family:Cinzel,serif;font-size:0.6rem;padding:3px 9px;'
+      +       'border-radius:2px;cursor:pointer">' + (e.pinned ? '📍 Unpin' : '📌 Pin') + '</button>'
+      +     '<button class="sim-history-apply" data-history-idx="' + idx + '" '
+      +       'style="flex:1;background:rgba(155,89,182,0.15);border:1px solid #8e44ad;'
+      +       'color:#9b59b6;font-family:Cinzel,serif;font-size:0.6rem;padding:3px 0;'
+      +       'border-radius:2px;cursor:pointer">↻ Reapply formation</button>'
+      +   '</div>'
+      // 📥 To Preset — only meaningful on VICTORY (defeat/draw formations
+      // are bad candidates for the bot's preset library). Sends the
+      // formation + enemy composition + chosen level to bot.js via
+      // postMessage; bot.js writes to chrome.storage under the current
+      // character's preset key.
+      + (e.victory ? (''
+      +   '<button class="sim-history-to-preset" data-history-idx="' + idx + '" '
+      +     'title="Save this winning formation as a Ruins preset" '
+      +     'style="margin-top:3px;background:rgba(46,204,113,0.1);border:1px solid #27ae60;'
+      +     'color:#2ecc71;font-family:Cinzel,serif;font-size:0.6rem;padding:3px 0;'
+      +     'border-radius:2px;cursor:pointer;width:100%">'
+      +     '📥 Save as Ruins preset</button>'
+      ) : '')
+      + '</div>';
+  }).join('');
+
+  // Append the Compare action row directly into the card container so it
+  // sits visually below the cards but inside the same flex layout. The row
+  // takes the full width (flex-basis 100%) so it doesn't get squeezed
+  // between cards on wider viewports.
+  if (list.length >= 2) {
+    const n = _compareSelection.length;
+    const ready = (n === 2);
+    const msg = n === 0 ? 'Select 2 cards to compare'
+              : n === 1 ? 'Select 1 more card to compare'
+              : '2 selected — ready to compare';
+    container.innerHTML += ''
+      + '<div style="flex:1 1 100%;display:flex;align-items:center;justify-content:space-between;'
+      +   'gap:8px;margin-top:4px;padding:6px 8px;background:rgba(0,0,0,0.2);'
+      +   'border:1px solid rgba(155,89,182,' + (ready ? '0.4' : '0.15') + ');border-radius:3px">'
+      +   '<span style="font-size:0.65rem;color:' + (ready ? '#9b59b6' : 'var(--text-dim)') + ';font-family:Cinzel,serif;letter-spacing:.06em">'
+      +     (ready ? '↔ ' : '') + msg
+      +   '</span>'
+      +   '<div style="display:flex;gap:6px">'
+      +     (n > 0
+        ? '<button id="btn-clear-compare" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-family:Cinzel,serif;font-size:0.62rem;padding:3px 10px;border-radius:2px;cursor:pointer">Deselect</button>'
+        : '')
+      +     '<button id="btn-open-compare" ' + (ready ? '' : 'disabled ')
+      +       'style="background:rgba(155,89,182,' + (ready ? '0.25' : '0.05') + ');'
+      +       'border:1px solid ' + (ready ? '#9b59b6' : '#2a1218') + ';'
+      +       'color:' + (ready ? '#9b59b6' : 'var(--text-dim)') + ';'
+      +       'font-family:Cinzel,serif;font-size:0.66rem;padding:3px 14px;'
+      +       'border-radius:2px;cursor:' + (ready ? 'pointer' : 'not-allowed') + '">'
+      +       '↔ Compare</button>'
+      +   '</div>'
+      + '</div>';
+  }
+}
+
+function applyHistoryEntry(idx) {
+  // idx is a sorted-view index (matches what the user sees and what
+  // data-history-idx encodes in the DOM). loadHistorySorted() applies
+  // the same pinned-first + newest-first ordering renderHistory uses.
+  const list = loadHistorySorted();
+  const entry = list[idx];
+  if (!entry) return;
+  // Make sure all tiers referenced in the snapshot are unlocked, otherwise
+  // their qty fields won't render and the formation would silently lose units.
+  let unlockChanged = false;
+  ALLY_TIERS.forEach(t => {
+    const q = entry.ally[t.id] || 0;
+    if (q > 0 && !unlockedAllyTiers.has(t.id)) { unlockedAllyTiers.add(t.id); unlockChanged = true; }
+    allyQuantities[t.id] = q;
+  });
+  ENEMY_TIERS.forEach(t => {
+    const q = entry.enemy[t.id] || 0;
+    if (q > 0 && !unlockedEnemyTiers.has(t.id)) { unlockedEnemyTiers.add(t.id); unlockChanged = true; }
+    enemyQuantities[t.id] = q;
+  });
+  if (unlockChanged) {
+    lsSet(LS_KEY_UNLOCK_ALLY,  [...unlockedAllyTiers]);
+    lsSet(LS_KEY_UNLOCK_ENEMY, [...unlockedEnemyTiers]);
+  }
+  if (entry.powerLimit) {
+    const inp = document.getElementById('power-limit-input-el');
+    if (inp) inp.value = entry.powerLimit;
+    ARMY_POWER_LIMIT = Math.max(1, entry.powerLimit);
+  }
+  renderBuilder();
+}
+
+function clearHistory() {
+  lsRemove(LS_KEY_HISTORY);
+  _compareSelection = [];
+  renderHistory();
+}
+
+// ============================================================================
+// SEND HISTORY ENTRY → BOT PRESET (v1.5.7)
+// ============================================================================
+// Bridges the simulator's history into the bot's Ruins Preset Formations
+// store. The simulator iframe doesn't have direct chrome.storage access
+// (different origin and no SERVER_ID/PLAYER_ID context), so we postMessage
+// to bot.js which lives in the page's content-script context. Bot.js
+// validates and writes; we display feedback based on the BF_ADD_PRESET_ACK
+// echo it sends back.
+
+// One-shot ack tracker keyed by button element so multiple cards being
+// queued in rapid succession don't cross-fire each other's feedback.
+const _presetAckPending = new Map();
+
+// Attach the ack listener exactly once on first send. We can't safely
+// attach it inside an IIFE block at module load because the simulator
+// uses no IIFE — keeping it lazy is harmless and avoids any race with
+// the bot.js side coming up.
+let _presetAckListenerAttached = false;
+function ensurePresetAckListener() {
+  if (_presetAckListenerAttached) return;
+  _presetAckListenerAttached = true;
+  window.addEventListener('message', (ev) => {
+    const m = ev.data;
+    if (!m || m.type !== 'BF_ADD_PRESET_ACK') return;
+    // We don't tie ack to a specific button reliably (level+enemy combo
+    // would work, but a user pressing two times for the same target is
+    // edge-case), so we just fire the first pending button's success
+    // animation. Good enough for the workflow.
+    const entries = Array.from(_presetAckPending.entries());
+    if (entries.length === 0) return;
+    const [btn] = entries[0];
     _presetAckPending.delete(btn);
     flashButton(btn,
       { bg: 'rgba(46,204,113,0.2)', fg: '#2ecc71', border: '#27ae60' },
@@ -2861,7 +4624,1232 @@ function sendHistoryToPreset(sortedIdx, buttonEl) {
     '⏳ Sending…', 5000);
   _presetAckPending.set(buttonEl, Date.now());
 
-  // postMessage to parent (the BiteFight page). Bot.js's listener
+  // postMessage to parent (the BiteFightlue) || 20;
+  ARMY_POWER_LIMIT = Math.max(1, val);
+  renderBuilder();
+}
+
+// Tier definitions come from the shared engine. simulator.js cannot exist
+// without sim_engine.js being loaded first (manifest order).
+if (typeof window === 'undefined' || !window.BFEngine) {
+  console.error('[bitefight] sim_engine.js must be loaded before simulator.js');
+}
+const ALLY_TIERS  = (window.BFEngine && window.BFEngine.ALLY_TIERS)  || [];
+const ENEMY_TIERS = (window.BFEngine && window.BFEngine.ENEMY_TIERS) || [];
+
+// ===================== STATE =====================
+let allyQuantities = {};
+let enemyQuantities = {};
+// By default all tiers unlocked; user can toggle. Last selection is persisted
+// to localStorage (LS_KEY_UNLOCK_*) and restored here on every simulator open.
+let unlockedAllyTiers, unlockedEnemyTiers;
+(function loadUnlockedFromStorage() {
+  const savedAlly  = lsGet(LS_KEY_UNLOCK_ALLY);
+  const savedEnemy = lsGet(LS_KEY_UNLOCK_ENEMY);
+  const allyIds  = new Set(ALLY_TIERS.map(t => t.id));
+  const enemyIds = new Set(ENEMY_TIERS.map(t => t.id));
+  // Accept saved value only if it is a non-empty array of known ids. Empty
+  // array would lock the user out entirely, so we fall back to defaults.
+  unlockedAllyTiers = (Array.isArray(savedAlly) && savedAlly.length > 0 && savedAlly.every(id => allyIds.has(id)))
+    ? new Set(savedAlly)
+    : new Set(ALLY_TIERS.map(t => t.id));
+  unlockedEnemyTiers = (Array.isArray(savedEnemy) && savedEnemy.length > 0 && savedEnemy.every(id => enemyIds.has(id)))
+    ? new Set(savedEnemy)
+    : new Set(ENEMY_TIERS.map(t => t.id));
+})();
+let battleState = null;
+let autoTimer = null;
+let isRunning = false;
+// Auto-play speed multiplier. Loaded from LS at startup (defaults to 1×);
+// changed via the ⏩ AUTO SPEED button row; persisted on every change.
+let autoSpeed = (function () {
+  const saved = lsGet(LS_KEY_AUTO_SPEED);
+  // Accept only known values; anything else falls back to 1×.
+  return (AUTO_SPEED_OPTIONS.indexOf(saved) >= 0) ? saved : 1;
+})();
+function currentAutoDelay() {
+  // Lower bound at 50ms — even with future user-configurable speeds this
+  // keeps the UI responsive (faster than the engine can render anyway).
+  return Math.max(50, Math.round(AUTO_BASE_DELAY_MS / autoSpeed));
+}
+
+ALLY_TIERS.forEach(t => allyQuantities[t.id] = 0);
+ENEMY_TIERS.forEach(t => enemyQuantities[t.id] = 0);
+
+// ===================== UNIT IDENTITY (v1.6.26) =====================
+// Names + artwork per race from js/unit_catalog.js (window.BFUnits).
+// The tier codes (T1…, E1…) stay the primary label everywhere; the name
+// and picture are added next to them. Context arrives from the game page
+// via bridge.js (BF_GAME_STATE.origin / .units) and is cached locally so
+// the panel keeps its look between opens.
+const LS_KEY_UNIT_CTX   = 'bf_sim_unitctx';
+const LS_KEY_SIM_RACE   = 'bf_sim_race';    // 'auto' | '1' | '2'
+const LS_KEY_SIM_NAMES  = 'bf_sim_names';   // 'both' | 'code'
+let UNIT_CTX = Object.assign({ origin: null, race: null, names: null }, lsGet(LS_KEY_UNIT_CTX) || {});
+function simRace() {
+  const ov = lsGet(LS_KEY_SIM_RACE);
+  if (ov === '1' || ov === '2') return parseInt(ov);
+  return UNIT_CTX.race || 1;
+}
+function simShowNames() { return lsGet(LS_KEY_SIM_NAMES) !== 'code'; }
+function simUnitName(id) {
+  return window.BFUnits ? window.BFUnits.name(id, simRace(), UNIT_CTX.names) : '';
+}
+function simUnitImg(id, cls) {
+  if (!window.BFUnits || !UNIT_CTX.origin) return '';
+  const url = window.BFUnits.imgUrl(id, simRace(), UNIT_CTX.origin);
+  return url ? `<img class="${cls || 'unit-img'}" src="${url}" alt="" loading="lazy" draggable="false">` : '';
+}
+function tierHeadHtml(tier, side) {
+  const nm = simShowNames() ? simUnitName(tier.id) : '';
+  return `<div class="tier-head">${simUnitImg(tier.id, 'tier-img')}<div class="tier-head-txt">`
+    + `<span class="tier-label">${tier.id}</span>`
+    + (nm ? `<span class="tier-name" title="${tier.label}">${nm}</span>` : '')
+    + `</div></div>`;
+}
+// Called by bridge.js whenever the game page pushes state
+window.setSimUnitCtx = function (origin, units) {
+  let changed = false;
+  if (origin && origin !== UNIT_CTX.origin) { UNIT_CTX.origin = origin; changed = true; }
+  if (units) {
+    if (units.race && units.race !== UNIT_CTX.race) { UNIT_CTX.race = units.race; changed = true; }
+    if (units.names && JSON.stringify(units.names) !== JSON.stringify(UNIT_CTX.names)) { UNIT_CTX.names = units.names; changed = true; }
+  }
+  if (!changed) return;
+  lsSet(LS_KEY_UNIT_CTX, UNIT_CTX);
+  refreshUnitLook();
+};
+function refreshUnitLook() {
+  renderUnitLookBar();
+  renderBuilder();
+  if (battleState) renderBattlefield();
+}
+function renderUnitLookBar() {
+  const bar = document.getElementById('unit-look-bar');
+  if (!bar) return;
+  const ov = lsGet(LS_KEY_SIM_RACE) || 'auto';
+  const auto = UNIT_CTX.race ? (window.BFUnits ? window.BFUnits.RACE_LABEL[UNIT_CTX.race] : '') : '?';
+  const mk = (v, lbl) => `<button class="ulook-btn${ov === v ? ' on' : ''}" data-ulook-race="${v}">${lbl}</button>`;
+  const names = simShowNames();
+  bar.innerHTML = `<span class="ulook-lbl">RACE:</span>${mk('auto', 'Auto (' + auto + ')')}${mk('1', '🦇 Vampire')}${mk('2', '🐺 Werewolf')}`
+    + `<span class="ulook-sep"></span><button class="ulook-btn${names ? ' on' : ''}" data-ulook-names="1" title="Show unit names next to tier codes">Names</button>`
+    + (UNIT_CTX.origin ? '' : `<span class="ulook-hint" title="Open the simulator from a game page once — artwork is loaded from the game server.">no artwork offline</span>`);
+}
+
+function toggleUnlock(side, id) {
+  const set = side === 'ally' ? unlockedAllyTiers : unlockedEnemyTiers;
+  const qtys = side === 'ally' ? allyQuantities : enemyQuantities;
+  if (set.has(id)) {
+    set.delete(id);
+    qtys[id] = 0; // reset qty when locked
+  } else {
+    set.add(id);
+  }
+  // Persist to localStorage so the next open restores this selection.
+  lsSet(side === 'ally' ? LS_KEY_UNLOCK_ALLY : LS_KEY_UNLOCK_ENEMY, [...set]);
+  renderBuilder();
+}
+
+function renderUnlockBars() {
+  // Ally
+  const allyBar = document.getElementById('ally-unlock-bar');
+  allyBar.innerHTML = '<span style="font-family:Cinzel,serif;font-size:0.62rem;color:var(--text-dim);letter-spacing:.1em;margin-right:2px">UNLOCKED:</span>';
+  ALLY_TIERS.forEach(tier => {
+    const unlocked = unlockedAllyTiers.has(tier.id);
+    const btn = document.createElement('button');
+    btn.textContent = tier.label;
+    btn.title = unlocked ? 'Klikni na zamknutie' : 'Klikni na odomknutie';
+    btn.style.cssText = `
+      font-family:Cinzel,serif;font-size:0.65rem;padding:2px 9px;border-radius:10px;cursor:pointer;
+      transition:all 0.15s;border:1px solid;
+      background:${unlocked ? 'rgba(201,168,76,0.15)' : 'rgba(255,255,255,0.03)'};
+      color:${unlocked ? 'var(--gold-light)' : 'var(--text-dim)'};
+      border-color:${unlocked ? 'var(--gold)' : '#2a1218'};
+    `;
+    btn.onclick = () => toggleUnlock('ally', tier.id);
+    allyBar.appendChild(btn);
+  });
+
+  // Enemy
+  const enemyBar = document.getElementById('enemy-unlock-bar');
+  enemyBar.innerHTML = '<span style="font-family:Cinzel,serif;font-size:0.62rem;color:var(--text-dim);letter-spacing:.1em;margin-right:2px">UNLOCKED:</span>';
+  ENEMY_TIERS.forEach(tier => {
+    const unlocked = unlockedEnemyTiers.has(tier.id);
+    const btn = document.createElement('button');
+    btn.textContent = tier.label;
+    btn.title = unlocked ? 'Klikni na zamknutie' : 'Klikni na odomknutie';
+    btn.style.cssText = `
+      font-family:Cinzel,serif;font-size:0.65rem;padding:2px 9px;border-radius:10px;cursor:pointer;
+      transition:all 0.15s;border:1px solid;
+      background:${unlocked ? 'rgba(192,57,43,0.15)' : 'rgba(255,255,255,0.03)'};
+      color:${unlocked ? '#e74c3c' : 'var(--text-dim)'};
+      border-color:${unlocked ? 'var(--crimson)' : '#2a1218'};
+    `;
+    btn.onclick = () => toggleUnlock('enemy', tier.id);
+    enemyBar.appendChild(btn);
+  });
+}
+
+// ===================== RENDER BUILDER =====================
+function renderBuilder() {
+  renderUnlockBars();
+  renderAllyTiers();
+  renderEnemyTiers();
+  updatePower();
+}
+
+function renderAllyTiers() {
+  const container = document.getElementById('ally-tiers');
+  container.innerHTML = '';
+  ALLY_TIERS.filter(tier => unlockedAllyTiers.has(tier.id)).forEach(tier => {
+    const qty = allyQuantities[tier.id];
+    const div = document.createElement('div');
+    div.className = 'tier-card' + (qty > 0 ? ' selected' : '');
+    div.innerHTML = `
+      ${tierHeadHtml(tier, 'ally')}
+      <div class="tier-info-row">
+        <span class="stat-badge">⚔<span class="val">${tier.dmg}</span></span>
+        <span class="stat-badge">❤<span class="val">${tier.hp}</span></span>
+        <span class="stat-badge">💨<span class="val">${tier.spd}</span></span>
+        <span class="stat-badge">⚡<span class="val">${tier.power}</span></span>
+        <span class="stat-badge" style="color:#c9a84c">🩸<span class="val" style="color:#f0d080">${tier.cost}</span></span>
+        <span class="type-badge type-${tier.type}">${tier.type}</span>
+        <span class="pos-badge pos-${tier.pos}">${tier.pos === 'Vanguard' ? 'Vanguard' : 'Rearguard'}</span>
+        <span class="skill-icon">?<span class="tooltip">${tier.skill}</span></span>
+      </div>
+      <div class="qty-control">
+        <button class="qty-btn" data-side="ally" data-tier="${tier.id}" data-delta="-10" style="font-size:0.6rem;padding:0 4px">−10</button>
+        <button class="qty-btn" data-side="ally" data-tier="${tier.id}" data-delta="-1">−</button>
+        <input type="number" class="qty-input" min="0" value="${qty}"
+          data-side="ally" data-tier="${tier.id}">
+        <button class="qty-btn" data-side="ally" data-tier="${tier.id}" data-delta="1">+</button>
+        <button class="qty-btn" data-side="ally" data-tier="${tier.id}" data-delta="10" style="font-size:0.6rem;padding:0 4px">+10</button>
+      </div>
+      <div class="skill-tip">${tier.skill}</div>
+    `;
+    container.appendChild(div);
+  });
+}
+
+function renderEnemyTiers() {
+  const container = document.getElementById('enemy-tiers');
+  container.innerHTML = '';
+  ENEMY_TIERS.filter(tier => unlockedEnemyTiers.has(tier.id)).forEach(tier => {
+    const qty = enemyQuantities[tier.id];
+    const div = document.createElement('div');
+    div.className = 'tier-card' + (qty > 0 ? ' enemy-selected' : '');
+    div.innerHTML = `
+      ${tierHeadHtml(tier, 'enemy')}
+      <div class="tier-info-row">
+        <span class="stat-badge">⚔<span class="val">${tier.dmg}</span></span>
+        <span class="stat-badge">❤<span class="val">${tier.hp}</span></span>
+        <span class="stat-badge">💨<span class="val">${tier.spd}</span></span>
+        <span class="type-badge type-${tier.type.trim()}">${tier.type.trim()}</span>
+        <span class="pos-badge pos-${tier.pos}">${tier.pos === 'Vanguard' ? 'Vanguard' : 'Rearguard'}</span>
+        <span class="skill-icon">?<span class="tooltip">${tier.skill}</span></span>
+      </div>
+      <div class="qty-control">
+        <button class="qty-btn" data-side="enemy" data-tier="${tier.id}" data-delta="-10" style="font-size:0.6rem;padding:0 4px">−10</button>
+        <button class="qty-btn" data-side="enemy" data-tier="${tier.id}" data-delta="-1">−</button>
+        <input type="number" class="qty-input" min="0" value="${qty}"
+          data-side="enemy" data-tier="${tier.id}">
+        <button class="qty-btn" data-side="enemy" data-tier="${tier.id}" data-delta="1">+</button>
+        <button class="qty-btn" data-side="enemy" data-tier="${tier.id}" data-delta="10" style="font-size:0.6rem;padding:0 4px">+10</button>
+      </div>
+      <div class="skill-tip">${tier.skill}</div>
+    `;
+    container.appendChild(div);
+  });
+}
+
+// Input typing — only save value, NO re-render (keeps focus)
+function qtyInputChange(side, id, input) {
+  const val = Math.max(0, parseInt(input.value) || 0);
+  if (side === 'ally') {
+    const tier = ALLY_TIERS.find(t => t.id === id);
+    const powerWithout = getAllyPower() - (allyQuantities[id] || 0) * tier.power;
+    const maxAllowed = Math.floor((ARMY_POWER_LIMIT - powerWithout) / tier.power) + (allyQuantities[id] || 0);
+    allyQuantities[id] = Math.min(val, Math.max(0, maxAllowed));
+  } else {
+    enemyQuantities[id] = val;
+  }
+  updatePower(); // update power bar without re-rendering tier cards
+}
+
+// On blur — sync input display value and re-render
+function qtyInputBlur(side, id, input) {
+  const stored = side === 'ally' ? (allyQuantities[id] || 0) : (enemyQuantities[id] || 0);
+  input.value = stored; // correct display if clamped
+  renderBuilder();
+}
+
+function changeQty(side, id, delta) {
+  if (side === 'ally') {
+    const tier = ALLY_TIERS.find(t => t.id === id);
+    const currentPower = getAllyPower() - (allyQuantities[id] || 0) * tier.power;
+    const maxAllowed = Math.floor((ARMY_POWER_LIMIT - currentPower) / tier.power);
+    const newVal = Math.max(0, Math.min((allyQuantities[id] || 0) + delta, maxAllowed));
+    allyQuantities[id] = newVal;
+  } else {
+    enemyQuantities[id] = Math.max(0, (enemyQuantities[id] || 0) + delta);
+  }
+  renderBuilder();
+}
+
+function getAllyPower() {
+  return ALLY_TIERS.reduce((sum, t) => sum + (allyQuantities[t.id] || 0) * t.power, 0);
+}
+
+function updatePower() {
+  const p = getAllyPower();
+  const pct = Math.min(100, (p / ARMY_POWER_LIMIT) * 100);
+  document.getElementById('ally-power-fill').style.width = pct + '%';
+  document.getElementById('ally-power-text').textContent = `${p} / ${ARMY_POWER_LIMIT}`;
+}
+
+// ===================== BATTLE ENGINE =====================
+function buildGroups(side, tierDefs, quantities) {
+  const groups = [];
+  tierDefs.forEach(tier => {
+    const qty = (quantities[tier.id] || 0);
+    if (qty === 0) return;
+    groups.push({
+      id: tier.id,
+      label: tier.label,
+      tier: tier,
+      qty: qty,
+      maxHp: tier.hp * qty,
+      currentHp: tier.hp * qty,
+      aliveUnits: qty,
+      alive: true,
+      side: side,
+      revived: false,
+      revivedThisRound: false,
+      revivedByAttackerId: null,
+      damageBuff: 1.0,
+      debuffed: false,
+      debuffRounds: 0,
+      attackedThisRound: false,
+    });
+  });
+  return groups;
+}
+
+function startBattle() {
+  stopAuto();
+  const allyGroups = buildGroups('ally', ALLY_TIERS, allyQuantities);
+  const enemyGroups = buildGroups('enemy', ENEMY_TIERS, enemyQuantities);
+
+  if (allyGroups.length === 0 || enemyGroups.length === 0) {
+    addLog('<span style="color:var(--crimson)">' + T('addUnitsBothSides') + '</span>');
+    return;
+  }
+
+  // Run the full simulation up-front via the shared engine.
+  // The UI then "replays" the resulting event log round-by-round for animation.
+  // earlyTermination is disabled here so the user sees the full battle even
+  // when it's a slow loss or stalemate — the optimizer path uses default ON.
+  const engineResult = window.BFEngine.simulate(allyQuantities, enemyQuantities, {
+    randomTarget: true,  // live UI uses random E3 target (matches Python v6)
+    collectLog: true,
+    maxRounds: 50,
+    earlyTermination: false,
+  });
+
+  if (!engineResult) {
+    addLog('<span style="color:var(--crimson)">Engine error</span>');
+    return;
+  }
+
+  // Save snapshot of this MANUAL simulation to history (last 3 are kept).
+  // Optimizer-driven batch simulations go through BFEngine directly and never
+  // reach startBattle(), so they correctly don't pollute the history.
+  pushHistory(allyQuantities, enemyQuantities, ARMY_POWER_LIMIT, engineResult);
+
+  // Group events by round for replay
+  const roundEvents = [];
+  let currentRound = -1;
+  for (const ev of engineResult.log) {
+    if (ev.type === 'roundStart') {
+      currentRound = ev.round;
+      roundEvents[currentRound] = { order: ev.order, events: [] };
+    } else if (currentRound >= 0 && ev.type !== 'battleStart' && ev.type !== 'battleEnd') {
+      roundEvents[currentRound].events.push(ev);
+    }
+  }
+
+  battleState = {
+    allies: allyGroups,
+    enemies: enemyGroups,
+    groupsById: {},
+    round: 0,
+    done: false,
+    roundEvents: roundEvents,
+    finalResult: engineResult,
+  };
+  // Build id lookup. Note: spiderlings (E9S) may appear later via spawn event.
+  [...allyGroups, ...enemyGroups].forEach(g => { battleState.groupsById[g.id] = g; });
+
+  clearLog();
+  addLog(`<span class="log-round">${T('battleBegins')}</span>`);
+  renderBattlefield();
+  isRunning = true;
+}
+
+function stepBattle() {
+  if (!battleState || battleState.done) { startBattle(); return; }
+  if (!isRunning) isRunning = true;
+  executeRound();
+}
+
+function autoPlay() {
+  if (!battleState || battleState.done) { startBattle(); }
+  stopAuto();
+  autoTimer = setInterval(() => {
+    if (!battleState || battleState.done) { stopAuto(); return; }
+    executeRound();
+  }, currentAutoDelay());
+}
+
+function stopAuto() {
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+}
+
+// ============================================================================
+// AUTO-PLAY SPEED CONTROL
+// ============================================================================
+// setAutoSpeed updates the multiplier, persists it, re-renders the button
+// row, and — if Auto is currently running — restarts the interval at the
+// new cadence so the user sees the change immediately. Called from the
+// click delegate when a speed button is pressed.
+function setAutoSpeed(mult) {
+  if (AUTO_SPEED_OPTIONS.indexOf(mult) < 0) return; // ignore garbage
+  autoSpeed = mult;
+  lsSet(LS_KEY_AUTO_SPEED, mult);
+  renderSpeedButtons();
+  // If Auto is running, restart with the new delay. We don't simply mutate
+  // the existing setInterval cadence (setInterval has no runtime adjust API)
+  // so a fresh interval is the cleanest way to apply the change without
+  // dropping or duplicating a round.
+  if (autoTimer) {
+    stopAuto();
+    autoTimer = setInterval(() => {
+      if (!battleState || battleState.done) { stopAuto(); return; }
+      executeRound();
+    }, currentAutoDelay());
+  }
+}
+
+function renderSpeedButtons() {
+  const host = document.getElementById('speed-buttons');
+  if (!host) return;
+  host.innerHTML = AUTO_SPEED_OPTIONS.map(mult => {
+    const active = (mult === autoSpeed);
+    return ''
+      + '<button class="auto-speed-btn" data-speed="' + mult + '" '
+      +   'title="' + Math.round(AUTO_BASE_DELAY_MS / mult) + ' ms per round" '
+      +   'style="font-family:Cinzel,serif;font-size:0.62rem;'
+      +     'padding:2px 9px;border-radius:10px;cursor:pointer;'
+      +     'background:' + (active ? 'rgba(155,89,182,0.25)' : 'rgba(255,255,255,0.03)') + ';'
+      +     'border:1px solid ' + (active ? '#9b59b6' : 'var(--border)') + ';'
+      +     'color:' + (active ? '#9b59b6' : 'var(--text-dim)') + ';'
+      +     'font-weight:' + (active ? 'bold' : 'normal') + '">'
+      +   mult + '×</button>';
+  }).join('');
+}
+
+function resetBattle() {
+  stopAuto();
+  document.getElementById('result-banner').className = '';
+  battleState = null;
+  isRunning = false;
+  clearLog();
+  addLog('<span style="color:var(--text-dim);font-style:italic">' + T('buildArmiesStart') + '</span>');
+  renderBattlefield();
+  document.getElementById('turn-order-bar').style.display = 'none';
+}
+
+// ===================== EVENT REPLAY (live UI battle from engine log) =====================
+
+// Lookup display group by id; create lazily if engine emitted a group we don't have yet
+// (e.g. spiderlings spawned during battle).
+function ensureGroup(id) {
+  const bs = battleState;
+  if (bs.groupsById[id]) return bs.groupsById[id];
+  const tier = window.BFEngine.tierById(id);
+  if (!tier) return null;
+  const g = {
+    id: tier.id, label: tier.label, tier: tier, qty: 0,
+    maxHp: 0, currentHp: 0, aliveUnits: 0, alive: false, side: 'enemy',
+    revived: false, revivedThisRound: false, damageBuff: 1.0,
+    debuffed: false, debuffRounds: 0, attackedThisRound: false,
+  };
+  bs.groupsById[id] = g;
+  if (id === 'E9S') bs.enemies.push(g);  // spiderlings live with enemies
+  return g;
+}
+
+function applyEvent(ev) {
+  const bs = battleState;
+  const g = ev.groupId ? bs.groupsById[ev.groupId] : null;
+  const src = ev.sourceId ? (bs.groupsById[ev.sourceId] || ensureGroup(ev.sourceId)) : null;
+  const tgt = ev.targetId ? (bs.groupsById[ev.targetId] || ensureGroup(ev.targetId)) : null;
+  const atk = ev.attackerId ? (bs.groupsById[ev.attackerId] || ensureGroup(ev.attackerId)) : null;
+
+  switch (ev.type) {
+    case 'attack': {
+      if (atk) atk.attackedThisRound = true;
+      if (tgt) {
+        tgt.currentHp = ev.targetHp;
+        tgt.aliveUnits = Math.max(0, Math.ceil(tgt.currentHp / tgt.tier.hp));
+      }
+      const a = atk ? labelWithSide(atk) : ev.attackerId;
+      const t = tgt ? labelWithSide(tgt, true) : ev.targetId;
+      addLog(`<span class="log-attack">${T('attackLine', a, t, ev.damage, ev.targetHp, ev.targetMaxHp || (tgt && tgt.maxHp))}</span>`);
+      break;
+    }
+    case 'death': {
+      if (g) { g.alive = false; g.currentHp = 0; g.aliveUnits = 0; }
+      addLog(`<span class="log-death">${T('defeated', g ? g.label : ev.groupId)}</span>`);
+      break;
+    }
+    case 'revive': {
+      if (g) {
+        g.revived = true;
+        g.currentHp = ev.qty;
+        g.maxHp = ev.qty;
+        g.aliveUnits = ev.qty;
+        g.alive = true;
+        g.revivedThisRound = true;
+      }
+      addLog(`<span class="log-skill">✦ ${T('e2Revives', ev.qty)}</span>`);
+      break;
+    }
+    case 'thorns': {
+      if (atk) {
+        atk.currentHp = Math.max(0, atk.currentHp - ev.damage);
+        atk.aliveUnits = Math.max(0, Math.ceil(atk.currentHp / atk.tier.hp));
+      }
+      addLog(`<span class="log-skill">✦ ${T('e5Thorns', ev.damage, atk ? atk.label : ev.attackerId)}</span>`);
+      break;
+    }
+    case 'splash': {
+      if (tgt) {
+        tgt.currentHp = Math.max(0, tgt.currentHp - ev.damage);
+        tgt.aliveUnits = Math.max(0, Math.ceil(tgt.currentHp / tgt.tier.hp));
+      }
+      const key = ev.kind === 'liches' ? 'lichSplash' : 'witchesSplash';
+      addLog(`<span class="log-skill">✦ ${T(key, ev.damage)}</span>`);
+      break;
+    }
+    case 'overkill': {
+      if (tgt) {
+        tgt.currentHp = Math.max(0, tgt.currentHp - ev.damage);
+        tgt.aliveUnits = Math.max(0, Math.ceil(tgt.currentHp / tgt.tier.hp));
+      }
+      addLog(`<span class="log-skill">✦ ${T('rotmawsOverkill', ev.damage, tgt ? tgt.label : ev.targetId)}</span>`);
+      break;
+    }
+    case 'spawn': {
+      const spider = ensureGroup(ev.targetId);
+      if (spider) {
+        spider.qty += ev.qty;
+        spider.aliveUnits += ev.qty;
+        spider.currentHp += ev.qty * spider.tier.hp;
+        spider.maxHp += ev.qty * spider.tier.hp;
+        spider.alive = true;
+      }
+      addLog(`<span class="log-skill">✦ ${T('spawn', ev.qty)}</span>`);
+      break;
+    }
+    case 'speedDebuff': {
+      if (atk) atk.currentSpd = ev.newSpd;
+      addLog(`<span class="log-skill">✦ ${T('gargoylesDebuff', ev.newSpd)}</span>`);
+      break;
+    }
+    case 'typeAdv':
+      addLog(`<span class="log-skill">✦ ${T('typeAdv', ev.mult, ev.attacker, ev.target)}</span>`);
+      break;
+    case 'typeDisadv':
+      addLog(`<span class="log-skill">✦ ${T('typeDisadv', ev.mult, ev.attacker, ev.target)}</span>`);
+      break;
+    case 'skill': {
+      // Generic skill log: lookup by key
+      // v1.6.20 — keys whose {0} is a GROUP (not a multiplier) previously
+      // rendered "undefined" (e.g. "Tier 4 banshees: undefined attacks…").
+      const grp = id => (battleState && battleState.groupsById && battleState.groupsById[id]) || null;
+      let text;
+      if (ev.key === 't4Debuff')              text = T(ev.key, labelWithSide(grp(ev.targetId), true));
+      else if (ev.key === 'debuffedAttacker') text = T(ev.key, labelWithSide(grp(ev.attackerId), false));
+      else if (ev.key === 'cultistBuff')      text = T(ev.key, labelWithSide(grp(ev.targetId), true), ev.mult);
+      else                                    text = T(ev.key, ev.mult, ev.deaths);
+      addLog(`<span class="log-skill">✦ ${text}</span>`);
+      break;
+    }
+  }
+}
+
+function labelWithSide(group, isTarget) {
+  if (!group) return '?';
+  const cls = isTarget
+    ? (group.side === 'enemy' ? 'target' : 'ally-target')
+    : (group.side === 'ally' ? 'attacker' : 'ally-attacker');
+  return `<span class="${cls}">${group.label}</span>`;
+}
+
+function executeRound() {
+  const bs = battleState;
+  bs.round++;
+
+  // If engine had no event for this round, the battle is over
+  const roundData = bs.roundEvents[bs.round];
+  if (!roundData) {
+    finishBattle();
+    return;
+  }
+
+  addLog(`<div class="log-round">${T('roundHeader', bs.round)}</div>`);
+
+  // Reset per-round flags on display groups
+  for (const id in bs.groupsById) {
+    const g = bs.groupsById[id];
+    g.attackedThisRound = false;
+    g.revivedThisRound = false;
+  }
+
+  // Build turn order from engine order, mapped to display groups
+  const turnOrder = roundData.order
+    .map(id => bs.groupsById[id] || ensureGroup(id))
+    .filter(Boolean);
+  renderTurnOrder(turnOrder);
+
+  // Apply all events for this round
+  for (const ev of roundData.events) applyEvent(ev);
+
+  renderBattlefield();
+
+  // End check
+  const alliesAlive = bs.allies.some(g => g.alive);
+  const enemiesAlive = bs.enemies.some(g => g.alive);
+  if (!alliesAlive || !enemiesAlive || bs.round >= bs.roundEvents.length - 1) {
+    finishBattle();
+  }
+}
+
+function finishBattle() {
+  const bs = battleState;
+  bs.done = true;
+  stopAuto();
+  isRunning = false;
+  renderBattlefield();
+
+  const r = bs.finalResult;
+  if (r.draw) showResult('draw', T('draw'), T('bothFell'));
+  else if (r.victory) showResult('victory', T('victory'), T('enemiesDefeated', r.rounds));
+  else showResult('defeat', T('defeat'), T('armyDestroyed', r.rounds));
+}
+
+
+// ===================== RENDER BATTLEFIELD =====================
+function renderBattlefield() {
+  const alliesEl = document.getElementById('bf-allies');
+  const enemiesEl = document.getElementById('bf-enemies');
+  alliesEl.innerHTML = '';
+  enemiesEl.innerHTML = '';
+
+  if (!battleState) return;
+
+  battleState.allies.forEach(g => {
+    alliesEl.appendChild(createUnitEl(g, 'ally'));
+  });
+
+  battleState.enemies.forEach(g => {
+    enemiesEl.appendChild(createUnitEl(g, 'enemy'));
+  });
+}
+
+function createUnitEl(group, side) {
+  const div = document.createElement('div');
+  div.className = 'bf-unit' + (group.alive ? '' : ' dead');
+  div.id = 'unit-' + group.id;
+
+  const hpPct = group.maxHp > 0 ? Math.max(0, (group.currentHp / group.maxHp) * 100) : 0;
+  const fillClass = side === 'ally' ? 'hp-fill ally' : 'hp-fill';
+  const aliveUnits = group.alive ? (group.aliveUnits || Math.max(1, Math.ceil(group.currentHp / group.tier.hp))) : 0;
+  const totalDmg = group.tier.dmg * aliveUnits;
+  const statusBadge = group.debuffed ? '<span class="status-badge">Oslabený</span>' : '';
+  const buffBadge = group.damageBuff > 1.0 ? `<span class="status-badge" style="color:#e67e22;background:rgba(230,126,34,0.2)">+${Math.round((group.damageBuff-1)*100)}% DMG</span>` : '';
+
+  div.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:4px;flex-wrap:wrap">
+      <span class="bf-unit-name">${simUnitImg(group.id, 'bf-unit-img')}${group.label}${simShowNames() && simUnitName(group.id) ? `<span class="bf-unit-sub">${simUnitName(group.id)}</span>` : ''}</span>
+      <div style="display:flex;gap:3px;flex-wrap:wrap">${statusBadge}${buffBadge}</div>
+    </div>
+    <div style="display:flex;gap:6px;font-size:0.65rem;color:var(--text-dim);margin-bottom:3px">
+      <span style="color:var(--gold-light)">×${aliveUnits}</span>
+      <span>⚔${group.tier.dmg}<span style="color:var(--gold-light);font-size:0.6rem"> (=${totalDmg})</span></span>
+      <span>💨${group.tier.spd}</span>
+      <span class="type-badge type-${group.tier.type.trim()}" style="padding:0 4px">${group.tier.type.trim()}</span>
+      <span class="pos-badge pos-${group.tier.pos}" style="padding:0 4px">${group.tier.pos === 'Vanguard' ? 'Vanguard' : 'Rearguard'}</span>
+    </div>
+    <div class="hp-bar-wrap">
+      <div class="hp-bar"><div class="${fillClass}" style="width:${hpPct}%"></div></div>
+      <div class="hp-text">${Math.max(0, group.currentHp)} / ${group.maxHp} HP</div>
+    </div>
+  `;
+
+  return div;
+}
+
+function renderTurnOrder(groups) {
+  const bar = document.getElementById('turn-order-bar');
+  bar.style.display = 'flex';
+  bar.innerHTML = '<span style="color:var(--text-dim);font-size:0.68rem;font-family:Cinzel,serif;letter-spacing:.1em">PORADIE:</span> ';
+  groups.forEach((g, i) => {
+    const badge = document.createElement('span');
+    badge.className = 'turn-badge ' + g.side;
+    if (i === 0) badge.className += ' active';
+    badge.textContent = g.label + ' (💨' + g.tier.spd + ')';
+    badge.title = simUnitName(g.id) || g.label;
+    bar.appendChild(badge);
+    if (i < groups.length - 1) {
+      const arrow = document.createElement('span');
+      arrow.textContent = '→';
+      arrow.style.color = 'var(--text-dim)';
+      arrow.style.fontSize = '0.65rem';
+      bar.appendChild(arrow);
+    }
+  });
+}
+
+// ===================== LOG =====================
+function addLog(html) {
+  const container = document.getElementById('log-container');
+  const line = document.createElement('div');
+  line.innerHTML = html;
+  container.appendChild(line);
+  container.scrollTop = container.scrollHeight;
+}
+
+function clearLog() {
+  document.getElementById('log-container').innerHTML = '';
+}
+
+// ============================================================================
+// LOG EXPORT — copy to clipboard / download as .txt
+// ============================================================================
+// Strategy:
+//   1. Walk #log-container's children and pull textContent from each line —
+//      this drops all <span> markup and emoji-class colouring cleanly.
+//   2. Prepend a metadata block so a pasted log is self-describing:
+//        - Extension version (from manifest, hardcoded mirror here)
+//        - Local timestamp
+//        - Power limit at start of battle
+//        - Starting ally + enemy formations (compact form)
+//        - Outcome if battle has finished
+//   3. Copy: navigator.clipboard.writeText (Promise). Fallback for older
+//      browsers uses a hidden textarea + document.execCommand('copy').
+//   4. Download: Blob + URL.createObjectURL + temporary <a> element.
+
+function buildLogExportText() {
+  const container = document.getElementById('log-container');
+  if (!container) return '';
+
+  // Walk lines — each addLog() creates a <div> wrapper. The very first
+  // "Build your armies..." placeholder is a bare <span>, so we walk all
+  // direct children regardless of tag.
+  const lines = [];
+  for (const child of container.children) {
+    const txt = (child.textContent || '').trim();
+    if (txt) lines.push(txt);
+  }
+
+  // Compact formation summary (only non-zero tiers)
+  function compactQtys(qtys, tiers) {
+    const parts = [];
+    tiers.forEach(t => {
+      const q = qtys[t.id] || 0;
+      if (q > 0) parts.push(t.id + '×' + q);
+    });
+    return parts.join(' ') || '—';
+  }
+
+  // Outcome line — pull from current battleState if it ended, otherwise
+  // mark as "in progress". battleState is the live structure managed by
+  // executeRound; .done flips true when one side is wiped.
+  let outcomeLine = 'Outcome:        in progress';
+  // v1.6.20 — battleState never carried victory/draw flags, so every finished
+  // battle was exported as "DEFEAT". Read them from the engine result instead.
+  const _fr = battleState && battleState.finalResult;
+  if (battleState && battleState.done && _fr) {
+    const r = _fr.rounds || battleState.round || '?';
+    if (_fr.draw)         outcomeLine = 'Outcome:        ⚔ DRAW after ' + r + ' rounds';
+    else if (_fr.victory) outcomeLine = 'Outcome:        🏆 VICTORY after ' + r + ' rounds';
+    else                  outcomeLine = 'Outcome:        💀 DEFEAT after ' + r + ' rounds';
+  } else if (battleState && battleState.done) {
+    if (battleState.draw)      outcomeLine = 'Outcome:        ⚔ DRAW after ' + (battleState.round || '?') + ' rounds';
+    else if (battleState.victory) outcomeLine = 'Outcome:        🏆 VICTORY after ' + (battleState.round || '?') + ' rounds';
+    else                       outcomeLine = 'Outcome:        💀 DEFEAT after ' + (battleState.round || '?') + ' rounds';
+  } else if (!battleState) {
+    outcomeLine = 'Outcome:        no battle started';
+  }
+
+  const stamp = new Date();
+  const isoLocal = stamp.getFullYear()
+    + '-' + String(stamp.getMonth() + 1).padStart(2, '0')
+    + '-' + String(stamp.getDate()).padStart(2, '0')
+    + ' ' + String(stamp.getHours()).padStart(2, '0')
+    + ':' + String(stamp.getMinutes()).padStart(2, '0')
+    + ':' + String(stamp.getSeconds()).padStart(2, '0');
+
+  const header = [
+    '================================================================',
+    ' BiteFight Battle Simulator — Log Export',
+    '================================================================',
+    'Version:        v' + (function () { try { return chrome.runtime.getManifest().version; } catch (_) { return '1.6.27'; } })(),
+    'Exported:       ' + isoLocal,
+    'Power limit:    ' + (ARMY_POWER_LIMIT || '?'),
+    'Allies:         ' + compactQtys(allyQuantities, ALLY_TIERS),
+    'Enemies:        ' + compactQtys(enemyQuantities, ENEMY_TIERS),
+    outcomeLine,
+    '----------------------------------------------------------------',
+    '',
+  ].join('\n');
+
+  const body = lines.length > 0
+    ? lines.join('\n')
+    : '(log is empty — start a battle to populate it)';
+
+  return header + body + '\n';
+}
+
+function flashButton(btn, color, msg, restoreMs) {
+  if (!btn) return;
+  const orig = {
+    bg:     btn.style.background,
+    color:  btn.style.color,
+    border: btn.style.borderColor,
+    html:   btn.innerHTML,
+  };
+  btn.style.background   = color.bg;
+  btn.style.color        = color.fg;
+  btn.style.borderColor  = color.border;
+  if (msg) btn.innerHTML = msg;
+  setTimeout(() => {
+    btn.style.background   = orig.bg;
+    btn.style.color        = orig.color;
+    btn.style.borderColor  = orig.border;
+    btn.innerHTML          = orig.html;
+  }, restoreMs || 1200);
+}
+
+function copyLogToClipboard() {
+  const text = buildLogExportText();
+  const btn  = document.getElementById('btn-copy-log');
+  const ok   = { bg: 'rgba(46,204,113,0.2)',  fg: '#2ecc71', border: '#27ae60' };
+  const err  = { bg: 'rgba(231,76,60,0.2)',  fg: '#e74c3c', border: '#c0392b' };
+
+  // Preferred: async clipboard API. Requires HTTPS / extension context,
+  // which we're always in (chrome-extension://) so this path almost always
+  // succeeds. The fallback handles older browsers and any unexpected denials.
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => flashButton(btn, ok, '✓ Copied'),
+      () => fallbackCopy(text, btn, ok, err)
+    );
+    return;
+  }
+  fallbackCopy(text, btn, ok, err);
+}
+
+function fallbackCopy(text, btn, ok, err) {
+  // Old-school path: hidden textarea + execCommand('copy'). Works back to
+  // pre-Chromium browsers; the user-gesture context (button click) is what
+  // makes it permitted.
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok2 = document.execCommand('copy');
+    document.body.removeChild(ta);
+    flashButton(btn, ok2 ? ok : err, ok2 ? '✓ Copied' : '✗ Failed');
+  } catch (e) {
+    flashButton(btn, err, '✗ Failed');
+  }
+}
+
+function downloadLogAsFile() {
+  const text = buildLogExportText();
+  const btn  = document.getElementById('btn-download-log');
+  try {
+    // Filename with ISO-style local timestamp. Colons replaced with dashes
+    // because Windows file systems reject them.
+    const t = new Date();
+    const stamp = t.getFullYear()
+      + '-' + String(t.getMonth() + 1).padStart(2, '0')
+      + '-' + String(t.getDate()).padStart(2, '0')
+      + '_' + String(t.getHours()).padStart(2, '0')
+      + '-' + String(t.getMinutes()).padStart(2, '0')
+      + '-' + String(t.getSeconds()).padStart(2, '0');
+    const filename = 'bf-battle-log-' + stamp + '.txt';
+
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    // Tiny defer before revoke — some browsers race the click event.
+    setTimeout(() => URL.revokeObjectURL(url), 250);
+    flashButton(btn, { bg: 'rgba(46,204,113,0.2)', fg: '#2ecc71', border: '#27ae60' }, '✓ Saved');
+  } catch (e) {
+    flashButton(btn, { bg: 'rgba(231,76,60,0.2)', fg: '#e74c3c', border: '#c0392b' }, '✗ Failed');
+  }
+}
+
+// ===================== RESULT =====================
+function showResult(type, title, sub) {
+  const banner = document.getElementById('result-banner');
+  const box = document.getElementById('result-box');
+  document.getElementById('result-title').textContent = title;
+  document.getElementById('result-sub').textContent = sub;
+  document.getElementById('result-icon').textContent = type === 'victory' ? '🏆' : type === 'defeat' ? '💀' : '⚔';
+  box.className = 'result-box' + (type === 'defeat' ? ' defeat-box' : '');
+
+  // Calculate ally casualties + Blood Essence cost
+  const bs = battleState;
+  let totalStart = 0, totalSurvived = 0, totalEssenceLost = 0;
+
+  let rowsHtml = '';
+  bs.allies.forEach(g => {
+    const startUnits = g.qty;
+    const survivedUnits = g.alive ? (g.aliveUnits || 0) : 0;
+    const lost = startUnits - survivedUnits;
+    const essenceLost = lost * g.tier.cost;
+    totalStart += startUnits;
+    totalSurvived += survivedUnits;
+    totalEssenceLost += essenceLost;
+
+    if (startUnits === 0) return;
+    const color = lost === 0 ? '#2ecc71' : lost === startUnits ? '#e74c3c' : '#e67e22';
+    rowsHtml += `
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.04)">
+        <span style="color:var(--text-dim);min-width:55px">${g.label}</span>
+        <span style="color:${color};flex:1">${survivedUnits}/${startUnits} survived</span>
+        <span style="color:#c0392b;min-width:30px;text-align:center">${lost > 0 ? '−'+lost+' ☠' : '—'}</span>
+        <span style="color:#c9a84c;min-width:70px;text-align:right">${essenceLost > 0 ? '−'+essenceLost+' 🩸' : '<span style="color:var(--text-dim)">—</span>'}</span>
+      </div>`;
+  });
+
+  const totalLost = totalStart - totalSurvived;
+  const survPct = totalStart > 0 ? Math.round((totalSurvived / totalStart) * 100) : 0;
+
+  const statsHtml = `
+    <div style="color:var(--gold);font-family:Cinzel,serif;font-size:0.7rem;letter-spacing:.12em;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid var(--border)">
+      ⚔ ALLY LOSSES
+    </div>
+    ${rowsHtml}
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;padding-top:6px;margin-top:2px">
+      <span style="color:var(--text-dim);font-family:Cinzel,serif;font-size:0.68rem">CELKOM</span>
+      <span style="color:var(--text);flex:1">${totalSurvived}/${totalStart} <span style="color:var(--text-dim);font-size:0.7rem">(${survPct}%)</span></span>
+      <span style="color:#c0392b;min-width:30px;text-align:center">${totalLost > 0 ? '−'+totalLost+' ☠' : '—'}</span>
+      <span style="color:#f0d080;font-weight:bold;min-width:70px;text-align:right">${totalEssenceLost > 0 ? '−'+totalEssenceLost+' 🩸' : '0 🩸'}</span>
+    </div>
+    <div style="margin-top:10px;padding:8px;background:rgba(139,0,0,0.15);border:1px solid rgba(192,57,43,0.3);border-radius:3px;text-align:center">
+      <span style="color:var(--text-dim);font-size:0.7rem;font-family:Cinzel,serif;letter-spacing:.1em">TOTAL LOSSES</span><br>
+      <span style="color:#f0d080;font-family:'Cinzel Decorative',cursive;font-size:1.3rem;text-shadow:0 0 12px rgba(201,168,76,0.5)">
+        ${totalEssenceLost} Blood Essence
+      </span>
+    </div>
+  `;
+
+  document.getElementById('result-stats').innerHTML = statsHtml;
+  banner.className = 'show';
+  addLog(`<div class="log-result ${type === 'victory' ? 'victory' : 'defeat'}">${title}: ${sub} | Strata: ${totalEssenceLost} Blood Essence</div>`);
+}
+
+function closeResult() {
+  document.getElementById('result-banner').className = '';
+}
+
+// ===================== OPTIMIZER CANCELLATION =====================
+// Module-level control object created fresh at the start of every
+// runOptimizer() invocation. The Cancel button reads/writes this via the
+// helpers below. Single-thread paths poll _optCtl.cancelled at every yield;
+// parallel path additionally tracks worker handles + pending resolver fns
+// so terminate() + force-resolve can unblock Promise.all immediately.
+let _optCtl = null;
+
+function newOptControl() {
+  _optCtl = {
+    cancelled: false,
+    workers: [],          // parallel: Worker instances spawned this run
+    pendingResolvers: [], // parallel: { idx, resolve } records still awaiting 'done'
+  };
+  return _optCtl;
+}
+
+function requestOptimizerCancel() {
+  if (!_optCtl || _optCtl.cancelled) return;
+  _optCtl.cancelled = true;
+  // Tear down any spawned workers. Each worker promise is then force-resolved
+  // (instead of left dangling) so Promise.all does not hang.
+  _optCtl.workers.forEach(w => { try { w.terminate(); } catch (_) {} });
+  _optCtl.pendingResolvers.slice().forEach(rec => {
+    try { rec.resolve({ cancelled: true }); } catch (_) {}
+  });
+  _optCtl.pendingResolvers.length = 0;
+
+  // UI feedback — single-thread paths still need their next yield to fully
+  // bail out, but the user sees immediate acknowledgement here.
+  const label = document.getElementById('opt-progress-label');
+  if (label) label.textContent = '⏹ Cancelled — finalizing in-flight work…';
+  const btnLabel = document.getElementById('opt-btn-label');
+  if (btnLabel) btnLabel.textContent = '⚙ Run Optimizer';
+  showCancelBtn(false);
+}
+
+function showCancelBtn(show) {
+  const btn = document.getElementById('btn-cancel-optimizer');
+  if (btn) btn.style.display = show ? 'inline-flex' : 'none';
+}
+
+// Convenience: register a worker + its resolver in the control object.
+// Returned wrapper resolves the inner promise AND removes the record from
+// pendingResolvers so subsequent cancels do not double-fire.
+function registerWorkerPromise(worker, idx, resolve) {
+  if (!_optCtl) return resolve;
+  _optCtl.workers.push(worker);
+  const rec = { idx, resolve };
+  _optCtl.pendingResolvers.push(rec);
+  return function wrappedResolve(value) {
+    const i = _optCtl.pendingResolvers.indexOf(rec);
+    if (i >= 0) _optCtl.pendingResolvers.splice(i, 1);
+    resolve(value);
+  };
+}
+
+// ===================== OPTIMIZER =====================
+function openOptimizer() {
+  const enemyGroups = buildGroups('enemy', ENEMY_TIERS, enemyQuantities);
+  if (enemyGroups.length === 0) {
+    alert('Set up the enemy army first!');
+    return;
+  }
+  document.getElementById('optimizer-modal').style.display = 'block';
+  document.getElementById('opt-results').innerHTML = '';
+  document.getElementById('opt-progress').style.display = 'none';
+
+  // Render max-per-tier inputs
+  const maxInputsBox = document.getElementById('opt-max-inputs');
+  maxInputsBox.innerHTML = '';
+  ALLY_TIERS.filter(t => unlockedAllyTiers.has(t.id)).forEach(tier => {
+    const hardMax = Math.floor(ARMY_POWER_LIMIT / tier.power);
+    const col = document.createElement('div');
+    col.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:3px;min-width:52px';
+    col.innerHTML = `
+      <span style="font-family:Cinzel,serif;font-size:0.62rem;color:var(--gold-light)">${tier.label}</span>
+      <input type="number" id="opt-max-${tier.id}" min="0" max="${hardMax}" value="${hardMax}"
+        class="opt-max-input"
+        style="width:48px;background:var(--dark);border:1px solid var(--border);color:var(--text);font-family:Cinzel,serif;font-size:0.75rem;padding:3px 5px;border-radius:2px;text-align:center">
+      <span style="font-size:0.6rem;color:var(--text-dim)">max ${hardMax}</span>`;
+    maxInputsBox.appendChild(col);
+  });
+  // Lazy combo count: do NOT enumerate combinations on open. At high power
+  // limits with many tiers this can take seconds (e.g. layer 52, power 530,
+  // 6 tiers ≈ 1.5B combinations to enumerate). The user clicks 🔢 Calculate
+  // when they actually want the estimate. After the first manual calculation,
+  // edits to the per-tier max inputs will auto-refresh the number.
+  resetComboCountUI();
+
+  // Render strategy checkboxes based on active enemy tiers
+  const stratBox = document.getElementById('opt-strategies');
+  stratBox.innerHTML = '';
+  const hasE3 = enemyGroups.some(g => g.tier.skillId === 'E3_BUFF_ALLY');
+  if (hasE3) {
+    stratBox.innerHTML = `
+      <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+        <input type="checkbox" id="strat-kill-e3" style="margin-top:3px;accent-color:#9b59b6;cursor:pointer">
+        <span>
+          <span style="font-family:Cinzel,serif;font-size:0.72rem;color:var(--text)">☠ Kill Tier e3 in round 1</span>
+          <span style="display:block;font-size:0.68rem;color:var(--text-dim);font-style:italic">Shows only formations where E3 dies in round 1 — prevents cumulative buffing. <span style="color:#9b59b6">Greatly improves result accuracy.</span></span>
+        </span>
+      </label>`;
+  } else {
+    stratBox.innerHTML = '<span style="font-size:0.72rem;color:var(--text-dim);font-style:italic">No strategies for current enemies.</span>';
+  }
+
+  // Update parallel info text with detected hardware concurrency
+  const parallelInfo = document.getElementById('opt-parallel-info');
+  if (parallelInfo) {
+    const hw = (navigator && navigator.hardwareConcurrency) || null;
+    if (hw) {
+      const willUse = Math.max(2, Math.min(8, hw));
+      parallelInfo.textContent = `Detected ${hw} CPU cores — will use up to ${willUse} parallel workers. UI stays responsive.`;
+    } else {
+      parallelInfo.textContent = 'Split work across CPU cores. UI stays responsive during search.';
+    }
+  }
+
+  // Load smart presets and try to detect current layer (set by bot if active)
+  refreshPresetCache(function () {
+    if (window.BFPresets && window.BFPresets.loadCurrentLayer) {
+      window.BFPresets.loadCurrentLayer(function (data) {
+        if (data && data.layer) {
+          const inp = document.getElementById('opt-preset-level');
+          if (inp && (!inp.dataset.touched || inp.dataset.touched === 'false')) {
+            inp.value = String(data.layer);
+          }
+        }
+        updateSmartPresetPreview();
+      });
+    } else {
+      updateSmartPresetPreview();
+    }
+  });
+}
+
+function closeOptimizer() {
+  document.getElementById('optimizer-modal').style.display = 'none';
+}
+
+// ============================================================================
+// SMART PRESET UI (warm-start optimization)
+// ============================================================================
+
+let _presetCache = null;  // populated on optimizer open
+
+function getActiveSmartPreset() {
+  // Returns {preset, level, range} if smart preset is enabled and valid; null otherwise
+  if (!window.BFPresets) return null;
+  const enabledEl = document.getElementById('opt-preset-enabled');
+  if (!enabledEl || !enabledEl.checked) return null;
+  const levelEl = document.getElementById('opt-preset-level');
+  const level = levelEl ? parseInt(levelEl.value) || 0 : 0;
+  if (level <= 0) return null;
+  const preset = _presetCache && _presetCache[String(level)];
+  if (!preset) return null;
+  const rangeEl = document.getElementById('opt-preset-range');
+  const range = rangeEl ? parseInt(rangeEl.value) || 15 : 15;
+  return { preset: preset, level: level, range: range };
+}
+
+function updateSmartPresetPreview() {
+  const previewEl = document.getElementById('opt-preset-preview');
+  const confEl = document.getElementById('opt-preset-confidence');
+  const enabledEl = document.getElementById('opt-preset-enabled');
+  const levelEl = document.getElementById('opt-preset-level');
+  const rangeEl = document.getElementById('opt-preset-range');
+  const rangeValEl = document.getElementById('opt-preset-range-val');
+  if (!previewEl || !levelEl) return;
+
+  const level = parseInt(levelEl.value) || 0;
+  const range = parseInt(rangeEl.value) || 15;
+  if (rangeValEl) rangeValEl.textContent = '±' + range;
+
+  const preset = (_presetCache && _presetCache[String(level)]) || null;
+
+  // Confidence badge
+  if (confEl) {
+    if (!preset) {
+      confEl.textContent = '🔴 no data';
+      confEl.style.background = 'rgba(231,76,60,0.2)';
+      confEl.style.color = '#e74c3c';
+    } else {
+      const c = preset.confidence || 'yellow';
+      const cmap = {
+        red:    { bg: 'rgba(231,76,60,0.2)',  fg: '#e74c3c', label: '🔴 low' },
+        yellow: { bg: 'rgba(243,156,18,0.2)', fg: '#f39c12', label: '🟡 limited' },
+        green:  { bg: 'rgba(46,204,113,0.2)', fg: '#2ecc71', label: '🟢 verified' },
+      };
+      const m = cmap[c] || cmap.yellow;
+      confEl.textContent = m.label;
+      confEl.style.background = m.bg;
+      confEl.style.color = m.fg;
+    }
+  }
+
+  if (!preset) {
+    previewEl.innerHTML = '<span style="color:var(--text-dim);font-style:italic">No preset saved for layer ' + level + '. Click "Manage…" to add one.</span>';
+    if (enabledEl) enabledEl.checked = false;
+    return;
+  }
+
+  // Build preview text
+  const stratKillE3El = document.getElementById('strat-kill-e3');
+  const stratKillE3 = !!(stratKillE3El && stratKillE3El.checked);
+  const ranges = window.BFPresets.buildRangesFromPreset(preset, {
+    range: range,
+    enemyQtys: { ...enemyQuantities },
+    stratKillE3: stratKillE3,
+  });
+
+  let html = '';
+  if (preset.note) {
+    html += '<div style="color:var(--gold-light);font-style:italic;margin-bottom:4px">' + escapeHtml(preset.note) + '</div>';
+  }
+  const parts = [];
+  Object.keys(ranges.computed).forEach(function (tid) {
+    const c = ranges.computed[tid];
+    if (c.mode === 'auto' && c.autoMin != null) {
+      parts.push('<span style="color:#9b59b6">' + tid + ' &ge; <b>' + c.autoMin + '</b> (auto min)</span>');
+    } else if (c.mode === 'range') {
+      parts.push('<span style="color:var(--text)">' + tid + ': ' + c.min + '–' + c.max + '</span>');
+    } else if (c.mode === 'zero') {
+      parts.push('<span style="color:#7f8c8d">' + tid + ': 0 (skipped)</span>');
+    } else if (c.mode === 'auto') {
+      parts.push('<span style="color:#7f8c8d">' + tid + ': auto (needs Kill E3 R1)</span>');
+    }
+  });
+  html += parts.join('&nbsp;&nbsp;');
+  previewEl.innerHTML = html || '<span style="color:var(--text-dim);font-style:italic">Empty preset.</span>';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function refreshPresetCache(callback) {
+  if (!window.BFPresets) {
+    _presetCache = {};
+    if (callback) callback();
+    return;
+  }
+  window.BFPresets.loadPresets(function (presets) {
+    _presetCache = presets;
+    window.BFPresets.setCached(presets);
+    if (callback) callback();
+  });
+}
+
+// ============================================================================
+// PRESET MANAGER MODAL
+// ============================================================================
+
+function openPresetManager() {
+  refreshPresetCache(function () {
+    renderPresetManagerInputs();
+    renderPresetManagerTable();
+    document.getElementById('preset-manager-modal').style.display = 'block';
+    // Pre-fill level from optimizer
+    const optLevel = document.getElementById('opt-preset-level');
+    const mgrLevel = document.getElementById('pmgr-level');
+    if (optLevel && mgrLevel) mgrLevel.value = optLevel.value;
+    loadPresetIntoForm(parseInt(mgrLevel.value) || 0);
+  });
+}
+
+function closePresetManager() {
+  document.getElementById('preset-manager-modal').style.display = 'none';
+  / page). Bot.js's listener
   // catches it there. We use '*' as targetOrigin because the iframe
   // is at chrome-extension://<id> and the parent is the game's HTTPS
   // origin — a strict match would require either knowing the page's
@@ -3111,7 +6099,1232 @@ renderBuilder();
 // Qty buttons (ally & enemy): data-side, data-tier, data-delta
 document.addEventListener('click', function(e) {
   const btn = e.target.closest('.qty-btn[data-delta]');
-  if (btn) {
+  if (btn) lue) || 20;
+  ARMY_POWER_LIMIT = Math.max(1, val);
+  renderBuilder();
+}
+
+// Tier definitions come from the shared engine. simulator.js cannot exist
+// without sim_engine.js being loaded first (manifest order).
+if (typeof window === 'undefined' || !window.BFEngine) {
+  console.error('[bitefight] sim_engine.js must be loaded before simulator.js');
+}
+const ALLY_TIERS  = (window.BFEngine && window.BFEngine.ALLY_TIERS)  || [];
+const ENEMY_TIERS = (window.BFEngine && window.BFEngine.ENEMY_TIERS) || [];
+
+// ===================== STATE =====================
+let allyQuantities = {};
+let enemyQuantities = {};
+// By default all tiers unlocked; user can toggle. Last selection is persisted
+// to localStorage (LS_KEY_UNLOCK_*) and restored here on every simulator open.
+let unlockedAllyTiers, unlockedEnemyTiers;
+(function loadUnlockedFromStorage() {
+  const savedAlly  = lsGet(LS_KEY_UNLOCK_ALLY);
+  const savedEnemy = lsGet(LS_KEY_UNLOCK_ENEMY);
+  const allyIds  = new Set(ALLY_TIERS.map(t => t.id));
+  const enemyIds = new Set(ENEMY_TIERS.map(t => t.id));
+  // Accept saved value only if it is a non-empty array of known ids. Empty
+  // array would lock the user out entirely, so we fall back to defaults.
+  unlockedAllyTiers = (Array.isArray(savedAlly) && savedAlly.length > 0 && savedAlly.every(id => allyIds.has(id)))
+    ? new Set(savedAlly)
+    : new Set(ALLY_TIERS.map(t => t.id));
+  unlockedEnemyTiers = (Array.isArray(savedEnemy) && savedEnemy.length > 0 && savedEnemy.every(id => enemyIds.has(id)))
+    ? new Set(savedEnemy)
+    : new Set(ENEMY_TIERS.map(t => t.id));
+})();
+let battleState = null;
+let autoTimer = null;
+let isRunning = false;
+// Auto-play speed multiplier. Loaded from LS at startup (defaults to 1×);
+// changed via the ⏩ AUTO SPEED button row; persisted on every change.
+let autoSpeed = (function () {
+  const saved = lsGet(LS_KEY_AUTO_SPEED);
+  // Accept only known values; anything else falls back to 1×.
+  return (AUTO_SPEED_OPTIONS.indexOf(saved) >= 0) ? saved : 1;
+})();
+function currentAutoDelay() {
+  // Lower bound at 50ms — even with future user-configurable speeds this
+  // keeps the UI responsive (faster than the engine can render anyway).
+  return Math.max(50, Math.round(AUTO_BASE_DELAY_MS / autoSpeed));
+}
+
+ALLY_TIERS.forEach(t => allyQuantities[t.id] = 0);
+ENEMY_TIERS.forEach(t => enemyQuantities[t.id] = 0);
+
+// ===================== UNIT IDENTITY (v1.6.26) =====================
+// Names + artwork per race from js/unit_catalog.js (window.BFUnits).
+// The tier codes (T1…, E1…) stay the primary label everywhere; the name
+// and picture are added next to them. Context arrives from the game page
+// via bridge.js (BF_GAME_STATE.origin / .units) and is cached locally so
+// the panel keeps its look between opens.
+const LS_KEY_UNIT_CTX   = 'bf_sim_unitctx';
+const LS_KEY_SIM_RACE   = 'bf_sim_race';    // 'auto' | '1' | '2'
+const LS_KEY_SIM_NAMES  = 'bf_sim_names';   // 'both' | 'code'
+let UNIT_CTX = Object.assign({ origin: null, race: null, names: null }, lsGet(LS_KEY_UNIT_CTX) || {});
+function simRace() {
+  const ov = lsGet(LS_KEY_SIM_RACE);
+  if (ov === '1' || ov === '2') return parseInt(ov);
+  return UNIT_CTX.race || 1;
+}
+function simShowNames() { return lsGet(LS_KEY_SIM_NAMES) !== 'code'; }
+function simUnitName(id) {
+  return window.BFUnits ? window.BFUnits.name(id, simRace(), UNIT_CTX.names) : '';
+}
+function simUnitImg(id, cls) {
+  if (!window.BFUnits || !UNIT_CTX.origin) return '';
+  const url = window.BFUnits.imgUrl(id, simRace(), UNIT_CTX.origin);
+  return url ? `<img class="${cls || 'unit-img'}" src="${url}" alt="" loading="lazy" draggable="false">` : '';
+}
+function tierHeadHtml(tier, side) {
+  const nm = simShowNames() ? simUnitName(tier.id) : '';
+  return `<div class="tier-head">${simUnitImg(tier.id, 'tier-img')}<div class="tier-head-txt">`
+    + `<span class="tier-label">${tier.id}</span>`
+    + (nm ? `<span class="tier-name" title="${tier.label}">${nm}</span>` : '')
+    + `</div></div>`;
+}
+// Called by bridge.js whenever the game page pushes state
+window.setSimUnitCtx = function (origin, units) {
+  let changed = false;
+  if (origin && origin !== UNIT_CTX.origin) { UNIT_CTX.origin = origin; changed = true; }
+  if (units) {
+    if (units.race && units.race !== UNIT_CTX.race) { UNIT_CTX.race = units.race; changed = true; }
+    if (units.names && JSON.stringify(units.names) !== JSON.stringify(UNIT_CTX.names)) { UNIT_CTX.names = units.names; changed = true; }
+  }
+  if (!changed) return;
+  lsSet(LS_KEY_UNIT_CTX, UNIT_CTX);
+  refreshUnitLook();
+};
+function refreshUnitLook() {
+  renderUnitLookBar();
+  renderBuilder();
+  if (battleState) renderBattlefield();
+}
+function renderUnitLookBar() {
+  const bar = document.getElementById('unit-look-bar');
+  if (!bar) return;
+  const ov = lsGet(LS_KEY_SIM_RACE) || 'auto';
+  const auto = UNIT_CTX.race ? (window.BFUnits ? window.BFUnits.RACE_LABEL[UNIT_CTX.race] : '') : '?';
+  const mk = (v, lbl) => `<button class="ulook-btn${ov === v ? ' on' : ''}" data-ulook-race="${v}">${lbl}</button>`;
+  const names = simShowNames();
+  bar.innerHTML = `<span class="ulook-lbl">RACE:</span>${mk('auto', 'Auto (' + auto + ')')}${mk('1', '🦇 Vampire')}${mk('2', '🐺 Werewolf')}`
+    + `<span class="ulook-sep"></span><button class="ulook-btn${names ? ' on' : ''}" data-ulook-names="1" title="Show unit names next to tier codes">Names</button>`
+    + (UNIT_CTX.origin ? '' : `<span class="ulook-hint" title="Open the simulator from a game page once — artwork is loaded from the game server.">no artwork offline</span>`);
+}
+
+function toggleUnlock(side, id) {
+  const set = side === 'ally' ? unlockedAllyTiers : unlockedEnemyTiers;
+  const qtys = side === 'ally' ? allyQuantities : enemyQuantities;
+  if (set.has(id)) {
+    set.delete(id);
+    qtys[id] = 0; // reset qty when locked
+  } else {
+    set.add(id);
+  }
+  // Persist to localStorage so the next open restores this selection.
+  lsSet(side === 'ally' ? LS_KEY_UNLOCK_ALLY : LS_KEY_UNLOCK_ENEMY, [...set]);
+  renderBuilder();
+}
+
+function renderUnlockBars() {
+  // Ally
+  const allyBar = document.getElementById('ally-unlock-bar');
+  allyBar.innerHTML = '<span style="font-family:Cinzel,serif;font-size:0.62rem;color:var(--text-dim);letter-spacing:.1em;margin-right:2px">UNLOCKED:</span>';
+  ALLY_TIERS.forEach(tier => {
+    const unlocked = unlockedAllyTiers.has(tier.id);
+    const btn = document.createElement('button');
+    btn.textContent = tier.label;
+    btn.title = unlocked ? 'Klikni na zamknutie' : 'Klikni na odomknutie';
+    btn.style.cssText = `
+      font-family:Cinzel,serif;font-size:0.65rem;padding:2px 9px;border-radius:10px;cursor:pointer;
+      transition:all 0.15s;border:1px solid;
+      background:${unlocked ? 'rgba(201,168,76,0.15)' : 'rgba(255,255,255,0.03)'};
+      color:${unlocked ? 'var(--gold-light)' : 'var(--text-dim)'};
+      border-color:${unlocked ? 'var(--gold)' : '#2a1218'};
+    `;
+    btn.onclick = () => toggleUnlock('ally', tier.id);
+    allyBar.appendChild(btn);
+  });
+
+  // Enemy
+  const enemyBar = document.getElementById('enemy-unlock-bar');
+  enemyBar.innerHTML = '<span style="font-family:Cinzel,serif;font-size:0.62rem;color:var(--text-dim);letter-spacing:.1em;margin-right:2px">UNLOCKED:</span>';
+  ENEMY_TIERS.forEach(tier => {
+    const unlocked = unlockedEnemyTiers.has(tier.id);
+    const btn = document.createElement('button');
+    btn.textContent = tier.label;
+    btn.title = unlocked ? 'Klikni na zamknutie' : 'Klikni na odomknutie';
+    btn.style.cssText = `
+      font-family:Cinzel,serif;font-size:0.65rem;padding:2px 9px;border-radius:10px;cursor:pointer;
+      transition:all 0.15s;border:1px solid;
+      background:${unlocked ? 'rgba(192,57,43,0.15)' : 'rgba(255,255,255,0.03)'};
+      color:${unlocked ? '#e74c3c' : 'var(--text-dim)'};
+      border-color:${unlocked ? 'var(--crimson)' : '#2a1218'};
+    `;
+    btn.onclick = () => toggleUnlock('enemy', tier.id);
+    enemyBar.appendChild(btn);
+  });
+}
+
+// ===================== RENDER BUILDER =====================
+function renderBuilder() {
+  renderUnlockBars();
+  renderAllyTiers();
+  renderEnemyTiers();
+  updatePower();
+}
+
+function renderAllyTiers() {
+  const container = document.getElementById('ally-tiers');
+  container.innerHTML = '';
+  ALLY_TIERS.filter(tier => unlockedAllyTiers.has(tier.id)).forEach(tier => {
+    const qty = allyQuantities[tier.id];
+    const div = document.createElement('div');
+    div.className = 'tier-card' + (qty > 0 ? ' selected' : '');
+    div.innerHTML = `
+      ${tierHeadHtml(tier, 'ally')}
+      <div class="tier-info-row">
+        <span class="stat-badge">⚔<span class="val">${tier.dmg}</span></span>
+        <span class="stat-badge">❤<span class="val">${tier.hp}</span></span>
+        <span class="stat-badge">💨<span class="val">${tier.spd}</span></span>
+        <span class="stat-badge">⚡<span class="val">${tier.power}</span></span>
+        <span class="stat-badge" style="color:#c9a84c">🩸<span class="val" style="color:#f0d080">${tier.cost}</span></span>
+        <span class="type-badge type-${tier.type}">${tier.type}</span>
+        <span class="pos-badge pos-${tier.pos}">${tier.pos === 'Vanguard' ? 'Vanguard' : 'Rearguard'}</span>
+        <span class="skill-icon">?<span class="tooltip">${tier.skill}</span></span>
+      </div>
+      <div class="qty-control">
+        <button class="qty-btn" data-side="ally" data-tier="${tier.id}" data-delta="-10" style="font-size:0.6rem;padding:0 4px">−10</button>
+        <button class="qty-btn" data-side="ally" data-tier="${tier.id}" data-delta="-1">−</button>
+        <input type="number" class="qty-input" min="0" value="${qty}"
+          data-side="ally" data-tier="${tier.id}">
+        <button class="qty-btn" data-side="ally" data-tier="${tier.id}" data-delta="1">+</button>
+        <button class="qty-btn" data-side="ally" data-tier="${tier.id}" data-delta="10" style="font-size:0.6rem;padding:0 4px">+10</button>
+      </div>
+      <div class="skill-tip">${tier.skill}</div>
+    `;
+    container.appendChild(div);
+  });
+}
+
+function renderEnemyTiers() {
+  const container = document.getElementById('enemy-tiers');
+  container.innerHTML = '';
+  ENEMY_TIERS.filter(tier => unlockedEnemyTiers.has(tier.id)).forEach(tier => {
+    const qty = enemyQuantities[tier.id];
+    const div = document.createElement('div');
+    div.className = 'tier-card' + (qty > 0 ? ' enemy-selected' : '');
+    div.innerHTML = `
+      ${tierHeadHtml(tier, 'enemy')}
+      <div class="tier-info-row">
+        <span class="stat-badge">⚔<span class="val">${tier.dmg}</span></span>
+        <span class="stat-badge">❤<span class="val">${tier.hp}</span></span>
+        <span class="stat-badge">💨<span class="val">${tier.spd}</span></span>
+        <span class="type-badge type-${tier.type.trim()}">${tier.type.trim()}</span>
+        <span class="pos-badge pos-${tier.pos}">${tier.pos === 'Vanguard' ? 'Vanguard' : 'Rearguard'}</span>
+        <span class="skill-icon">?<span class="tooltip">${tier.skill}</span></span>
+      </div>
+      <div class="qty-control">
+        <button class="qty-btn" data-side="enemy" data-tier="${tier.id}" data-delta="-10" style="font-size:0.6rem;padding:0 4px">−10</button>
+        <button class="qty-btn" data-side="enemy" data-tier="${tier.id}" data-delta="-1">−</button>
+        <input type="number" class="qty-input" min="0" value="${qty}"
+          data-side="enemy" data-tier="${tier.id}">
+        <button class="qty-btn" data-side="enemy" data-tier="${tier.id}" data-delta="1">+</button>
+        <button class="qty-btn" data-side="enemy" data-tier="${tier.id}" data-delta="10" style="font-size:0.6rem;padding:0 4px">+10</button>
+      </div>
+      <div class="skill-tip">${tier.skill}</div>
+    `;
+    container.appendChild(div);
+  });
+}
+
+// Input typing — only save value, NO re-render (keeps focus)
+function qtyInputChange(side, id, input) {
+  const val = Math.max(0, parseInt(input.value) || 0);
+  if (side === 'ally') {
+    const tier = ALLY_TIERS.find(t => t.id === id);
+    const powerWithout = getAllyPower() - (allyQuantities[id] || 0) * tier.power;
+    const maxAllowed = Math.floor((ARMY_POWER_LIMIT - powerWithout) / tier.power) + (allyQuantities[id] || 0);
+    allyQuantities[id] = Math.min(val, Math.max(0, maxAllowed));
+  } else {
+    enemyQuantities[id] = val;
+  }
+  updatePower(); // update power bar without re-rendering tier cards
+}
+
+// On blur — sync input display value and re-render
+function qtyInputBlur(side, id, input) {
+  const stored = side === 'ally' ? (allyQuantities[id] || 0) : (enemyQuantities[id] || 0);
+  input.value = stored; // correct display if clamped
+  renderBuilder();
+}
+
+function changeQty(side, id, delta) {
+  if (side === 'ally') {
+    const tier = ALLY_TIERS.find(t => t.id === id);
+    const currentPower = getAllyPower() - (allyQuantities[id] || 0) * tier.power;
+    const maxAllowed = Math.floor((ARMY_POWER_LIMIT - currentPower) / tier.power);
+    const newVal = Math.max(0, Math.min((allyQuantities[id] || 0) + delta, maxAllowed));
+    allyQuantities[id] = newVal;
+  } else {
+    enemyQuantities[id] = Math.max(0, (enemyQuantities[id] || 0) + delta);
+  }
+  renderBuilder();
+}
+
+function getAllyPower() {
+  return ALLY_TIERS.reduce((sum, t) => sum + (allyQuantities[t.id] || 0) * t.power, 0);
+}
+
+function updatePower() {
+  const p = getAllyPower();
+  const pct = Math.min(100, (p / ARMY_POWER_LIMIT) * 100);
+  document.getElementById('ally-power-fill').style.width = pct + '%';
+  document.getElementById('ally-power-text').textContent = `${p} / ${ARMY_POWER_LIMIT}`;
+}
+
+// ===================== BATTLE ENGINE =====================
+function buildGroups(side, tierDefs, quantities) {
+  const groups = [];
+  tierDefs.forEach(tier => {
+    const qty = (quantities[tier.id] || 0);
+    if (qty === 0) return;
+    groups.push({
+      id: tier.id,
+      label: tier.label,
+      tier: tier,
+      qty: qty,
+      maxHp: tier.hp * qty,
+      currentHp: tier.hp * qty,
+      aliveUnits: qty,
+      alive: true,
+      side: side,
+      revived: false,
+      revivedThisRound: false,
+      revivedByAttackerId: null,
+      damageBuff: 1.0,
+      debuffed: false,
+      debuffRounds: 0,
+      attackedThisRound: false,
+    });
+  });
+  return groups;
+}
+
+function startBattle() {
+  stopAuto();
+  const allyGroups = buildGroups('ally', ALLY_TIERS, allyQuantities);
+  const enemyGroups = buildGroups('enemy', ENEMY_TIERS, enemyQuantities);
+
+  if (allyGroups.length === 0 || enemyGroups.length === 0) {
+    addLog('<span style="color:var(--crimson)">' + T('addUnitsBothSides') + '</span>');
+    return;
+  }
+
+  // Run the full simulation up-front via the shared engine.
+  // The UI then "replays" the resulting event log round-by-round for animation.
+  // earlyTermination is disabled here so the user sees the full battle even
+  // when it's a slow loss or stalemate — the optimizer path uses default ON.
+  const engineResult = window.BFEngine.simulate(allyQuantities, enemyQuantities, {
+    randomTarget: true,  // live UI uses random E3 target (matches Python v6)
+    collectLog: true,
+    maxRounds: 50,
+    earlyTermination: false,
+  });
+
+  if (!engineResult) {
+    addLog('<span style="color:var(--crimson)">Engine error</span>');
+    return;
+  }
+
+  // Save snapshot of this MANUAL simulation to history (last 3 are kept).
+  // Optimizer-driven batch simulations go through BFEngine directly and never
+  // reach startBattle(), so they correctly don't pollute the history.
+  pushHistory(allyQuantities, enemyQuantities, ARMY_POWER_LIMIT, engineResult);
+
+  // Group events by round for replay
+  const roundEvents = [];
+  let currentRound = -1;
+  for (const ev of engineResult.log) {
+    if (ev.type === 'roundStart') {
+      currentRound = ev.round;
+      roundEvents[currentRound] = { order: ev.order, events: [] };
+    } else if (currentRound >= 0 && ev.type !== 'battleStart' && ev.type !== 'battleEnd') {
+      roundEvents[currentRound].events.push(ev);
+    }
+  }
+
+  battleState = {
+    allies: allyGroups,
+    enemies: enemyGroups,
+    groupsById: {},
+    round: 0,
+    done: false,
+    roundEvents: roundEvents,
+    finalResult: engineResult,
+  };
+  // Build id lookup. Note: spiderlings (E9S) may appear later via spawn event.
+  [...allyGroups, ...enemyGroups].forEach(g => { battleState.groupsById[g.id] = g; });
+
+  clearLog();
+  addLog(`<span class="log-round">${T('battleBegins')}</span>`);
+  renderBattlefield();
+  isRunning = true;
+}
+
+function stepBattle() {
+  if (!battleState || battleState.done) { startBattle(); return; }
+  if (!isRunning) isRunning = true;
+  executeRound();
+}
+
+function autoPlay() {
+  if (!battleState || battleState.done) { startBattle(); }
+  stopAuto();
+  autoTimer = setInterval(() => {
+    if (!battleState || battleState.done) { stopAuto(); return; }
+    executeRound();
+  }, currentAutoDelay());
+}
+
+function stopAuto() {
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+}
+
+// ============================================================================
+// AUTO-PLAY SPEED CONTROL
+// ============================================================================
+// setAutoSpeed updates the multiplier, persists it, re-renders the button
+// row, and — if Auto is currently running — restarts the interval at the
+// new cadence so the user sees the change immediately. Called from the
+// click delegate when a speed button is pressed.
+function setAutoSpeed(mult) {
+  if (AUTO_SPEED_OPTIONS.indexOf(mult) < 0) return; // ignore garbage
+  autoSpeed = mult;
+  lsSet(LS_KEY_AUTO_SPEED, mult);
+  renderSpeedButtons();
+  // If Auto is running, restart with the new delay. We don't simply mutate
+  // the existing setInterval cadence (setInterval has no runtime adjust API)
+  // so a fresh interval is the cleanest way to apply the change without
+  // dropping or duplicating a round.
+  if (autoTimer) {
+    stopAuto();
+    autoTimer = setInterval(() => {
+      if (!battleState || battleState.done) { stopAuto(); return; }
+      executeRound();
+    }, currentAutoDelay());
+  }
+}
+
+function renderSpeedButtons() {
+  const host = document.getElementById('speed-buttons');
+  if (!host) return;
+  host.innerHTML = AUTO_SPEED_OPTIONS.map(mult => {
+    const active = (mult === autoSpeed);
+    return ''
+      + '<button class="auto-speed-btn" data-speed="' + mult + '" '
+      +   'title="' + Math.round(AUTO_BASE_DELAY_MS / mult) + ' ms per round" '
+      +   'style="font-family:Cinzel,serif;font-size:0.62rem;'
+      +     'padding:2px 9px;border-radius:10px;cursor:pointer;'
+      +     'background:' + (active ? 'rgba(155,89,182,0.25)' : 'rgba(255,255,255,0.03)') + ';'
+      +     'border:1px solid ' + (active ? '#9b59b6' : 'var(--border)') + ';'
+      +     'color:' + (active ? '#9b59b6' : 'var(--text-dim)') + ';'
+      +     'font-weight:' + (active ? 'bold' : 'normal') + '">'
+      +   mult + '×</button>';
+  }).join('');
+}
+
+function resetBattle() {
+  stopAuto();
+  document.getElementById('result-banner').className = '';
+  battleState = null;
+  isRunning = false;
+  clearLog();
+  addLog('<span style="color:var(--text-dim);font-style:italic">' + T('buildArmiesStart') + '</span>');
+  renderBattlefield();
+  document.getElementById('turn-order-bar').style.display = 'none';
+}
+
+// ===================== EVENT REPLAY (live UI battle from engine log) =====================
+
+// Lookup display group by id; create lazily if engine emitted a group we don't have yet
+// (e.g. spiderlings spawned during battle).
+function ensureGroup(id) {
+  const bs = battleState;
+  if (bs.groupsById[id]) return bs.groupsById[id];
+  const tier = window.BFEngine.tierById(id);
+  if (!tier) return null;
+  const g = {
+    id: tier.id, label: tier.label, tier: tier, qty: 0,
+    maxHp: 0, currentHp: 0, aliveUnits: 0, alive: false, side: 'enemy',
+    revived: false, revivedThisRound: false, damageBuff: 1.0,
+    debuffed: false, debuffRounds: 0, attackedThisRound: false,
+  };
+  bs.groupsById[id] = g;
+  if (id === 'E9S') bs.enemies.push(g);  // spiderlings live with enemies
+  return g;
+}
+
+function applyEvent(ev) {
+  const bs = battleState;
+  const g = ev.groupId ? bs.groupsById[ev.groupId] : null;
+  const src = ev.sourceId ? (bs.groupsById[ev.sourceId] || ensureGroup(ev.sourceId)) : null;
+  const tgt = ev.targetId ? (bs.groupsById[ev.targetId] || ensureGroup(ev.targetId)) : null;
+  const atk = ev.attackerId ? (bs.groupsById[ev.attackerId] || ensureGroup(ev.attackerId)) : null;
+
+  switch (ev.type) {
+    case 'attack': {
+      if (atk) atk.attackedThisRound = true;
+      if (tgt) {
+        tgt.currentHp = ev.targetHp;
+        tgt.aliveUnits = Math.max(0, Math.ceil(tgt.currentHp / tgt.tier.hp));
+      }
+      const a = atk ? labelWithSide(atk) : ev.attackerId;
+      const t = tgt ? labelWithSide(tgt, true) : ev.targetId;
+      addLog(`<span class="log-attack">${T('attackLine', a, t, ev.damage, ev.targetHp, ev.targetMaxHp || (tgt && tgt.maxHp))}</span>`);
+      break;
+    }
+    case 'death': {
+      if (g) { g.alive = false; g.currentHp = 0; g.aliveUnits = 0; }
+      addLog(`<span class="log-death">${T('defeated', g ? g.label : ev.groupId)}</span>`);
+      break;
+    }
+    case 'revive': {
+      if (g) {
+        g.revived = true;
+        g.currentHp = ev.qty;
+        g.maxHp = ev.qty;
+        g.aliveUnits = ev.qty;
+        g.alive = true;
+        g.revivedThisRound = true;
+      }
+      addLog(`<span class="log-skill">✦ ${T('e2Revives', ev.qty)}</span>`);
+      break;
+    }
+    case 'thorns': {
+      if (atk) {
+        atk.currentHp = Math.max(0, atk.currentHp - ev.damage);
+        atk.aliveUnits = Math.max(0, Math.ceil(atk.currentHp / atk.tier.hp));
+      }
+      addLog(`<span class="log-skill">✦ ${T('e5Thorns', ev.damage, atk ? atk.label : ev.attackerId)}</span>`);
+      break;
+    }
+    case 'splash': {
+      if (tgt) {
+        tgt.currentHp = Math.max(0, tgt.currentHp - ev.damage);
+        tgt.aliveUnits = Math.max(0, Math.ceil(tgt.currentHp / tgt.tier.hp));
+      }
+      const key = ev.kind === 'liches' ? 'lichSplash' : 'witchesSplash';
+      addLog(`<span class="log-skill">✦ ${T(key, ev.damage)}</span>`);
+      break;
+    }
+    case 'overkill': {
+      if (tgt) {
+        tgt.currentHp = Math.max(0, tgt.currentHp - ev.damage);
+        tgt.aliveUnits = Math.max(0, Math.ceil(tgt.currentHp / tgt.tier.hp));
+      }
+      addLog(`<span class="log-skill">✦ ${T('rotmawsOverkill', ev.damage, tgt ? tgt.label : ev.targetId)}</span>`);
+      break;
+    }
+    case 'spawn': {
+      const spider = ensureGroup(ev.targetId);
+      if (spider) {
+        spider.qty += ev.qty;
+        spider.aliveUnits += ev.qty;
+        spider.currentHp += ev.qty * spider.tier.hp;
+        spider.maxHp += ev.qty * spider.tier.hp;
+        spider.alive = true;
+      }
+      addLog(`<span class="log-skill">✦ ${T('spawn', ev.qty)}</span>`);
+      break;
+    }
+    case 'speedDebuff': {
+      if (atk) atk.currentSpd = ev.newSpd;
+      addLog(`<span class="log-skill">✦ ${T('gargoylesDebuff', ev.newSpd)}</span>`);
+      break;
+    }
+    case 'typeAdv':
+      addLog(`<span class="log-skill">✦ ${T('typeAdv', ev.mult, ev.attacker, ev.target)}</span>`);
+      break;
+    case 'typeDisadv':
+      addLog(`<span class="log-skill">✦ ${T('typeDisadv', ev.mult, ev.attacker, ev.target)}</span>`);
+      break;
+    case 'skill': {
+      // Generic skill log: lookup by key
+      // v1.6.20 — keys whose {0} is a GROUP (not a multiplier) previously
+      // rendered "undefined" (e.g. "Tier 4 banshees: undefined attacks…").
+      const grp = id => (battleState && battleState.groupsById && battleState.groupsById[id]) || null;
+      let text;
+      if (ev.key === 't4Debuff')              text = T(ev.key, labelWithSide(grp(ev.targetId), true));
+      else if (ev.key === 'debuffedAttacker') text = T(ev.key, labelWithSide(grp(ev.attackerId), false));
+      else if (ev.key === 'cultistBuff')      text = T(ev.key, labelWithSide(grp(ev.targetId), true), ev.mult);
+      else                                    text = T(ev.key, ev.mult, ev.deaths);
+      addLog(`<span class="log-skill">✦ ${text}</span>`);
+      break;
+    }
+  }
+}
+
+function labelWithSide(group, isTarget) {
+  if (!group) return '?';
+  const cls = isTarget
+    ? (group.side === 'enemy' ? 'target' : 'ally-target')
+    : (group.side === 'ally' ? 'attacker' : 'ally-attacker');
+  return `<span class="${cls}">${group.label}</span>`;
+}
+
+function executeRound() {
+  const bs = battleState;
+  bs.round++;
+
+  // If engine had no event for this round, the battle is over
+  const roundData = bs.roundEvents[bs.round];
+  if (!roundData) {
+    finishBattle();
+    return;
+  }
+
+  addLog(`<div class="log-round">${T('roundHeader', bs.round)}</div>`);
+
+  // Reset per-round flags on display groups
+  for (const id in bs.groupsById) {
+    const g = bs.groupsById[id];
+    g.attackedThisRound = false;
+    g.revivedThisRound = false;
+  }
+
+  // Build turn order from engine order, mapped to display groups
+  const turnOrder = roundData.order
+    .map(id => bs.groupsById[id] || ensureGroup(id))
+    .filter(Boolean);
+  renderTurnOrder(turnOrder);
+
+  // Apply all events for this round
+  for (const ev of roundData.events) applyEvent(ev);
+
+  renderBattlefield();
+
+  // End check
+  const alliesAlive = bs.allies.some(g => g.alive);
+  const enemiesAlive = bs.enemies.some(g => g.alive);
+  if (!alliesAlive || !enemiesAlive || bs.round >= bs.roundEvents.length - 1) {
+    finishBattle();
+  }
+}
+
+function finishBattle() {
+  const bs = battleState;
+  bs.done = true;
+  stopAuto();
+  isRunning = false;
+  renderBattlefield();
+
+  const r = bs.finalResult;
+  if (r.draw) showResult('draw', T('draw'), T('bothFell'));
+  else if (r.victory) showResult('victory', T('victory'), T('enemiesDefeated', r.rounds));
+  else showResult('defeat', T('defeat'), T('armyDestroyed', r.rounds));
+}
+
+
+// ===================== RENDER BATTLEFIELD =====================
+function renderBattlefield() {
+  const alliesEl = document.getElementById('bf-allies');
+  const enemiesEl = document.getElementById('bf-enemies');
+  alliesEl.innerHTML = '';
+  enemiesEl.innerHTML = '';
+
+  if (!battleState) return;
+
+  battleState.allies.forEach(g => {
+    alliesEl.appendChild(createUnitEl(g, 'ally'));
+  });
+
+  battleState.enemies.forEach(g => {
+    enemiesEl.appendChild(createUnitEl(g, 'enemy'));
+  });
+}
+
+function createUnitEl(group, side) {
+  const div = document.createElement('div');
+  div.className = 'bf-unit' + (group.alive ? '' : ' dead');
+  div.id = 'unit-' + group.id;
+
+  const hpPct = group.maxHp > 0 ? Math.max(0, (group.currentHp / group.maxHp) * 100) : 0;
+  const fillClass = side === 'ally' ? 'hp-fill ally' : 'hp-fill';
+  const aliveUnits = group.alive ? (group.aliveUnits || Math.max(1, Math.ceil(group.currentHp / group.tier.hp))) : 0;
+  const totalDmg = group.tier.dmg * aliveUnits;
+  const statusBadge = group.debuffed ? '<span class="status-badge">Oslabený</span>' : '';
+  const buffBadge = group.damageBuff > 1.0 ? `<span class="status-badge" style="color:#e67e22;background:rgba(230,126,34,0.2)">+${Math.round((group.damageBuff-1)*100)}% DMG</span>` : '';
+
+  div.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:4px;flex-wrap:wrap">
+      <span class="bf-unit-name">${simUnitImg(group.id, 'bf-unit-img')}${group.label}${simShowNames() && simUnitName(group.id) ? `<span class="bf-unit-sub">${simUnitName(group.id)}</span>` : ''}</span>
+      <div style="display:flex;gap:3px;flex-wrap:wrap">${statusBadge}${buffBadge}</div>
+    </div>
+    <div style="display:flex;gap:6px;font-size:0.65rem;color:var(--text-dim);margin-bottom:3px">
+      <span style="color:var(--gold-light)">×${aliveUnits}</span>
+      <span>⚔${group.tier.dmg}<span style="color:var(--gold-light);font-size:0.6rem"> (=${totalDmg})</span></span>
+      <span>💨${group.tier.spd}</span>
+      <span class="type-badge type-${group.tier.type.trim()}" style="padding:0 4px">${group.tier.type.trim()}</span>
+      <span class="pos-badge pos-${group.tier.pos}" style="padding:0 4px">${group.tier.pos === 'Vanguard' ? 'Vanguard' : 'Rearguard'}</span>
+    </div>
+    <div class="hp-bar-wrap">
+      <div class="hp-bar"><div class="${fillClass}" style="width:${hpPct}%"></div></div>
+      <div class="hp-text">${Math.max(0, group.currentHp)} / ${group.maxHp} HP</div>
+    </div>
+  `;
+
+  return div;
+}
+
+function renderTurnOrder(groups) {
+  const bar = document.getElementById('turn-order-bar');
+  bar.style.display = 'flex';
+  bar.innerHTML = '<span style="color:var(--text-dim);font-size:0.68rem;font-family:Cinzel,serif;letter-spacing:.1em">PORADIE:</span> ';
+  groups.forEach((g, i) => {
+    const badge = document.createElement('span');
+    badge.className = 'turn-badge ' + g.side;
+    if (i === 0) badge.className += ' active';
+    badge.textContent = g.label + ' (💨' + g.tier.spd + ')';
+    badge.title = simUnitName(g.id) || g.label;
+    bar.appendChild(badge);
+    if (i < groups.length - 1) {
+      const arrow = document.createElement('span');
+      arrow.textContent = '→';
+      arrow.style.color = 'var(--text-dim)';
+      arrow.style.fontSize = '0.65rem';
+      bar.appendChild(arrow);
+    }
+  });
+}
+
+// ===================== LOG =====================
+function addLog(html) {
+  const container = document.getElementById('log-container');
+  const line = document.createElement('div');
+  line.innerHTML = html;
+  container.appendChild(line);
+  container.scrollTop = container.scrollHeight;
+}
+
+function clearLog() {
+  document.getElementById('log-container').innerHTML = '';
+}
+
+// ============================================================================
+// LOG EXPORT — copy to clipboard / download as .txt
+// ============================================================================
+// Strategy:
+//   1. Walk #log-container's children and pull textContent from each line —
+//      this drops all <span> markup and emoji-class colouring cleanly.
+//   2. Prepend a metadata block so a pasted log is self-describing:
+//        - Extension version (from manifest, hardcoded mirror here)
+//        - Local timestamp
+//        - Power limit at start of battle
+//        - Starting ally + enemy formations (compact form)
+//        - Outcome if battle has finished
+//   3. Copy: navigator.clipboard.writeText (Promise). Fallback for older
+//      browsers uses a hidden textarea + document.execCommand('copy').
+//   4. Download: Blob + URL.createObjectURL + temporary <a> element.
+
+function buildLogExportText() {
+  const container = document.getElementById('log-container');
+  if (!container) return '';
+
+  // Walk lines — each addLog() creates a <div> wrapper. The very first
+  // "Build your armies..." placeholder is a bare <span>, so we walk all
+  // direct children regardless of tag.
+  const lines = [];
+  for (const child of container.children) {
+    const txt = (child.textContent || '').trim();
+    if (txt) lines.push(txt);
+  }
+
+  // Compact formation summary (only non-zero tiers)
+  function compactQtys(qtys, tiers) {
+    const parts = [];
+    tiers.forEach(t => {
+      const q = qtys[t.id] || 0;
+      if (q > 0) parts.push(t.id + '×' + q);
+    });
+    return parts.join(' ') || '—';
+  }
+
+  // Outcome line — pull from current battleState if it ended, otherwise
+  // mark as "in progress". battleState is the live structure managed by
+  // executeRound; .done flips true when one side is wiped.
+  let outcomeLine = 'Outcome:        in progress';
+  // v1.6.20 — battleState never carried victory/draw flags, so every finished
+  // battle was exported as "DEFEAT". Read them from the engine result instead.
+  const _fr = battleState && battleState.finalResult;
+  if (battleState && battleState.done && _fr) {
+    const r = _fr.rounds || battleState.round || '?';
+    if (_fr.draw)         outcomeLine = 'Outcome:        ⚔ DRAW after ' + r + ' rounds';
+    else if (_fr.victory) outcomeLine = 'Outcome:        🏆 VICTORY after ' + r + ' rounds';
+    else                  outcomeLine = 'Outcome:        💀 DEFEAT after ' + r + ' rounds';
+  } else if (battleState && battleState.done) {
+    if (battleState.draw)      outcomeLine = 'Outcome:        ⚔ DRAW after ' + (battleState.round || '?') + ' rounds';
+    else if (battleState.victory) outcomeLine = 'Outcome:        🏆 VICTORY after ' + (battleState.round || '?') + ' rounds';
+    else                       outcomeLine = 'Outcome:        💀 DEFEAT after ' + (battleState.round || '?') + ' rounds';
+  } else if (!battleState) {
+    outcomeLine = 'Outcome:        no battle started';
+  }
+
+  const stamp = new Date();
+  const isoLocal = stamp.getFullYear()
+    + '-' + String(stamp.getMonth() + 1).padStart(2, '0')
+    + '-' + String(stamp.getDate()).padStart(2, '0')
+    + ' ' + String(stamp.getHours()).padStart(2, '0')
+    + ':' + String(stamp.getMinutes()).padStart(2, '0')
+    + ':' + String(stamp.getSeconds()).padStart(2, '0');
+
+  const header = [
+    '================================================================',
+    ' BiteFight Battle Simulator — Log Export',
+    '================================================================',
+    'Version:        v' + (function () { try { return chrome.runtime.getManifest().version; } catch (_) { return '1.6.27'; } })(),
+    'Exported:       ' + isoLocal,
+    'Power limit:    ' + (ARMY_POWER_LIMIT || '?'),
+    'Allies:         ' + compactQtys(allyQuantities, ALLY_TIERS),
+    'Enemies:        ' + compactQtys(enemyQuantities, ENEMY_TIERS),
+    outcomeLine,
+    '----------------------------------------------------------------',
+    '',
+  ].join('\n');
+
+  const body = lines.length > 0
+    ? lines.join('\n')
+    : '(log is empty — start a battle to populate it)';
+
+  return header + body + '\n';
+}
+
+function flashButton(btn, color, msg, restoreMs) {
+  if (!btn) return;
+  const orig = {
+    bg:     btn.style.background,
+    color:  btn.style.color,
+    border: btn.style.borderColor,
+    html:   btn.innerHTML,
+  };
+  btn.style.background   = color.bg;
+  btn.style.color        = color.fg;
+  btn.style.borderColor  = color.border;
+  if (msg) btn.innerHTML = msg;
+  setTimeout(() => {
+    btn.style.background   = orig.bg;
+    btn.style.color        = orig.color;
+    btn.style.borderColor  = orig.border;
+    btn.innerHTML          = orig.html;
+  }, restoreMs || 1200);
+}
+
+function copyLogToClipboard() {
+  const text = buildLogExportText();
+  const btn  = document.getElementById('btn-copy-log');
+  const ok   = { bg: 'rgba(46,204,113,0.2)',  fg: '#2ecc71', border: '#27ae60' };
+  const err  = { bg: 'rgba(231,76,60,0.2)',  fg: '#e74c3c', border: '#c0392b' };
+
+  // Preferred: async clipboard API. Requires HTTPS / extension context,
+  // which we're always in (chrome-extension://) so this path almost always
+  // succeeds. The fallback handles older browsers and any unexpected denials.
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => flashButton(btn, ok, '✓ Copied'),
+      () => fallbackCopy(text, btn, ok, err)
+    );
+    return;
+  }
+  fallbackCopy(text, btn, ok, err);
+}
+
+function fallbackCopy(text, btn, ok, err) {
+  // Old-school path: hidden textarea + execCommand('copy'). Works back to
+  // pre-Chromium browsers; the user-gesture context (button click) is what
+  // makes it permitted.
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok2 = document.execCommand('copy');
+    document.body.removeChild(ta);
+    flashButton(btn, ok2 ? ok : err, ok2 ? '✓ Copied' : '✗ Failed');
+  } catch (e) {
+    flashButton(btn, err, '✗ Failed');
+  }
+}
+
+function downloadLogAsFile() {
+  const text = buildLogExportText();
+  const btn  = document.getElementById('btn-download-log');
+  try {
+    // Filename with ISO-style local timestamp. Colons replaced with dashes
+    // because Windows file systems reject them.
+    const t = new Date();
+    const stamp = t.getFullYear()
+      + '-' + String(t.getMonth() + 1).padStart(2, '0')
+      + '-' + String(t.getDate()).padStart(2, '0')
+      + '_' + String(t.getHours()).padStart(2, '0')
+      + '-' + String(t.getMinutes()).padStart(2, '0')
+      + '-' + String(t.getSeconds()).padStart(2, '0');
+    const filename = 'bf-battle-log-' + stamp + '.txt';
+
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    // Tiny defer before revoke — some browsers race the click event.
+    setTimeout(() => URL.revokeObjectURL(url), 250);
+    flashButton(btn, { bg: 'rgba(46,204,113,0.2)', fg: '#2ecc71', border: '#27ae60' }, '✓ Saved');
+  } catch (e) {
+    flashButton(btn, { bg: 'rgba(231,76,60,0.2)', fg: '#e74c3c', border: '#c0392b' }, '✗ Failed');
+  }
+}
+
+// ===================== RESULT =====================
+function showResult(type, title, sub) {
+  const banner = document.getElementById('result-banner');
+  const box = document.getElementById('result-box');
+  document.getElementById('result-title').textContent = title;
+  document.getElementById('result-sub').textContent = sub;
+  document.getElementById('result-icon').textContent = type === 'victory' ? '🏆' : type === 'defeat' ? '💀' : '⚔';
+  box.className = 'result-box' + (type === 'defeat' ? ' defeat-box' : '');
+
+  // Calculate ally casualties + Blood Essence cost
+  const bs = battleState;
+  let totalStart = 0, totalSurvived = 0, totalEssenceLost = 0;
+
+  let rowsHtml = '';
+  bs.allies.forEach(g => {
+    const startUnits = g.qty;
+    const survivedUnits = g.alive ? (g.aliveUnits || 0) : 0;
+    const lost = startUnits - survivedUnits;
+    const essenceLost = lost * g.tier.cost;
+    totalStart += startUnits;
+    totalSurvived += survivedUnits;
+    totalEssenceLost += essenceLost;
+
+    if (startUnits === 0) return;
+    const color = lost === 0 ? '#2ecc71' : lost === startUnits ? '#e74c3c' : '#e67e22';
+    rowsHtml += `
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.04)">
+        <span style="color:var(--text-dim);min-width:55px">${g.label}</span>
+        <span style="color:${color};flex:1">${survivedUnits}/${startUnits} survived</span>
+        <span style="color:#c0392b;min-width:30px;text-align:center">${lost > 0 ? '−'+lost+' ☠' : '—'}</span>
+        <span style="color:#c9a84c;min-width:70px;text-align:right">${essenceLost > 0 ? '−'+essenceLost+' 🩸' : '<span style="color:var(--text-dim)">—</span>'}</span>
+      </div>`;
+  });
+
+  const totalLost = totalStart - totalSurvived;
+  const survPct = totalStart > 0 ? Math.round((totalSurvived / totalStart) * 100) : 0;
+
+  const statsHtml = `
+    <div style="color:var(--gold);font-family:Cinzel,serif;font-size:0.7rem;letter-spacing:.12em;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid var(--border)">
+      ⚔ ALLY LOSSES
+    </div>
+    ${rowsHtml}
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;padding-top:6px;margin-top:2px">
+      <span style="color:var(--text-dim);font-family:Cinzel,serif;font-size:0.68rem">CELKOM</span>
+      <span style="color:var(--text);flex:1">${totalSurvived}/${totalStart} <span style="color:var(--text-dim);font-size:0.7rem">(${survPct}%)</span></span>
+      <span style="color:#c0392b;min-width:30px;text-align:center">${totalLost > 0 ? '−'+totalLost+' ☠' : '—'}</span>
+      <span style="color:#f0d080;font-weight:bold;min-width:70px;text-align:right">${totalEssenceLost > 0 ? '−'+totalEssenceLost+' 🩸' : '0 🩸'}</span>
+    </div>
+    <div style="margin-top:10px;padding:8px;background:rgba(139,0,0,0.15);border:1px solid rgba(192,57,43,0.3);border-radius:3px;text-align:center">
+      <span style="color:var(--text-dim);font-size:0.7rem;font-family:Cinzel,serif;letter-spacing:.1em">TOTAL LOSSES</span><br>
+      <span style="color:#f0d080;font-family:'Cinzel Decorative',cursive;font-size:1.3rem;text-shadow:0 0 12px rgba(201,168,76,0.5)">
+        ${totalEssenceLost} Blood Essence
+      </span>
+    </div>
+  `;
+
+  document.getElementById('result-stats').innerHTML = statsHtml;
+  banner.className = 'show';
+  addLog(`<div class="log-result ${type === 'victory' ? 'victory' : 'defeat'}">${title}: ${sub} | Strata: ${totalEssenceLost} Blood Essence</div>`);
+}
+
+function closeResult() {
+  document.getElementById('result-banner').className = '';
+}
+
+// ===================== OPTIMIZER CANCELLATION =====================
+// Module-level control object created fresh at the start of every
+// runOptimizer() invocation. The Cancel button reads/writes this via the
+// helpers below. Single-thread paths poll _optCtl.cancelled at every yield;
+// parallel path additionally tracks worker handles + pending resolver fns
+// so terminate() + force-resolve can unblock Promise.all immediately.
+let _optCtl = null;
+
+function newOptControl() {
+  _optCtl = {
+    cancelled: false,
+    workers: [],          // parallel: Worker instances spawned this run
+    pendingResolvers: [], // parallel: { idx, resolve } records still awaiting 'done'
+  };
+  return _optCtl;
+}
+
+function requestOptimizerCancel() {
+  if (!_optCtl || _optCtl.cancelled) return;
+  _optCtl.cancelled = true;
+  // Tear down any spawned workers. Each worker promise is then force-resolved
+  // (instead of left dangling) so Promise.all does not hang.
+  _optCtl.workers.forEach(w => { try { w.terminate(); } catch (_) {} });
+  _optCtl.pendingResolvers.slice().forEach(rec => {
+    try { rec.resolve({ cancelled: true }); } catch (_) {}
+  });
+  _optCtl.pendingResolvers.length = 0;
+
+  // UI feedback — single-thread paths still need their next yield to fully
+  // bail out, but the user sees immediate acknowledgement here.
+  const label = document.getElementById('opt-progress-label');
+  if (label) label.textContent = '⏹ Cancelled — finalizing in-flight work…';
+  const btnLabel = document.getElementById('opt-btn-label');
+  if (btnLabel) btnLabel.textContent = '⚙ Run Optimizer';
+  showCancelBtn(false);
+}
+
+function showCancelBtn(show) {
+  const btn = document.getElementById('btn-cancel-optimizer');
+  if (btn) btn.style.display = show ? 'inline-flex' : 'none';
+}
+
+// Convenience: register a worker + its resolver in the control object.
+// Returned wrapper resolves the inner promise AND removes the record from
+// pendingResolvers so subsequent cancels do not double-fire.
+function registerWorkerPromise(worker, idx, resolve) {
+  if (!_optCtl) return resolve;
+  _optCtl.workers.push(worker);
+  const rec = { idx, resolve };
+  _optCtl.pendingResolvers.push(rec);
+  return function wrappedResolve(value) {
+    const i = _optCtl.pendingResolvers.indexOf(rec);
+    if (i >= 0) _optCtl.pendingResolvers.splice(i, 1);
+    resolve(value);
+  };
+}
+
+// ===================== OPTIMIZER =====================
+function openOptimizer() {
+  const enemyGroups = buildGroups('enemy', ENEMY_TIERS, enemyQuantities);
+  if (enemyGroups.length === 0) {
+    alert('Set up the enemy army first!');
+    return;
+  }
+  document.getElementById('optimizer-modal').style.display = 'block';
+  document.getElementById('opt-results').innerHTML = '';
+  document.getElementById('opt-progress').style.display = 'none';
+
+  // Render max-per-tier inputs
+  const maxInputsBox = document.getElementById('opt-max-inputs');
+  maxInputsBox.innerHTML = '';
+  ALLY_TIERS.filter(t => unlockedAllyTiers.has(t.id)).forEach(tier => {
+    const hardMax = Math.floor(ARMY_POWER_LIMIT / tier.power);
+    const col = document.createElement('div');
+    col.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:3px;min-width:52px';
+    col.innerHTML = `
+      <span style="font-family:Cinzel,serif;font-size:0.62rem;color:var(--gold-light)">${tier.label}</span>
+      <input type="number" id="opt-max-${tier.id}" min="0" max="${hardMax}" value="${hardMax}"
+        class="opt-max-input"
+        style="width:48px;background:var(--dark);border:1px solid var(--border);color:var(--text);font-family:Cinzel,serif;font-size:0.75rem;padding:3px 5px;border-radius:2px;text-align:center">
+      <span style="font-size:0.6rem;color:var(--text-dim)">max ${hardMax}</span>`;
+    maxInputsBox.appendChild(col);
+  });
+  // Lazy combo count: do NOT enumerate combinations on open. At high power
+  // limits with many tiers this can take seconds (e.g. layer 52, power 530,
+  // 6 tiers ≈ 1.5B combinations to enumerate). The user clicks 🔢 Calculate
+  // when they actually want the estimate. After the first manual calculation,
+  // edits to the per-tier max inputs will auto-refresh the number.
+  resetComboCountUI();
+
+  // Render strategy checkboxes based on active enemy tiers
+  const stratBox = document.getElementById('opt-strategies');
+  stratBox.innerHTML = '';
+  const hasE3 = enemyGroups.some(g => g.tier.skillId === 'E3_BUFF_ALLY');
+  if (hasE3) {
+    stratBox.innerHTML = `
+      <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+        <input type="checkbox" id="strat-kill-e3" style="margin-top:3px;accent-color:#9b59b6;cursor:pointer">
+        <span>
+          <span style="font-family:Cinzel,serif;font-size:0.72rem;color:var(--text)">☠ Kill Tier e3 in round 1</span>
+          <span style="display:block;font-size:0.68rem;color:var(--text-dim);font-style:italic">Shows only formations where E3 dies in round 1 — prevents cumulative buffing. <span style="color:#9b59b6">Greatly improves result accuracy.</span></span>
+        </span>
+      </label>`;
+  } else {
+    stratBox.innerHTML = '<span style="font-size:0.72rem;color:var(--text-dim);font-style:italic">No strategies for current enemies.</span>';
+  }
+
+  // Update parallel info text with detected hardware concurrency
+  const parallelInfo = document.getElementById('opt-parallel-info');
+  if (parallelInfo) {
+    const hw = (navigator && navigator.hardwareConcurrency) || null;
+    if (hw) {
+      const willUse = Math.max(2, Math.min(8, hw));
+      parallelInfo.textContent = `Detected ${hw} CPU cores — will use up to ${willUse} parallel workers. UI stays responsive.`;
+    } else {
+      parallelInfo.textContent = 'Split work across CPU cores. UI stays responsive during search.';
+    }
+  }
+
+  // Load smart presets and try to detect current layer (set by bot if active)
+  refreshPresetCache(function () {
+    if (window.BFPresets && window.BFPresets.loadCurrentLayer) {
+      window.BFPresets.loadCurrentLayer(function (data) {
+        if (data && data.layer) {
+          const inp = document.getElementById('opt-preset-level');
+          if (inp && (!inp.dataset.touched || inp.dataset.touched === 'false')) {
+            inp.value = String(data.layer);
+          }
+        }
+        updateSmartPresetPreview();
+      });
+    } else {
+      updateSmartPresetPreview();
+    }
+  });
+}
+
+function closeOptimizer() {
+  document.getElementById('optimizer-modal').style.display = 'none';
+}
+
+// ============================================================================
+// SMART PRESET UI (warm-start optimization)
+// ============================================================================
+
+let _presetCache = null;  // populated on optimizer open
+
+function getActiveSmartPreset() {
+  // Returns {preset, level, range} if smart preset is enabled and valid; null otherwise
+  if (!window.BFPresets) return null;
+  const enabledEl = document.getElementById('opt-preset-enabled');
+  if (!enabledEl || !enabledEl.checked) return null;
+  const levelEl = document.getElementById('opt-preset-level');
+  const level = levelEl ? parseInt(levelEl.value) || 0 : 0;
+  if (level <= 0) return null;
+  const preset = _presetCache && _presetCache[String(level)];
+  if (!preset) return null;
+  const rangeEl = document.getElementById('opt-preset-range');
+  const range = rangeEl ? parseInt(rangeEl.value) || 15 : 15;
+  return { preset: preset, level: level, range: range };
+}
+
+function updateSmartPresetPreview() {
+  const previewEl = document.getElementById('opt-preset-preview');
+  const confEl = document.getElementById('opt-preset-confidence');
+  const enabledEl = document.getElementById('opt-preset-enabled');
+  const levelEl = document.getElementById('opt-preset-level');
+  const rangeEl = document.getElementById('opt-preset-range');
+  const rangeValEl = document.getElementById('opt-preset-range-val');
+  if (!previewEl || !levelEl) return;
+
+  const level = parseInt(levelEl.value) || 0;
+  const range = parseInt(rangeEl.value) || 15;
+  if (rangeValEl) rangeValEl.textContent = '±' + range;
+
+  const preset = (_presetCache && _presetCache[String(level)]) || null;
+
+  // Confidence badge
+  if (confEl) {
+    if (!preset) {
+      confEl.textContent = '🔴 no data';
+      confEl.style.background = 'rgba(231,76,60,0.2)';
+      confEl.style.color = '#e74c3c';
+    } else {
+      const c = preset.confidence || 'yellow';
+      const cmap = {
+        red:    { bg: 'rgba(231,76,60,0.2)',  fg: '#e74c3c', label: '🔴 low' },
+        yellow: { bg: 'rgba(243,156,18,0.2)', fg: '#f39c12', label: '🟡 limited' },
+        green:  { bg: 'rgba(46,204,113,0.2)', fg: '#2ecc71', label: '🟢 verified' },
+      };
+      const m = cmap[c] || cmap.yellow;
+      confEl.textContent = m.label;
+      confEl.style.background = m.bg;
+      confEl.style.color = m.fg;
+    }
+  }
+
+  if (!preset) {
+    previewEl.innerHTML = '<span style="color:var(--text-dim);font-style:italic">No preset saved for layer ' + level + '. Click "Manage…" to add one.</span>';
+    if (enabledEl) enabledEl.checked = false;
+    return;
+  }
+
+  // Build preview text
+  const stratKillE3El = document.getElementById('strat-kill-e3');
+  const stratKillE3 = !!(stratKillE3El && stratKillE3El.checked);
+  const ranges = window.BFPresets.buildRangesFromPreset(preset, {
+    range: range,
+    enemyQtys: { ...enemyQuantities },
+    stratKillE3: stratKillE3,
+  });
+
+  let html = '';
+  if (preset.note) {
+    html += '<div style="color:var(--gold-light);font-style:italic;margin-bottom:4px">' + escapeHtml(preset.note) + '</div>';
+  }
+  const parts = [];
+  Object.keys(ranges.computed).forEach(function (tid) {
+    const c = ranges.computed[tid];
+    if (c.mode === 'auto' && c.autoMin != null) {
+      parts.push('<span style="color:#9b59b6">' + tid + ' &ge; <b>' + c.autoMin + '</b> (auto min)</span>');
+    } else if (c.mode === 'range') {
+      parts.push('<span style="color:var(--text)">' + tid + ': ' + c.min + '–' + c.max + '</span>');
+    } else if (c.mode === 'zero') {
+      parts.push('<span style="color:#7f8c8d">' + tid + ': 0 (skipped)</span>');
+    } else if (c.mode === 'auto') {
+      parts.push('<span style="color:#7f8c8d">' + tid + ': auto (needs Kill E3 R1)</span>');
+    }
+  });
+  html += parts.join('&nbsp;&nbsp;');
+  previewEl.innerHTML = html || '<span style="color:var(--text-dim);font-style:italic">Empty preset.</span>';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function refreshPresetCache(callback) {
+  if (!window.BFPresets) {
+    _presetCache = {};
+    if (callback) callback();
+    return;
+  }
+  window.BFPresets.loadPresets(function (presets) {
+    _presetCache = presets;
+    window.BFPresets.setCached(presets);
+    if (callback) callback();
+  });
+}
+
+// ============================================================================
+// PRESET MANAGER MODAL
+// ============================================================================
+
+function openPresetManager() {
+  refreshPresetCache(function () {
+    renderPresetManagerInputs();
+    renderPresetManagerTable();
+    document.getElementById('preset-manager-modal').style.display = 'block';
+    // Pre-fill level from optimizer
+    const optLevel = document.getElementById('opt-preset-level');
+    const mgrLevel = document.getElementById('pmgr-level');
+    if (optLevel && mgrLevel) mgrLevel.value = optLevel.value;
+    loadPresetIntoForm(parseInt(mgrLevel.value) || 0);
+  });
+}
+
+function closePresetManager() {
+  document.getElementById('preset-manager-modal').style.display = 'none';
+  /{
     const side = btn.getAttribute('data-side');
     const tier = btn.getAttribute('data-tier');
     const delta = parseInt(btn.getAttribute('data-delta'), 10);
@@ -3252,6 +7465,16 @@ document.addEventListener('mouseleave', function(e) {
 
 // --- Static element listeners (attached once on DOMContentLoaded) ---
 document.addEventListener('DOMContentLoaded', function () {
+  // v1.6.26 — race / names bar
+  renderUnitLookBar();
+  const _ulb = document.getElementById('unit-look-bar');
+  if (_ulb && !_ulb.dataset.wired) _ulb.dataset.wired = '1', _ulb.addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.ulookRace) lsSet(LS_KEY_SIM_RACE, b.dataset.ulookRace);
+    if (b.dataset.ulookNames) lsSet(LS_KEY_SIM_NAMES, simShowNames() ? 'code' : 'both');
+    refreshUnitLook();
+  });
   // Power limit
   const plInput = document.getElementById('power-limit-input-el');
   if (plInput) plInput.addEventListener('input', updatePowerLimit);
