@@ -164,6 +164,23 @@
 
   .enemies .tier-label { color: var(--crimson); }
 
+  /* v1.6.26 — unit identity: artwork + names */
+  .tier-head { display: flex; align-items: center; gap: 0.45rem; min-width: 0; }
+  .tier-head-txt { display: flex; flex-direction: column; line-height: 1.15; min-width: 55px; }
+  .tier-name { font-size: 0.6rem; color: var(--text-dim); font-style: italic; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tier-img { width: 38px; height: 38px; object-fit: cover; border-radius: 3px; border: 1px solid #3a2418; box-shadow: 0 0 6px rgba(0,0,0,0.6); background: #120a0c; flex: 0 0 auto; }
+  .enemies .tier-img { border-color: #4a1a1a; }
+  .tier-card:not(.selected):not(.enemy-selected) .tier-img { filter: grayscale(0.55) brightness(0.8); }
+  .bf-unit-img { width: 22px; height: 22px; object-fit: cover; border-radius: 2px; border: 1px solid #3a2418; vertical-align: middle; margin-right: 5px; }
+  .bf-unit.dead .bf-unit-img { filter: grayscale(1) brightness(0.5); }
+  .bf-unit-sub { display: block; font-family: 'Crimson Text', serif; font-size: 0.6rem; color: var(--text-dim); font-style: italic; margin-left: 27px; }
+  #unit-look-bar { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 0 0 8px; padding: 5px 8px; background: rgba(0,0,0,0.25); border: 1px solid #2a1218; border-radius: 3px; }
+  #unit-look-bar .ulook-lbl { font-family: Cinzel, serif; font-size: 0.6rem; color: var(--text-dim); letter-spacing: .1em; margin-right: 2px; }
+  #unit-look-bar .ulook-btn { background: rgba(0,0,0,0.3); border: 1px solid #3a2418; color: var(--text-dim); font-family: Cinzel, serif; font-size: 0.6rem; padding: 2px 7px; border-radius: 2px; cursor: pointer; }
+  #unit-look-bar .ulook-btn.on { border-color: var(--gold); color: var(--gold-light); background: rgba(201,168,76,0.1); }
+  #unit-look-bar .ulook-sep { width: 1px; height: 14px; background: #3a2418; margin: 0 4px; }
+  #unit-look-bar .ulook-hint { font-size: 0.58rem; color: #7a5a4a; font-style: italic; margin-left: 4px; }
+
   .stat-badge {
     display: inline-flex;
     align-items: center;
@@ -668,6 +685,9 @@
   </p>
   <hr class="divider">
 
+  <!-- v1.6.26 — unit identity (race / names) -->
+  <div id="unit-look-bar"></div>
+
   <!-- ARMY BUILDER -->
   <div class="builder-grid">
     <!-- ALLIES -->
@@ -980,6 +1000,7 @@
 </div>
 
 <script src="../js/level_presets.js"></script>
+<script src="../js/unit_catalog.js"></script>
 <script src="../js/sim_engine.js"></script>
 <script src="../js/simulator.js"></script>
 <script src="../js/bridge.js"></script>
