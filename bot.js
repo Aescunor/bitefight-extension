@@ -15,7 +15,24 @@
 
   function ctxOk() { try { return !!chrome.runtime?.id; } catch (e) { return false; } }
   function sGet(keys, cb) { if (!ctxOk()) return; try { chrome.storage.local.get(keys, r => { if (ctxOk()) cb(r); }); } catch(e) {} }
-  function sSet(obj, cb) { if (!ctxOk()) return; try { chrome.storage.local.set(obj, cb); } catch(e) {} }
+  function sSet(obj, cb) { if (!ctxOk()) return; try { chrome.storage.local.set(obj, cb); } catch(e) {} bkMirror(obj); }
+
+  // v1.6.23 — SETTINGS BACKUP. chrome.storage.local is wiped when the
+  // extension is REMOVED (e.g. "Remove" + "Load unpacked" of a new version).
+  // Settings + ruins presets are mirrored into the game site's localStorage,
+  // which survives that, and restored at boot when the extension storage is
+  // empty for this character.
+  const BK_PREFIX = 'bfbot_bk_';
+  const BK_SUFFIXES = ['_bot_settings', '_bot_ruinsPresets'];
+  function bkMirror(obj) {
+    try {
+      Object.keys(obj || {}).forEach(k => {
+        if (!BK_SUFFIXES.some(sf => k.endsWith(sf))) return;
+        if (!/_p\d+_bot_/.test(k)) return;   // only character-bound keys (player id known)
+        window.localStorage.setItem(BK_PREFIX + k, JSON.stringify({ ts: Date.now(), v: obj[k] }));
+      });
+    } catch (_) {}
+  }
 
   const SERVER_ID = hostname.split('.')[0] || 'unknown';
   let PLAYER_ID = null; // Detected async at boot
@@ -37,6 +54,12 @@
         const fromDOM = detectFromDOM();
         if (fromDOM) { cacheAndResolve(fromDOM); return; }
       }
+
+      // v1.6.23 — the page itself is the most reliable source (own id is
+      // embedded in the mail-popup template on every page). Try it BEFORE
+      // the cache so a wrongly cached id can never stick.
+      const fromPage = detectFromDOM();
+      if (fromPage) { cacheAndResolve(fromPage); return; }
 
       // B) Check storage cache with TTL
       chrome.storage.local.get([PID_CACHE_KEY], (r) => {
@@ -79,10 +102,24 @@
           const id = (senderEl.textContent || '').trim();
           if (/^\d+$/.test(id)) return id;
         }
-        const profLink = document.querySelector('a[href*="/profile/player/"]');
-        if (profLink) {
-          const m = profLink.getAttribute('href').match(/\/profile\/player\/(\d+)/);
+        // v1.6.23 — #senderid normally exists only inside a <script> string
+        // ("content += '<div id=\"senderid\" …>15731</div>'"), so read it from
+        // the raw markup.
+        try {
+          const html = document.documentElement ? document.documentElement.innerHTML : '';
+          const m = html.match(/id=\\?["']senderid\\?["'][^>]*>\s*(\d+)\s*</);
           if (m) return m[1];
+        } catch (_) {}
+        // v1.6.23 — the old "first /profile/player/ link" fallback was REMOVED:
+        // on PvP / clan / highscore / report pages that link belongs to ANOTHER
+        // player, which switched the whole storage prefix → settings looked
+        // reset. Only trusted on the own profile page.
+        if (_onProfileNow) {
+          const profLink = document.querySelector('a[href*="/profile/player/"]');
+          if (profLink) {
+            const m = profLink.getAttribute('href').match(/\/profile\/player\/(\d+)/);
+            if (m) return m[1];
+          }
         }
         return null;
       }
@@ -876,7 +913,11 @@
     // Extraction
     extractEnabled: true,
     extractAutoRepeat: true,    // repeat after orb cooldown (5h)
-    orbCooldownMs: 5 * 60 * 60 * 1000, // 5 hours
+    orbCooldownMs: 5 * 60 * 60 * 1000, // 5 hours (fallback; real value read from Crucible DOM)
+    // v1.6.20 — Crucible (Obetná komnata) processing of stored Blood/Hearts
+    crucibleMode: 'extract',      // 'extract' = extract all | 'rite' = sacrifice qualifying rank for ritual (if none active), extract rest
+    crucibleRiteRanks: ['S'],     // ranks allowed for sacrifice (ritual)
+    crucibleResume: 'all',        // 'all' = resume hunt when ALL slots are ready | 'any' = when the first slot is ready
     // Recruit (v1.6.4 — rewritten as global tick, supports T1-T8)
     recruitEnabled: false,
     recruitTrigger: 'idle',          // 'idle' = run during yellow/white indicator, 'extraction' = after hunt extracts, 'threshold' = when BE >= X, 'continuous' = run every tick
@@ -912,6 +953,16 @@
     ruinsStopMinUnits: false,   // enable min units check
     ruinsStopPresetShort: true, // stop if can't fill preset formation fully
     ruinsIgnorePresets: false,  // v1.6.2 — always skip preset matching, go straight to optimizer
+    // v1.6.23 — Appearance (⚙ in the panel header)
+    lookZoom: 1,                // 1 | 1.25 | 1.5 | 2 | 2.5 | 3 — scales the whole panel
+    lookTxt: 'default',         // 'default' | 'light' | 'white' | 'custom'
+    lookTxtCustom: '#ffffff',
+    lookNative: false,          // native browser <select> rendering
+    lookTheme: 'grim',          // v1.6.27 — 'grim' (Grimoire, race-tinted) | 'classic' (old green)
+    lookRace: 'auto',           // 'auto' (detected) | '1' vampire | '2' werewolf
+    lookCrest: true,            // skull crest in the panel header
+    lookLowFx: false,           // disable glow animations
+    brVerifyEnabled: true,      // v1.6.21 — fetch game battle reports & diff against BFEngine (data collection)
     // Ruins — UNLOCKED tiers (which ally tiers the optimizer is allowed to use)
     // T1..T8; defaults to T1..T6 (player must unlock T7/T8 explicitly)
     ruinsAllyUnlocks: ['T1','T2','T3','T4','T5','T6'],
@@ -1172,18 +1223,32 @@
       result.quality = rankLines[1].textContent.trim();
     }
 
-    // Extraction button
-    const extractBtn = document.getElementById('extractBloodBtn');
-    if (extractBtn) {
-      result.hasExtraction = true;
-      result.huntId = extractBtn.getAttribute('data-hunt-id');
-      // Check if button is actually enabled/clickable
-      if (extractBtn.classList.contains('disabled') || extractBtn.disabled) {
-        result.hasExtraction = false;
-      }
+    // v1.6.20 — rank fallback from the vessel image (language-independent):
+    // /img/blood/purity/Blood_<rankIdx>_<race>_60x110.png  (1=S … 6=E)
+    if (!result.rank) {
+      const rankImg = document.querySelector('.rank-container img.rank-icon, .rank-container img[src*="/purity/Blood_"]');
+      if (rankImg) result.rank = rankFromBloodImg(rankImg.getAttribute('src'));
     }
 
-    // Orbs status
+    // v1.6.20 — STORE button (game update: blood is now STORED into a
+    // Crucible slot from the hunt result page, and extracted/sacrificed
+    // later on /crucible/index). Legacy #extractBloodBtn still recognised.
+    const storeBtn = document.getElementById('storeBloodBtn') || document.getElementById('extractBloodBtn');
+    result.storeBtnFound = !!storeBtn;
+    if (storeBtn) {
+      result.huntId = storeBtn.getAttribute('data-hunt-id');
+      const disabled = storeBtn.disabled || storeBtn.hasAttribute('disabled')
+        || storeBtn.classList.contains('disabled') || storeBtn.classList.contains('extractBloodDisabled');
+      result.hasExtraction = !disabled;   // kept name for back-compat: "can store"
+      result.alreadyStored = disabled;
+    }
+    // Free slots: <span id="freeSlotsCount">2</span>/<span id="totalSlotsCount">3</span>
+    const freeEl = document.getElementById('freeSlotsCount');
+    const totEl  = document.getElementById('totalSlotsCount');
+    result.freeSlots  = freeEl ? (parseInt(freeEl.textContent.replace(/\D/g, '')) || 0) : null;
+    result.totalSlots = totEl  ? (parseInt(totEl.textContent.replace(/\D/g, ''))  || 0) : null;
+
+    // Orbs status (legacy, pre-update servers)
     // BloodOrbFilled = slot AVAILABLE for extraction (data-remaining=0, "Dostupné")
     // BloodOrbEmpty  = slot on COOLDOWN (data-remaining>0, shows timer)
     const slots = document.querySelectorAll('.slots .slot');
@@ -1207,6 +1272,16 @@
 
   // ── EXTRACTION ORB STATUS ON /robbery/index ──────────────────
   function readOrbsOnRobberyPage() {
+    // v1.6.20 — on /crucible/index read the new slot cards instead
+    if (isCruciblePage()) {
+      const c = parseCrucible();
+      const rems = c.consumed.map(s => s.remainingSec).filter(v => v > 0);
+      return {
+        ready: c.empty + c.filled.length, total: c.total,
+        nextReadyIn: rems.length ? Math.min(...rems) : null,
+        maxRemaining: rems.length ? Math.max(...rems) : null,
+      };
+    }
     const slots = document.querySelectorAll('#slots_availability .slot .timer, .slots .slot .timer');
     if (!slots.length) return { ready: 0, total: 0, nextReadyIn: null, maxRemaining: null };
     let ready = 0, total = slots.length, minRemaining = Infinity, maxRemaining = 0;
@@ -1225,9 +1300,105 @@
     };
   }
 
+  // ── RANK HELPERS (v1.6.20) ───────────────────────────────────
+  const BLOOD_RANKS = ['S', 'A', 'B', 'C', 'D', 'E'];
+  // Rank order for comparisons: S best (0) … E worst (5)
+  function rankIndex(r) { const i = BLOOD_RANKS.indexOf(r); return i < 0 ? 99 : i; }
+  function rankFromBloodImg(src) {
+    const m = String(src || '').match(/\/purity\/Blood_(\d)_\d/);
+    if (!m) return null;
+    return BLOOD_RANKS[parseInt(m[1]) - 1] || null;
+  }
+  function rankFromText(t) {
+    t = String(t || '').trim();
+    let m = t.match(/^([SABCDE])\s*[-–—]/) || t.match(/^([SABCDE])(?:\s|$)/) || t.match(/\b([SABCDE])\b/);
+    return m ? m[1] : null;
+  }
+
+  // ── CRUCIBLE / OBETNÁ KOMNATA (v1.6.20) ──────────────────────
+  // /crucible/index — slots hold stored Blood/Hearts. Each filled slot can be
+  // EXTRACTED (.cr-extract-btn → Blood Essence) or SACRIFICED (.cr-rite-btn →
+  // 3-day ritual buff, only one ritual at a time). Either action puts the slot
+  // into .cr-slot--consumed with a ~5h countdown (.cr-cooldown-time[data-remaining]).
+  function isCruciblePage() {
+    return PAGE.includes('/crucible/') && !!document.querySelector('.crucible .cr-slots, .cr-slots');
+  }
+
+  function isBtnEnabled(btn) {
+    return !!btn && !btn.disabled && !btn.hasAttribute('disabled') && !btn.classList.contains('extractBloodDisabled');
+  }
+
+  function parseCrucible(doc) {
+    doc = doc || document;
+    const out = { found: false, filled: [], empty: 0, consumed: [], locked: 0, total: 0,
+                  riteActive: false, riteRemainingSec: null };
+    const slots = doc.querySelectorAll('.cr-slots .cr-slot');
+    if (!slots.length) return out;
+    out.found = true;
+    slots.forEach(slot => {
+      const cls = slot.classList;
+      if (cls.contains('cr-slot--locked')) { out.locked++; return; }
+      out.total++;
+      if (cls.contains('cr-slot--filled')) {
+        const extractBtn = slot.querySelector('.cr-extract-btn');
+        const riteBtn = slot.querySelector('.cr-rite-btn');
+        const img = slot.querySelector('.cr-vessel img');
+        const label = slot.querySelector('.cr-label-main');
+        const rank = rankFromBloodImg(img && img.getAttribute('src')) || rankFromText(label && label.textContent);
+        out.filled.push({
+          index: parseInt(slot.getAttribute('data-index')) || 0,
+          slotId: (extractBtn && extractBtn.getAttribute('data-slot-id')) || (riteBtn && riteBtn.getAttribute('data-slot-id')) || null,
+          rank: rank,
+          label: label ? label.textContent.trim() : '',
+          canExtract: isBtnEnabled(extractBtn),
+          canRite: isBtnEnabled(riteBtn),
+        });
+      } else if (cls.contains('cr-slot--consumed')) {
+        const t = slot.querySelector('.cr-cooldown-time[data-remaining], .countdown[data-remaining]');
+        out.consumed.push({
+          index: parseInt(slot.getAttribute('data-index')) || 0,
+          remainingSec: t ? (parseInt(t.getAttribute('data-remaining')) || 0) : 0,
+        });
+      } else if (cls.contains('cr-slot--empty')) {
+        out.empty++;
+      }
+    });
+    // Ritual active: duration badge next to the skull, or rite effect icons
+    const riteCd = doc.querySelector('.cr-rite-duration .countdown[data-remaining], .cr-rite-countdown[data-remaining]');
+    if (riteCd) {
+      out.riteActive = true;
+      out.riteRemainingSec = parseInt(riteCd.getAttribute('data-remaining')) || null;
+    } else if (doc.querySelector('#ascensionEffects .ae-item[data-source="rite"]')) {
+      out.riteActive = true;
+    }
+    return out;
+  }
+
+  // v1.6.20 — read Crucible settings from the panel (only fields that exist)
+  function readCrucibleSettingsFromDOM(se) {
+    const m = document.getElementById('bf-crucible-mode');
+    if (m) se.crucibleMode = m.value === 'rite' ? 'rite' : 'extract';
+    const r = document.getElementById('bf-crucible-resume');
+    if (r) se.crucibleResume = r.value === 'any' ? 'any' : 'all';
+    const boxes = document.querySelectorAll('#bf-crucible-rite-q input[data-rq]');
+    if (boxes.length) se.crucibleRiteRanks = [...boxes].filter(cb => cb.checked).map(cb => cb.value);
+    return se;
+  }
+
   // ── COMPUTE ORB COOLDOWN END TIME (ABSOLUTE) ─────────────────
   // Reads real cooldown from page DOM when available, falls back to settings.orbCooldownMs
-  function computeOrbWaitUntil(settings) {
+  // v1.6.20 — prefers Crucible consumed-slot countdowns when on /crucible/index.
+  function computeOrbWaitUntil(settings, mode) {
+    if (isCruciblePage()) {
+      const c = parseCrucible();
+      const rems = c.consumed.map(s => s.remainingSec).filter(v => v > 0);
+      if (rems.length) {
+        const sec = (mode === 'any') ? Math.min(...rems) : Math.max(...rems);
+        const until = Date.now() + sec * 1000 + 5000; // +5s safety margin
+        botLog('info', `Crucible slot cooldown from DOM: ${mode === 'any' ? 'first' : 'last'} slot in ${Math.ceil(sec / 60)} min → ETA ${new Date(until).toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit'})}`);
+        return until;
+      }
+    }
     const orbs = readOrbsOnRobberyPage();
     if (orbs.maxRemaining && orbs.maxRemaining > 0) {
       // Use real remaining seconds from page
@@ -1249,7 +1420,59 @@
   }
 
   function isRuinsFightResultPage() {
-    return PAGE.includes('/ancestral/fight') || (PAGE.includes('/ancestral/') && document.querySelector('.combatResult'));
+    // v1.6.20 — game update: result uses .combatResultHeader (no .combatResult),
+    // and the new /ancestral/battlereport pages also use #combatContainer → exclude them.
+    if (!PAGE.includes('/ancestral/') || PAGE.includes('/ancestral/battlereport')) return false;
+    return PAGE.includes('/ancestral/fight')
+      || !!document.querySelector('#combatContainer .combatResultHeader, .combatResult');
+  }
+
+  // v1.6.20 — daily layer limit. When a layer is exhausted the show page renders
+  //   .ruinsConditions … <span class="layerCooldown" data-remaining="46316">
+  // (resets at server midnight). Returns seconds or 0.
+  function parseRuinsLayerCooldown(doc) {
+    doc = doc || document;
+    const el = doc.querySelector('.ruinsConditions .layerCooldown[data-remaining], .layerCooldown[data-remaining]');
+    return el ? (parseInt(el.getAttribute('data-remaining')) || 0) : 0;
+  }
+
+  // Earliest timestamp a layer may be attacked again (interval band AND daily limit).
+  function ruinsLayerReadyAt(lvl, settings, state) {
+    const last = (state.ruinsAttackTimes && state.ruinsAttackTimes[lvl]) || 0;
+    const byInterval = last + getRuinsIntervalForLevel(lvl, settings) * 60 * 1000;
+    const blocked = (state.ruinsLayerBlockedUntil && state.ruinsLayerBlockedUntil[lvl]) || 0;
+    return Math.max(byInterval, blocked);
+  }
+
+  // v1.6.22 — exact show-page match (PAGE.includes('/ancestral/show/1') also matched /show/16!)
+  function isOnRuinsShowFor(level) {
+    return new RegExp('^/ancestral/show/' + level + '(?:/|$)').test(PAGE);
+  }
+
+  // v1.6.22 — block a layer for `sec` seconds and advance the index (with cycle accounting).
+  // Returns true if Ruins finished (cadence reached) — caller must stop.
+  function ruinsBlockLayerAndAdvance(state, settings, levels, level, sec, why) {
+    if (!state.ruinsLayerBlockedUntil) state.ruinsLayerBlockedUntil = {};
+    state.ruinsLayerBlockedUntil[level] = Date.now() + sec * 1000 + 30000;
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+    botLog('info', `Ruins layer ${level}: ${why} — available again in ${h}h ${m}m. Skipping.`);
+    state.ruinsNavTarget = null;
+    state.ruinsCurrentIdx = (state.ruinsCurrentIdx || 0) + 1;
+    state.ruinsState = 'navigating';
+    if (state.ruinsCurrentIdx >= levels.length) {
+      if (settings.ruinsCadence === 'once') {
+        botLog('ok', 'Ruins: Single cycle complete');
+        state.ruinsState = 'done'; saveState(state); updateRuinsUI(settings, state); return true;
+      }
+      if (settings.ruinsCadence === 'cycles' && state.ruinsCurrentCycle >= settings.ruinsCycles) {
+        botLog('ok', `Ruins: ${settings.ruinsCycles} cycles complete`);
+        state.ruinsState = 'done'; saveState(state); updateRuinsUI(settings, state); return true;
+      }
+      state.ruinsCurrentCycle = (state.ruinsCurrentCycle || 1) + 1;
+      state.ruinsCurrentIdx = 0;
+    }
+    saveState(state);
+    return false;
   }
 
   // ── PER-LAYER COOLDOWN INTERVAL (v1.5.9) ─────────────────────
@@ -1346,6 +1569,7 @@
         .then(resp => resp.text())
         .then(html => {
           const doc = new DOMParser().parseFromString(html, 'text/html');
+          harvestUnitsFromDoc(doc);
           const data = parseArmyStateFromDom(doc);
           _armyCache = { ts: now, data };
           cb(data);
@@ -1403,9 +1627,11 @@
   }
 
   // ── HELPER: Transition to waiting_orb with proper cooldown + ruins kickoff ──
-  function enterOrbCooldown(state, settings) {
+  function enterOrbCooldown(state, settings, untilOverride) {
     state.huntState = 'waiting_orb';
-    state.orbWaitUntil = computeOrbWaitUntil(settings);
+    state.orbWaitUntil = (untilOverride && untilOverride > Date.now())
+      ? untilOverride
+      : computeOrbWaitUntil(settings, settings.crucibleResume);
     saveState(state);
     updateHuntUI(settings, state);
     startCooldownTicker(settings, state);
@@ -1441,6 +1667,579 @@
         });
       }, randomDelay(3000, 5000));
     }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // v1.6.20 — NEW ESSENCE FLOW (game update Oct 2026)
+  //   Hunt result → "Uložiť" (#storeBloodBtn) stores the Blood/Heart into a
+  //   free Crucible slot. When slots are full (or AP runs out), the bot goes
+  //   to /crucible/index (Obetná komnata) and EXTRACTS each stored vial, or
+  //   SACRIFICES a qualifying one (default: S rank) for the 3-day ritual when
+  //   no ritual is active. Used slots go on ~5h cooldown (read from DOM).
+  // ══════════════════════════════════════════════════════════════
+
+  function appendExtractionLog(entry) {
+    sGet([SK('extractionLog')], r => {
+      const log = r[SK('extractionLog')] || [];
+      log.push(entry);
+      while (log.length > 500) log.shift();
+      sSet({ [SK('extractionLog')]: log });
+    });
+  }
+
+  // Clicks a game button that may open the generic #confirmModal, then
+  // presses "Potvrdiť" (#confirmModal_buttonLeft). Same pattern the v1.6.19
+  // extraction used — the modal is shared site-wide.
+  function clickWithConfirm(btn) {
+    btn.click();
+    botSetTimeout(() => {
+      const modal = document.getElementById('confirmModal');
+      const confirmBtn = document.getElementById('confirmModal_buttonLeft');
+      if (!confirmBtn) return;
+      let visible = true;
+      try {
+        if (modal) {
+          const cs = window.getComputedStyle(modal);
+          visible = cs.display !== 'none' && cs.visibility !== 'hidden';
+        }
+      } catch (_) {}
+      if (visible || btn.getAttribute('data-show-modal') === '1') confirmBtn.click();
+    }, randomDelay(700, 1100));
+  }
+
+  function goCrucible(state, settings, reason) {
+    state.huntState = 'crucible';
+    state.crucibleReason = reason;          // 'full' | 'ap'
+    state.cruciblePending = null;
+    state.crucibleSkip = [];
+    saveState(state);
+    botLog('info', `🩸 Crucible: ${reason === 'full' ? 'all slots full' : 'not enough AP for next hunt'} → going to Obetná komnata`);
+    botSetTimeout(() => { window.location.href = BASE + '/crucible/index'; }, randomDelay(1000, 2500));
+  }
+
+  function handleHuntResultPage(state, settings, ap) {
+    const result = parseHuntResult();
+    const slotsTxt = result.freeSlots !== null ? `${result.freeSlots}/${result.totalSlots}` : '?';
+    let freeNow = result.freeSlots;
+
+    // ── A) Verify a store we triggered on this page ──
+    if (state.huntState === 'storing') {
+      const before = state.storeFreeBefore;
+      const confirmed = result.alreadyStored
+        || (before !== null && before !== undefined && result.freeSlots !== null && result.freeSlots < before);
+      if (confirmed) {
+        state.storedThisSession = (state.storedThisSession || 0) + 1;
+        state.storeAttempts = 0;
+        state.crucibleBounce = 0;
+        state.huntState = 'on_result';
+        // Inline UI may not refresh the counter — trust our own math as floor
+        if (before !== null && before !== undefined && (freeNow === null || freeNow >= before)) freeNow = before - 1;
+        botLog('ok', `🩸 Stored rank ${state.storeRank || '?'} → free slots ${freeNow}/${result.totalSlots ?? '?'}`);
+        saveState(state);
+      } else if ((state.storeAttempts || 0) < 2 && result.hasExtraction) {
+        state.storeAttempts = (state.storeAttempts || 0) + 1;
+        botLog('warn', `Store not confirmed yet — retry ${state.storeAttempts}/2`);
+        sSet({ [SK('state')]: state }, () => {
+          const btn = document.getElementById('storeBloodBtn') || document.getElementById('extractBloodBtn');
+          if (btn) clickWithConfirm(btn);
+          botSetTimeout(() => { loadState(st => loadSettings(se => botTick(st, se))); }, randomDelay(3000, 4500));
+        });
+        return;
+      } else {
+        botLog('warn', 'Store failed (button still active after 2 retries) — continuing hunt');
+        state.storeAttempts = 0;
+        state.huntState = 'on_result';
+        saveState(state);
+      }
+    }
+    // ── B) Fresh result: decide whether to store ──
+    else {
+      botLog('info', `Hunt result: ${result.success ? 'Success' : 'Failure'}, Rank: ${result.rank || '–'}, Free slots: ${slotsTxt}`);
+      state.huntState = 'on_result';
+
+      if (settings.extractEnabled && result.hasExtraction && (freeNow === null || freeNow > 0)) {
+        const acceptable = getAcceptableQualities(settings, state);
+        const liveAB = getABPercent();
+        const usedAB = liveAB !== null ? liveAB : (state.lastKnownABPct ?? null);
+        botLog('info', `Accepted qualities: [${acceptable.join(',')}] (AB: ${usedAB !== null ? usedAB + '%' : 'unknown'}${liveAB === null ? ' /saved/' : ''})`);
+        if (!result.rank) botLog('warn', 'Could not determine rank → storing anyway');
+
+        if (!result.rank || acceptable.includes(result.rank)) {
+          botLog('ok', `Quality ${result.rank || '?'} accepted → Storing in slot`);
+          state.huntState = 'storing';
+          state.storeFreeBefore = freeNow;
+          state.storeRank = result.rank || '?';
+          state.storeAttempts = 0;
+          // CRITICAL: persist state before click (button may reload the page)
+          sSet({ [SK('state')]: state }, () => {
+            const btn = document.getElementById('storeBloodBtn') || document.getElementById('extractBloodBtn');
+            if (btn) clickWithConfirm(btn);
+            botSetTimeout(() => { loadState(st => loadSettings(se => botTick(st, se))); }, randomDelay(3000, 4500));
+          });
+          return;
+        }
+        botLog('warn', `Quality "${result.rank}" (raw: "${result.quality || '?'}") not acceptable (want: [${acceptable.join(',')}]), not storing`);
+      }
+      saveState(state);
+    }
+
+    // ── C) Next step ──
+    if (settings.extractEnabled && freeNow === 0) {
+      goCrucible(state, settings, 'full');
+      return;
+    }
+
+    const huntType = decideHuntType(settings);
+    const neededAP = HUNT_TYPES.find(h => h.id === huntType)?.ap || 1;
+    if (ap.current !== null && ap.current >= neededAP) {
+      const repeatForm = document.querySelector(`form[action*="robbery/humanhunt/${huntType}"]`);
+      state.huntState = 'navigating';
+      saveState(state);
+      if (repeatForm) {
+        const submitBtn = repeatForm.querySelector('button[type="submit"], input[type="submit"]');
+        if (submitBtn) {
+          botLog('info', `Opakujem lov typu ${huntType} (${HUNT_TYPES.find(h => h.id === huntType)?.name})`);
+          botSetTimeout(() => submitBtn.click(), randomDelay(600, 1400));
+          return;
+        }
+      }
+      botLog('info', `Navigating to hunt: ${HUNT_TYPES.find(h => h.id === huntType)?.name}`);
+      botSetTimeout(() => { window.location.href = BASE + '/robbery/humanhunt/' + huntType; }, randomDelay(600, 1500));
+      return;
+    }
+
+    // Not enough AP for another hunt
+    botLog('warn', `Not enough AP (${ap.current}/${neededAP}).`);
+    const filledGuess = (result.totalSlots !== null && freeNow !== null) ? (result.totalSlots - freeNow) : 0;
+    if (settings.extractEnabled && ((state.storedThisSession || 0) > 0 || filledGuess > 0)) {
+      goCrucible(state, settings, 'ap');
+      return;
+    }
+    state.huntState = 'done';
+    saveState(state);
+    updateHuntUI(settings, state);
+  }
+
+  // Executes one extract/rite action on the Crucible page, then reloads it
+  // so the next tick sees fresh server state (the game updates slots via AJAX).
+  function doCrucibleAction(state, slot, type) {
+    const sel = type === 'rite' ? '.cr-rite-btn' : '.cr-extract-btn';
+    const btn = document.querySelector(`.cr-slot--filled ${sel}[data-slot-id="${slot.slotId}"]`)
+      || (() => { // rite button may lack data-slot-id → find by slot index
+        const el = document.querySelector(`.cr-slot--filled[data-index="${slot.index}"] ${sel}`);
+        return el;
+      })();
+    if (!btn || !isBtnEnabled(btn)) {
+      botLog('warn', `Crucible: ${type} button for slot ${slot.index} not clickable — skipping slot`);
+      state.crucibleSkip = (state.crucibleSkip || []).concat([slot.slotId || ('i' + slot.index)]);
+      saveState(state);
+      botSetTimeout(() => crucibleTick(state, null), randomDelay(500, 1000));
+      return;
+    }
+    const prev = state.cruciblePending;
+    state.cruciblePending = {
+      slotId: slot.slotId, index: slot.index, rank: slot.rank, type: type,
+      ts: Date.now(), beBefore: readBE() || 0,
+      attempts: (prev && prev.slotId === slot.slotId && prev.type === type) ? (prev.attempts || 1) + 1 : 1,
+    };
+    botLog('info', type === 'rite'
+      ? `🕯 Crucible: Sacrificing rank ${slot.rank || '?'} (slot ${slot.index}) for 3-day ritual`
+      : `🩸 Crucible: Extracting rank ${slot.rank || '?'} (slot ${slot.index})`);
+    sSet({ [SK('state')]: state }, () => {
+      clickWithConfirm(btn);
+      botSetTimeout(() => { window.location.href = BASE + '/crucible/index'; }, randomDelay(3500, 5000));
+    });
+  }
+
+  function crucibleTick(state, settings) {
+    if (!settings) { loadSettings(se => crucibleTick(state, getEffectiveSettings(se))); return; }
+
+    if (!PAGE.includes('/crucible/')) {
+      botLog('info', 'Crucible: navigating to Obetná komnata');
+      botSetTimeout(() => { window.location.href = BASE + '/crucible/index'; }, randomDelay(800, 1800));
+      return;
+    }
+    const c = parseCrucible();
+    if (!c.found) {
+      botLog('warn', 'Crucible: slot list not found on page (layout changed?) — resuming hunt');
+      state.huntState = 'navigating';
+      saveState(state);
+      botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1500, 3000));
+      return;
+    }
+
+    // ── Verify the previous action ──
+    const p = state.cruciblePending;
+    if (p) {
+      const still = c.filled.find(s => (p.slotId && s.slotId === p.slotId) || (!p.slotId && s.index === p.index));
+      if (still) {
+        if ((p.attempts || 1) < 2) {
+          botLog('warn', `Crucible: ${p.type} on slot ${p.index} not applied yet — retrying`);
+          doCrucibleAction(state, still, p.type);
+          return;
+        }
+        botLog('warn', `Crucible: ${p.type} on slot ${p.index} failed twice — skipping slot`);
+        state.crucibleSkip = (state.crucibleSkip || []).concat([p.slotId || ('i' + p.index)]);
+      } else {
+        const beAfter = readBE() || 0;
+        const gain = beAfter - (p.beBefore || 0);
+        if (p.type === 'extract') {
+          state.extractionsThisSession = (state.extractionsThisSession || 0) + 1;
+          state.recruitDoneThisExtraction = false;   // allow "after extraction" recruit trigger
+          botLog('ok', gain > 0
+            ? `🩸 Blood Essence +${gain} (${p.beBefore} → ${beAfter}) from rank ${p.rank || '?'}`
+            : `🩸 Extracted rank ${p.rank || '?'} (essence now ${beAfter})`);
+        } else {
+          botLog('ok', `🕯 Ritual started with rank ${p.rank || '?'} (3 days)`);
+        }
+        appendExtractionLog({
+          ts: Date.now(), gain: p.type === 'extract' ? Math.max(0, gain) : 0,
+          before: p.beBefore || 0, after: beAfter,
+          extraction: state.extractionsThisSession || 0,
+          rank: p.rank || null, action: p.type,
+        });
+      }
+      state.cruciblePending = null;
+      saveState(state);
+    }
+
+    // ── Pick next filled slot ──
+    const skip = state.crucibleSkip || [];
+    const todo = c.filled.filter(s => !skip.includes(s.slotId || ('i' + s.index)) && (s.canExtract || s.canRite));
+    if (todo.length) {
+      const riteRanks = settings.crucibleRiteRanks || ['S'];
+      if (settings.crucibleMode === 'rite' && !c.riteActive) {
+        const riteCand = todo
+          .filter(s => s.canRite && s.rank && riteRanks.includes(s.rank))
+          .sort((a, b) => rankIndex(a.rank) - rankIndex(b.rank))[0];
+        if (riteCand) { doCrucibleAction(state, riteCand, 'rite'); return; }
+      }
+      const ex = todo.find(s => s.canExtract);
+      if (ex) { doCrucibleAction(state, ex, 'extract'); return; }
+    }
+
+    // ── All stored vials processed → decide what's next ──
+    state.storedThisSession = 0;
+    state.crucibleSkip = [];
+    const reason = state.crucibleReason;
+    state.crucibleReason = null;
+    const resume = settings.crucibleResume === 'any' ? 'any' : 'all';
+    const rems = c.consumed.map(s => s.remainingSec).filter(v => v > 0);
+    botLog('info', `Crucible done: empty ${c.empty}, on cooldown ${rems.length}, ritual ${c.riteActive ? 'active' : 'inactive'}`);
+
+    if (reason === 'ap') {
+      botLog('warn', 'Hunt: out of AP — hunt bot waiting.');
+      state.huntState = 'done';
+      saveState(state);
+      updateHuntUI(settings, state);
+      return;
+    }
+    const canHuntNow = c.empty > 0 && (resume === 'any' || rems.length === 0);
+    if (canHuntNow) {
+      state.crucibleBounce = (state.crucibleBounce || 0) + 1;
+      if (state.crucibleBounce <= 2) {
+        botLog('info', `Crucible: ${c.empty} slot(s) free → continuing hunt`);
+        state.huntState = 'navigating';
+        saveState(state);
+        botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1200, 2500));
+        return;
+      }
+      // Hunt page keeps saying "full" but Crucible shows empty slots → don't loop
+      botLog('warn', 'Crucible: slot count mismatch between hunt page and Crucible — pausing 10 min');
+      state.crucibleBounce = 0;
+      enterOrbCooldown(state, settings, Date.now() + 10 * 60 * 1000);
+      return;
+    }
+    state.crucibleBounce = 0;
+    if (settings.extractAutoRepeat && rems.length) {
+      const sec = resume === 'any' ? Math.min(...rems) : Math.max(...rems);
+      enterOrbCooldown(state, settings, Date.now() + sec * 1000 + 5000);
+      return;
+    }
+    botLog('ok', 'All slots used. Hunt bot finished (auto-repeat off).');
+    state.huntState = 'done';
+    saveState(state);
+    updateHuntUI(settings, state);
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // v1.6.21 — BATTLE REPORT VERIFIER (data collection for the engine)
+  //   After each Ruins fight the result page links to
+  //   /ancestral/battlereport/{id}. The bot queues that id, fetches the
+  //   report in the background (no navigation), parses the full
+  //   round-by-round log, replays the same armies in BFEngine and stores
+  //   the diff. The list page /ancestral/battlereport is also synced
+  //   periodically so manual fights are collected too.
+  //   Storage: SK('brReports') (cap 300), SK('brQueue'), SK('brMeta').
+  //   Everything is parsed structurally (img src, class names, cell
+  //   positions) — no localized text is used for detection.
+  // ══════════════════════════════════════════════════════════════
+  const BR_MAX_REPORTS = 300;
+  const BR_LIST_SYNC_MS = 2 * 60 * 60 * 1000;
+  let _brBusy = false;
+
+  function brTierFromImg(img) {
+    const src = (img && img.getAttribute('src')) || '';
+    let m = src.match(/Tier(\d+)_Frame/i);
+    if (m) return 'T' + m[1];
+    m = src.match(/enemyUnit_(\d+)/);
+    if (m) return 'E' + m[1];
+    if (/spider/i.test(src)) return 'E9S';
+    return '?';
+  }
+  const brNum = t => parseInt(String(t || '').replace(/[^\d-]/g, '')) || 0;
+
+  function parseBattleReportDoc(doc) {
+    const log = doc.querySelector('.brLog');
+    const head = doc.querySelector('.brHeader');
+    if (!log && !head) return null;
+    const rep = { layer: null, won: null, gold: 0, xp: 0, blood: null, allies: {}, enemies: {}, acts: [], rounds: 0, extraLines: 0 };
+    const eyebrow = doc.querySelector('.brEyebrow');
+    const lm = eyebrow && eyebrow.textContent.match(/#\s*(\d+)/);
+    if (lm) rep.layer = parseInt(lm[1]);
+    const title = doc.querySelector('.brTitle');
+    if (title) rep.won = title.classList.contains('won');
+    doc.querySelectorAll('.brRewards .brReward').forEach(rw => {
+      const v = brNum((rw.querySelector('.brRewardVal') || {}).textContent);
+      if (rw.querySelector('img[src*="gold"]')) rep.gold = v;
+      else if (rw.querySelector('.exp-tb-pill')) rep.xp = v;
+    });
+    // Summary tables: ally (no --enemy) and enemy
+    doc.querySelectorAll('table.brTable').forEach(tbl => {
+      const isEnemy = tbl.classList.contains('brTable--enemy');
+      const target = isEnemy ? rep.enemies : rep.allies;
+      tbl.querySelectorAll('tbody tr').forEach(tr => {
+        const tid = brTierFromImg(tr.querySelector('.unitIcon img, img'));
+        const nums = [...tr.querySelectorAll('td.num')].map(td => brNum(td.textContent));
+        // [sent, remaining, lost, (blood lost — ally only)]
+        if (tid !== '?' && nums.length >= 2) target[tid] = nums;
+      });
+      if (!isEnemy) {
+        const tot = tbl.querySelector('.brBloodTotal strong');
+        if (tot) rep.blood = brNum(tot.textContent);
+      }
+    });
+    // Round-by-round log
+    if (log) {
+      log.querySelectorAll('.brRound').forEach((rd, ri) => {
+        rep.rounds = ri + 1;
+        rd.querySelectorAll('.brAction').forEach(act => {
+          const lines = act.querySelectorAll('.brActionLine');
+          if (!lines.length) return;
+          if (lines.length > 1) rep.extraLines += lines.length - 1;
+          const ln = lines[0];
+          const ents = ln.querySelectorAll('.brEntity');
+          if (ents.length < 2) return;
+          const pv = [...ln.querySelectorAll('.brMeta .pill .pv')].map(x => x.textContent.trim());
+          const units = (pv[1] || '').split(/→|->/).map(brNum);
+          const mods = [...act.querySelectorAll('.brMods .modPill')].map(mp => {
+            const side = mp.querySelector('.idDot.p') ? 'p' : 'e';
+            const icon = ((mp.querySelector('.modIcon') || {}).getAttribute ? mp.querySelector('.modIcon').getAttribute('src') : '') || '';
+            const kind = (icon.match(/Icon_([A-Z]+)/) || [])[1] || '?';
+            const name = ((mp.querySelector('.modName') || {}).textContent || '').trim();
+            const val = ((mp.querySelector('.modVal') || {}).textContent || '').trim();
+            return side + '|' + kind + '|' + name + '|' + val;
+          });
+          // [round, attacker, target, dmg, unitsBefore, unitsAfter, hpAfter, kill, mods]
+          rep.acts.push([ri + 1, brTierFromImg(ents[0].querySelector('img')), brTierFromImg(ents[1].querySelector('img')),
+            brNum(pv[0]), units[0] || 0, units[1] || 0, brNum(pv[2]), ents[1].querySelector('.brKill') ? 1 : 0, mods]);
+        });
+      });
+    }
+    return rep;
+  }
+
+  function brTieInfo(id, rep) {
+    const E = window.BFEngine; if (!E) return { id };
+    const t = E.tierById ? E.tierById(id) : null;
+    const qty = (rep.allies[id] || rep.enemies[id] || [])[0] || 0;
+    return t ? { id, spd: t.spd, pos: t.pos, rank: t.rank, qty } : { id, qty };
+  }
+
+  // Replays the report's armies in BFEngine and diffs action-by-action.
+  function brCompare(rep) {
+    const E = window.BFEngine;
+    if (!E) return { error: 'BFEngine missing' };
+    const allyQ = {}, enemyQ = {};
+    Object.entries(rep.allies).forEach(([k, v]) => { if (v[0] > 0) allyQ[k] = v[0]; });
+    Object.entries(rep.enemies).forEach(([k, v]) => { if (v[0] > 0 && k !== 'E9S') enemyQ[k] = v[0]; });
+    let res;
+    try {
+      res = E.simulate(allyQ, enemyQ, { randomTarget: false, collectLog: true, maxRounds: 50, earlyTermination: false });
+    } catch (e) { return { error: 'simulate: ' + e.message }; }
+    const sim = [];
+    let rnd = 0;
+    for (const ev of (res.log || [])) {
+      if (ev.type === 'roundStart') rnd = ev.round;
+      else if (ev.type === 'attack') sim.push([rnd, ev.attackerId, ev.targetId, ev.damage, ev.targetHp]);
+    }
+    const game = rep.acts;
+    const same = (g, s) => g && s && g[0] === s[0] && g[1] === s[1] && g[2] === s[2] && g[3] === s[3]
+      && (g[6] === s[4] || (s[4] === 0 && g[5] > 0)); // E2 revive: game shows HP after revive
+    const diffs = [], swaps = [];
+    let matched = 0;
+    const n = Math.max(game.length, sim.length);
+    for (let i = 0; i < n; i++) {
+      const g = game[i], s = sim[i];
+      if (same(g, s)) { matched++; continue; }
+      // Adjacent order swap with identical content → tie-break evidence
+      if (same(g, sim[i + 1]) && same(game[i + 1], s)) {
+        swaps.push({ round: g[0], idx: i + 1, gameFirst: brTieInfo(g[1], rep), simFirst: brTieInfo(s[1], rep) });
+        matched += 2; i++; continue;
+      }
+      if (diffs.length < 8) diffs.push({ idx: i + 1, game: g ? g.slice(0, 7) : null, sim: s || null });
+    }
+    const survivors = {};
+    Object.entries(rep.allies).forEach(([k, v]) => {
+      const simSurv = res.lossesPerTier && res.lossesPerTier[k] ? res.lossesPerTier[k].survived : null;
+      if (simSurv !== null && simSurv !== v[1]) survivors[k] = { game: v[1], sim: simSurv };
+    });
+    const outcomeOk = rep.won === null ? null : (rep.won === !!res.victory);
+    const bloodOk = rep.blood === null ? null : (rep.blood === res.essenceLost);
+    return {
+      engine: E.VERSION || '?',
+      actionsGame: game.length, actionsSim: sim.length, matched,
+      exact: diffs.length === 0 && swaps.length === 0 && outcomeOk !== false && bloodOk !== false && Object.keys(survivors).length === 0,
+      orderOnly: diffs.length === 0 && swaps.length > 0,
+      diffs, swaps, survivors,
+      outcomeOk, simVictory: !!res.victory, roundsGame: rep.rounds, roundsSim: res.rounds,
+      bloodOk, bloodSim: res.essenceLost,
+    };
+  }
+
+  function brSummaryText(rep) {
+    const v = rep.verify || {};
+    if (v.error) return `🔬 Report #${rep.id}: verify error (${v.error})`;
+    const base = `🔬 Report #${rep.id} L${rep.layer ?? '?'}: ${v.matched}/${v.actionsGame} actions`;
+    if (v.exact) return base + ' ✓ exact match';
+    const parts = [];
+    v.swaps.forEach(sw => parts.push(`R${sw.round}#${sw.idx} order: game ${sw.gameFirst.id} before ${sw.simFirst.id}`));
+    if (v.diffs.length) {
+      const d = v.diffs[0];
+      parts.push(`first diff #${d.idx}: game ${d.game ? d.game[1] + '→' + d.game[2] + ' ' + d.game[3] : '—'} / sim ${d.sim ? d.sim[1] + '→' + d.sim[2] + ' ' + d.sim[3] : '—'}`);
+    }
+    if (v.outcomeOk === false) parts.push(`outcome game=${rep.won ? 'win' : 'loss'} sim=${v.simVictory ? 'win' : 'loss'}`);
+    if (v.bloodOk === false) parts.push(`blood game=${rep.blood} sim=${v.bloodSim}`);
+    const sk = Object.keys(v.survivors || {});
+    if (sk.length) parts.push('survivors ' + sk.map(k => `${k} ${v.survivors[k].game}/${v.survivors[k].sim}`).join(' '));
+    return base + ' ⚠ ' + parts.join(' · ');
+  }
+
+  function brEnqueue(ids, meta) {
+    ids = (Array.isArray(ids) ? ids : [ids]).map(String).filter(Boolean);
+    if (!ids.length) return;
+    sGet([SK('brQueue'), SK('brReports')], r => {
+      const q = r[SK('brQueue')] || [];
+      const known = new Set((r[SK('brReports')] || []).map(x => String(x.id)).concat(q.map(x => String(x.id))));
+      let added = 0;
+      ids.forEach(id => { if (!known.has(id)) { q.push({ id, ts: Date.now(), tries: 0, bot: meta || null }); known.add(id); added++; } });
+      if (added) sSet({ [SK('brQueue')]: q.slice(-200) }, () => botSetTimeout(brProcessQueue, randomDelay(1200, 2500)));
+    });
+  }
+
+  function brSyncList(cb) {
+    fetch(BASE + '/ancestral/battlereport', { credentials: 'include' })
+      .then(r => r.text())
+      .then(html => {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const ids = [...doc.querySelectorAll('a[href*="/ancestral/battlereport/"]')]
+          .map(a => (a.getAttribute('href').match(/battlereport\/(\d+)/) || [])[1]).filter(Boolean);
+        sGet([SK('brMeta')], r => {
+          const meta = r[SK('brMeta')] || {};
+          meta.lastListSync = Date.now();
+          sSet({ [SK('brMeta')]: meta }, () => { brEnqueue([...new Set(ids)], { source: 'list' }); if (cb) cb(ids.length); });
+        });
+      })
+      .catch(() => { if (cb) cb(-1); });
+  }
+
+  function brProcessQueue() {
+    if (_centralStopActive || _brBusy || !window.BFEngine) return;
+    loadSettings(se => {
+      if (se.brVerifyEnabled === false) return;
+      sGet([SK('brQueue'), SK('brReports'), SK('brMeta')], r => {
+        const meta = r[SK('brMeta')] || {};
+        const known = new Set((r[SK('brReports')] || []).map(x => String(x.id)));
+        const q = (r[SK('brQueue')] || []).filter(x => !known.has(String(x.id)) && (x.tries || 0) < 3);
+        if (!q.length) {
+          if (Date.now() - (meta.lastListSync || 0) > BR_LIST_SYNC_MS) brSyncList();
+          return;
+        }
+        _brBusy = true;
+        const item = q[0];
+        fetch(BASE + '/ancestral/battlereport/' + item.id, { credentials: 'include' })
+          .then(resp => resp.text())
+          .then(html => {
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            harvestUnitsFromDoc(doc);
+            const rep = parseBattleReportDoc(doc);
+            if (!rep || !rep.acts.length) throw new Error('no battle log in report');
+            rep.id = String(item.id);
+            rep.fetchedAt = Date.now();
+            rep.bot = item.bot || null;
+            rep.verify = brCompare(rep);
+            sGet([SK('brReports'), SK('brQueue')], r2 => {
+              const reports = r2[SK('brReports')] || [];
+              if (!reports.some(x => String(x.id) === rep.id)) reports.push(rep);
+              while (reports.length > BR_MAX_REPORTS) reports.shift();
+              const q2 = (r2[SK('brQueue')] || []).filter(x => String(x.id) !== rep.id);
+              sSet({ [SK('brReports')]: reports, [SK('brQueue')]: q2 }, () => {
+                _brBusy = false;
+                botLog(rep.verify.exact ? 'info' : 'warn', brSummaryText(rep));
+                updateBrUI();
+                botSetTimeout(brProcessQueue, randomDelay(1500, 3000));
+              });
+            });
+          })
+          .catch(err => {
+            sGet([SK('brQueue')], r3 => {
+              const q3 = r3[SK('brQueue')] || [];
+              const it = q3.find(x => String(x.id) === String(item.id));
+              if (it) it.tries = (it.tries || 0) + 1;
+              sSet({ [SK('brQueue')]: q3 }, () => { _brBusy = false; });
+            });
+            botLog('warn', `🔬 Report #${item.id}: fetch/parse failed (${err && err.message})`);
+          });
+      });
+    });
+  }
+
+  function updateBrUI() {
+    const el = document.getElementById('bf-br-stats');
+    if (!el) return;
+    sGet([SK('brReports'), SK('brQueue')], r => {
+      const reps = r[SK('brReports')] || [];
+      const q = (r[SK('brQueue')] || []).filter(x => (x.tries || 0) < 3);
+      const exact = reps.filter(x => x.verify && x.verify.exact).length;
+      const order = reps.filter(x => x.verify && x.verify.orderOnly).length;
+      const other = reps.length - exact - order;
+      el.innerHTML = `Reports: <b>${reps.length}</b> · ✓ exact <b style="color:#2ecc71">${exact}</b> · ⇄ order-only <b style="color:#e0a030">${order}</b> · ⚠ other <b style="color:#e74c3c">${other}</b>${q.length ? ` · queue ${q.length}` : ''}`;
+      const list = document.getElementById('bf-br-list');
+      if (list) {
+        const bad = reps.filter(x => x.verify && !x.verify.exact).slice(-6).reverse();
+        list.innerHTML = bad.map(x => `<div style="font-size:0.56rem;color:#9ab08a;border-bottom:1px solid #1a2a1a;padding:1px 0">${brSummaryText(x).replace('🔬 ', '').replace(/</g, '&lt;')}</div>`).join('') || '<div style="font-size:0.56rem;color:#5a7a4a">No differences recorded yet.</div>';
+      }
+    });
+  }
+
+  function brExportJSON() {
+    sGet([SK('brReports')], r => {
+      const reps = r[SK('brReports')] || [];
+      const payload = {
+        exportedAt: new Date().toISOString(), server: location.hostname,
+        engineVersion: (window.BFEngine && window.BFEngine.VERSION) || '?',
+        format: { acts: '[round, attacker, target, dmg, unitsBefore, unitsAfter, hpAfter, kill, mods("side|kind|name|value")]',
+                  allies: '{tier: [sent, remaining, lost, bloodLost]}', enemies: '{tier: [sent, remaining, lost]}' },
+        reports: reps,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 1)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `bf_battle_reports_${location.hostname.split('.')[0]}_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a); a.click();
+      botSetTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+      botLog('info', `🔬 Exported ${reps.length} battle reports`);
+    });
   }
 
   // ── BOT STATE MACHINE TICK ───────────────────────────────────
@@ -1491,330 +2290,29 @@
       // ── ACTIVE HUNT LOGIC (only when not on cooldown) ──
       if (!huntWaiting) {
 
-      // ── RECOVERY: After extraction, page reloads with state='extracting'
-      // We're no longer on the result page, so reset state and continue loop
-      if (state.huntState === 'extracting' && !isHuntResultPage()) {
-        // Track BE gain from extraction
-        const beAfter = readBE() || 0;
-        const beBefore = state.beBeforeExtract || 0;
-        const beGain = beAfter - beBefore;
-        if (beGain > 0) {
-          botLog('ok', `🩸 Blood Essence +${beGain} (${beBefore} → ${beAfter})`);
-          // Save to extraction log
-          sGet([SK('extractionLog')], r => {
-            const log = r[SK('extractionLog')] || [];
-            log.push({
-              ts: Date.now(),
-              gain: beGain,
-              before: beBefore,
-              after: beAfter,
-              extraction: state.extractionsThisSession || 1,
-            });
-            while (log.length > 500) log.shift();
-            sSet({ [SK('extractionLog')]: log });
-          });
-        } else if (beBefore === 0 && beAfter > 0) {
-          // beBeforeExtract was lost (state race condition) — log extraction without gain data
-          botLog('info', `🩸 Extraction complete (essence: ${beAfter}, before: unknown)`);
-          sGet([SK('extractionLog')], r => {
-            const log = r[SK('extractionLog')] || [];
-            log.push({
-              ts: Date.now(),
-              gain: 0,
-              before: 0,
-              after: beAfter,
-              extraction: state.extractionsThisSession || 1,
-              note: 'beBeforeExtract lost',
-            });
-            while (log.length > 500) log.shift();
-            sSet({ [SK('extractionLog')]: log });
-          });
-        }
+      // ── v1.6.20 — CRUCIBLE PHASE (extract / sacrifice stored blood) ──
+      if (state.huntState === 'crucible') {
+        crucibleTick(state, settings);
+        return;
+      }
+      // Legacy state from v1.6.19 (old inline extraction) → just continue hunting
+      if (state.huntState === 'extracting') {
+        state.huntState = 'navigating';
         state.beBeforeExtract = null;
-        botLog('ok', `Extraction ${state.extractionsThisSession || 1}/3 complete`);
-        
-        // Check if all orbs are extracted
-        if (state.extractionsThisSession >= 3) {
-          if (settings.extractAutoRepeat) {
-            botLog('info', 'All 3 orbs extracted. Waiting for cooldown.');
-            enterOrbCooldown(state, settings);
-            return;
-          } else {
-            botLog('ok', 'All 3 orbs extracted. Hunt bot finished.');
-            state.huntState = 'done';
-            saveState(state);
-            updateHuntUI(settings, state);
-            return;
-          }
-        }
-
-        // Still have orbs to fill — continue hunting
+        saveState(state);
+      }
+      // Store was clicked but we ended up somewhere else (page reload/redirect)
+      if (state.huntState === 'storing' && !isHuntResultPage()) {
+        botLog('info', 'Store: left result page before confirmation — counting as stored, continuing');
+        state.storedThisSession = (state.storedThisSession || 0) + 1;
         state.huntState = 'navigating';
         saveState(state);
-        botLog('info', 'Continuing hunt for next orb...');
-        
-        // Navigate to hunt page if not already there
-        if (isHuntChoicePage()) {
-          // Already on choice page, pick hunt type
-          const huntType = decideHuntType(settings);
-          const neededAP = HUNT_TYPES.find(h => h.id === huntType)?.ap || 1;
-          if (ap.current !== null && ap.current >= neededAP) {
-            botLog('info', `AB: ${abPct}% → Lov: ${HUNT_TYPES.find(h => h.id === huntType)?.name} (typ ${huntType})`);
-            botSetTimeout(() => { window.location.href = BASE + '/robbery/humanhunt/' + huntType; }, randomDelay(1500, 3500));
-          } else {
-            botLog('warn', `AP: ${ap.current}/${neededAP}, nedostatok pre lov.`);
-            state.huntState = 'done';
-            saveState(state);
-          }
-          return;
-        } else {
-          // Navigate to hunt choice page
-          botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1500, 3500));
-          return;
-        }
       }
 
       // On hunt result page
       if (isHuntResultPage()) {
-        const result = parseHuntResult();
-        
-        // If we were extracting and we're still on result page (extraction may have happened inline)
-        if (state.huntState === 'extracting') {
-          // Track BE gain from inline/redirect extraction
-          const beAfter = readBE() || 0;
-          const beBefore = state.beBeforeExtract || 0;
-          const beGain = beAfter - beBefore;
-          if (beGain > 0) {
-            botLog('ok', `🩸 Blood Essence +${beGain} (${beBefore} → ${beAfter})`);
-            sGet([SK('extractionLog')], r => {
-              const log = r[SK('extractionLog')] || [];
-              log.push({
-                ts: Date.now(),
-                gain: beGain,
-                before: beBefore,
-                after: beAfter,
-                extraction: state.extractionsThisSession || 1,
-              });
-              while (log.length > 500) log.shift();
-              sSet({ [SK('extractionLog')]: log });
-            });
-          } else if (beBefore === 0 && beAfter > 0) {
-            botLog('info', `🩸 Extraction (essence: ${beAfter}, before: unknown)`);
-            sGet([SK('extractionLog')], r => {
-              const log = r[SK('extractionLog')] || [];
-              log.push({
-                ts: Date.now(),
-                gain: 0,
-                before: 0,
-                after: beAfter,
-                extraction: state.extractionsThisSession || 1,
-                note: 'beBeforeExtract lost',
-              });
-              while (log.length > 500) log.shift();
-              sSet({ [SK('extractionLog')]: log });
-            });
-          }
-          state.beBeforeExtract = null;
-          botLog('ok', `Extraction ${state.extractionsThisSession || 1}/3 complete (inline)`);
-          
-          // Check orbs again - if still has extraction & orbs, the extraction didn't complete yet
-          if (result.hasExtraction && result.orbsReady > 0) {
-            // Extraction modal might still be open, wait a bit and retry
-            botLog('info', 'Extraction still in progress, waiting...');
-            botSetTimeout(() => botTick(state, settings), randomDelay(2000, 4000));
-            return;
-          }
-          
-          // Extraction completed - continue to next hunt
-          state.huntState = 'navigating';
-          saveState(state);
-        } else {
-          botLog('info', `Hunt result: ${result.success ? 'Success' : 'Failure'}, Rank: ${result.rank || '–'}, Orbs: ${result.orbsReady}/${result.orbsTotal} available`);
-        }
-
-        // No ready orbs — all on cooldown
-        if (result.orbsTotal > 0 && result.orbsReady === 0) {
-          if (settings.extractAutoRepeat) {
-            botLog('info', `No available orbs (0/${result.orbsTotal}). Waiting for cooldown.`);
-            enterOrbCooldown(state, settings);
-            return;
-          } else {
-            botLog('ok', `No available orbs. Hunt bot finished.`);
-            state.huntState = 'done';
-            saveState(state);
-            updateHuntUI(settings, state);
-            return;
-          }
-        }
-        else if (result.hasExtraction && result.orbsReady > 0) {
-          const acceptable = getAcceptableQualities(settings, state);
-          const liveAB = getABPercent();
-          const usedAB = liveAB !== null ? liveAB : (state.lastKnownABPct ?? null);
-          botLog('info', `Accepted qualities: [${acceptable.join(',')}] (AB: ${usedAB !== null ? usedAB + '%' : 'unknown'}${liveAB === null ? ' /saved/' : ''})`);
-
-          // If rank couldn't be parsed, log it and accept anyway
-          if (!result.rank) {
-            botLog('warn', `Could not determine rank (rank-line DOM missing?) → Extracting anyway`);
-            // Fall through to extract
-          }
-
-          if (!result.rank || (result.rank && acceptable.includes(result.rank))) {
-            // Accept & extract
-            botLog('ok', `Quality ${result.rank} accepted → Extracting`);
-            state.huntState = 'extracting';
-            state.extractionsThisSession = (state.extractionsThisSession || 0) + 1;
-            state.recruitDoneThisExtraction = false; // allow recruit after this extraction
-            // Snapshot BE before extraction for tracking gain
-            state.beBeforeExtract = readBE() || 0;
-            
-            // CRITICAL: Wait for state save before triggering extraction (redirect)
-            // chrome.storage.local.set is async — if we click before it completes,
-            // the page redirects and state is lost
-            sSet({ [SK('state')]: state }, () => {
-              const extractBtn = document.getElementById('extractBloodBtn');
-              if (extractBtn) {
-                // Helper: track BE gain after inline extraction
-                function trackInlineBEGain(st, cb) {
-                  const beAfter = readBE() || 0;
-                  const beBefore = st.beBeforeExtract || 0;
-                  const beGain = beAfter - beBefore;
-                  if (beGain > 0) {
-                    botLog('ok', `🩸 Blood Essence +${beGain} (${beBefore} → ${beAfter})`);
-                    sGet([SK('extractionLog')], r => {
-                      const log = r[SK('extractionLog')] || [];
-                      log.push({
-                        ts: Date.now(),
-                        gain: beGain,
-                        before: beBefore,
-                        after: beAfter,
-                        extraction: st.extractionsThisSession || 1,
-                      });
-                      while (log.length > 500) log.shift();
-                      sSet({ [SK('extractionLog')]: log }, () => { if (cb) cb(); });
-                    });
-                  } else if (beAfter > 0 && beBefore === 0) {
-                    // beBeforeExtract was 0 (missing) but we have a current value — log without gain
-                    botLog('info', `🩸 Essence after extraction: ${beAfter} (before: unknown)`);
-                    if (cb) cb();
-                  } else {
-                    if (cb) cb();
-                  }
-                  st.beBeforeExtract = null;
-                }
-
-                const showModal = extractBtn.getAttribute('data-show-modal');
-                if (showModal === '1') {
-                  // Need to confirm modal — click extract then confirm
-                  extractBtn.click();
-                  botSetTimeout(() => {
-                    const confirmBtn = document.getElementById('confirmModal_buttonLeft');
-                    if (confirmBtn) confirmBtn.click();
-                    // FALLBACK: if extraction is inline (no page redirect), re-tick after delay
-                    botSetTimeout(() => {
-                      loadState(st => {
-                        loadSettings(se => {
-                          if (se.huntEnabled && st.huntState === 'extracting') {
-                            botLog('info', 'Post-extrakcia re-tick (inline)...');
-                            // Track BE gain from inline extraction
-                            trackInlineBEGain(st, () => {});
-                            // Check if all 3 orbs done
-                            if (st.extractionsThisSession >= 3) {
-                              if (se.extractAutoRepeat) {
-                                botLog('info', 'All 3 orbs extracted. Waiting for cooldown.');
-                                enterOrbCooldown(st, se);
-                              } else {
-                                botLog('ok', 'All 3 orbs extracted. Hunt bot finished.');
-                                st.huntState = 'done';
-                                saveState(st);
-                                updateHuntUI(se, st);
-                              }
-                              return;
-                            }
-                            st.huntState = 'navigating';
-                            saveState(st);
-                            botTick(st, se);
-                          }
-                        });
-                      });
-                    }, randomDelay(3000, 5000));
-                  }, 800);
-                } else {
-                  extractBtn.click();
-                  // FALLBACK: if extraction is inline (no page redirect), re-tick after delay
-                  botSetTimeout(() => {
-                    loadState(st => {
-                      loadSettings(se => {
-                        if (se.huntEnabled && st.huntState === 'extracting') {
-                          botLog('info', 'Post-extrakcia re-tick (inline)...');
-                          // Track BE gain from inline extraction
-                          trackInlineBEGain(st, () => {});
-                          // Check if all 3 orbs done
-                          if (st.extractionsThisSession >= 3) {
-                            if (se.extractAutoRepeat) {
-                              botLog('info', 'All 3 orbs extracted. Waiting for cooldown.');
-                              enterOrbCooldown(st, se);
-                            } else {
-                              botLog('ok', 'All 3 orbs extracted. Hunt bot finished.');
-                              st.huntState = 'done';
-                              saveState(st);
-                              updateHuntUI(se, st);
-                            }
-                            return;
-                          }
-                          st.huntState = 'navigating';
-                          saveState(st);
-                          botTick(st, se);
-                        }
-                      });
-                    });
-                  }, randomDelay(3000, 5000));
-                }
-              }
-            });
-            return;
-          } else {
-            // Quality not acceptable, skip extraction
-            botLog('warn', `Quality "${result.rank}" (raw: "${result.quality || '?'}") not acceptable (want: [${acceptable.join(',')}]), skipping extraction`);
-          }
-        }
-
-        // Continue hunting if AP available
-        const huntType = decideHuntType(settings);
-        const neededAP = HUNT_TYPES.find(h => h.id === huntType)?.ap || 1;
-
-        if (ap.current !== null && ap.current >= neededAP) {
-          // Check if there's a "Zopakovať" (repeat) button matching our type
-          const repeatForm = document.querySelector(`form[action*="robbery/humanhunt/${huntType}"]`);
-          if (repeatForm) {
-            botLog('info', `Opakujem lov typu ${huntType} (${HUNT_TYPES.find(h => h.id === huntType)?.name})`);
-            state.huntState = 'navigating';
-            saveState(state);
-
-            const submitBtn = repeatForm.querySelector('button[type="submit"], input[type="submit"]');
-            if (submitBtn) {
-              submitBtn.click();
-              return;
-            }
-          }
-
-          // Otherwise navigate directly
-          state.huntState = 'navigating';
-          saveState(state);
-          botLog('info', `Navigating to hunt: ${HUNT_TYPES.find(h => h.id === huntType)?.name}`);
-          botSetTimeout(() => { window.location.href = BASE + '/robbery/humanhunt/' + huntType; }, randomDelay(600, 1500));
-          return;
-        } else {
-          // No AP
-          botLog('warn', `Not enough AP (${ap.current}/${neededAP}). Hunt bot waiting.`);
-          state.huntState = 'done';
-          saveState(state);
-
-          // Check if we should wait for orb cooldown
-          if (settings.extractAutoRepeat && state.extractionsThisSession >= 3) {
-            botLog('info', 'All 3 orbs extracted. Waiting for cooldown.');
-            enterOrbCooldown(state, settings);
-          }
-        }
+        handleHuntResultPage(state, settings, ap);
+        return;
       }
 
       // On hunt choice page (/robbery/index)
@@ -1831,13 +2329,18 @@
           return;
         } else {
           botLog('warn', `AP: ${ap.current}/${neededAP}, nedostatok pre lov.`);
+          // v1.6.20 — process stored vials before going idle
+          if (settings.extractEnabled && (state.storedThisSession || 0) > 0) {
+            goCrucible(state, settings, 'ap');
+            return;
+          }
           state.huntState = 'done';
           saveState(state);
         }
       }
 
       // Not on hunt page — navigate there
-      else if (state.huntState === 'idle' || state.huntState === 'navigating') {
+      else if (state.huntState === 'idle' || state.huntState === 'navigating' || state.huntState === 'on_result') {
         if (!PAGE.includes('/robbery/')) {
           botLog('info', 'Navigating to hunt page...');
           state.huntState = 'navigating';
@@ -1874,7 +2377,7 @@
     // gold above threshold is a raid magnet and cannot sit).
     // ══════════════════════════════════════════════════════════
     const anyBotActivelyNavigating = 
-      (huntEnabled && !huntWaiting && state.huntState === 'navigating') ||
+      (huntEnabled && !huntWaiting && (state.huntState === 'navigating' || state.huntState === 'crucible' || state.huntState === 'storing')) ||
       (ruinsEnabled && state.ruinsState === 'navigating') ||
       (settings.storyEnabled && state.storyState === 'navigating');
 
@@ -2068,6 +2571,14 @@
           blood: bloodReward,
         };
 
+        // v1.6.21 — queue the game's battle report for background verification
+        const brLink = document.querySelector('a.combatBtnBattleReport[href*="/ancestral/battlereport/"], a[href*="/ancestral/battlereport/"]');
+        const brId = brLink ? (brLink.getAttribute('href').match(/battlereport\/(\d+)/) || [])[1] : null;
+        if (brId) {
+          entry.reportId = brId;
+          if (settings.brVerifyEnabled !== false) brEnqueue(brId, { source: battle.source, level: resultLevel, formation: battle.formation });
+        }
+
         // Save to battle history
         sGet([SK('ruinsBattleLog')], r => {
           const log = r[SK('ruinsBattleLog')] || [];
@@ -2131,6 +2642,7 @@
     if (!state.ruinsCurrentIdx) state.ruinsCurrentIdx = 0;
     if (!state.ruinsCurrentCycle) state.ruinsCurrentCycle = 1;
     if (!state.ruinsAttackTimes) state.ruinsAttackTimes = {};
+    if (!state.ruinsLayerBlockedUntil) state.ruinsLayerBlockedUntil = {};
 
     const level = levels[state.ruinsCurrentIdx];
 
@@ -2142,9 +2654,7 @@
     for (let scanOffset = 0; scanOffset < levels.length; scanOffset++) {
       const scanIdx = (state.ruinsCurrentIdx + scanOffset) % levels.length;
       const scanLevel = levels[scanIdx];
-      const scanLast = state.ruinsAttackTimes[scanLevel] || 0;
-      const scanIntervalMs = getRuinsIntervalForLevel(scanLevel, settings) * 60 * 1000;
-      if (now - scanLast >= scanIntervalMs) {
+      if (now >= ruinsLayerReadyAt(scanLevel, settings, state)) {
         // Found a level ready to attack — advance index to it
         if (scanOffset > 0) {
           state.ruinsCurrentIdx = scanIdx;
@@ -2159,9 +2669,7 @@
       // All levels are on cooldown — find the shortest remaining wait time
       let minWait = Infinity;
       for (const lvl of levels) {
-        const last = state.ruinsAttackTimes[lvl] || 0;
-        const lvlIntervalMs = getRuinsIntervalForLevel(lvl, settings) * 60 * 1000;
-        const remaining = lvlIntervalMs - (now - last);
+        const remaining = ruinsLayerReadyAt(lvl, settings, state) - now;
         if (remaining > 0 && remaining < minWait) minWait = remaining;
       }
       const waitMs = Math.max(minWait, 30000); // at least 30s
@@ -2178,17 +2686,42 @@
       return;
     }
 
-    const lastAttack = state.ruinsAttackTimes[level] || 0;
-    const levelIntervalMs = getRuinsIntervalForLevel(level, settings) * 60 * 1000;
-    if (now - lastAttack < levelIntervalMs) {
+    if (now < ruinsLayerReadyAt(level, settings, state)) {
       // Current level still on cooldown after scan (shouldn't happen, but safety)
       saveState(state);
       botSetTimeout(() => ruinsTick(state, settings), 100);
       return;
     }
 
+    // v1.6.22 — LIMIT / REDIRECT GUARD. An exhausted layer does not render
+    // /ancestral/show/N — the game redirects (e.g. to /ancestral/index) and
+    // shows .ruinsConditions .layerCooldown there. Without this guard the bot
+    // re-navigated to the same layer forever.
+    if (!isOnRuinsShowFor(level) && PAGE.includes('/ancestral/')) {
+      const urlLayer = parseInt(new URLSearchParams(window.location.search).get('layerId')) || null;
+      const cdSec = parseRuinsLayerCooldown();
+      const nav = state.ruinsNavTarget;
+      const justNavigated = nav && nav.level === level && (Date.now() - nav.ts) < 120000;
+      if (cdSec > 0 && (justNavigated || urlLayer === level)) {
+        if (ruinsBlockLayerAndAdvance(state, settings, levels, level, cdSec, 'daily limit reached')) return;
+        botSetTimeout(() => ruinsTick(state, settings), randomDelay(400, 900));
+        return;
+      }
+      if (cdSec > 0 && urlLayer && urlLayer !== level && levels.includes(urlLayer)) {
+        // Page shows the limit for another layer of ours → remember it too
+        if (!state.ruinsLayerBlockedUntil) state.ruinsLayerBlockedUntil = {};
+        state.ruinsLayerBlockedUntil[urlLayer] = Date.now() + cdSec * 1000 + 30000;
+      }
+      if (justNavigated && (nav.tries || 0) >= 2) {
+        // Redirected away twice without a readable countdown → back off 30 min
+        if (ruinsBlockLayerAndAdvance(state, settings, levels, level, 30 * 60, `redirected away from /ancestral/show/${level} (${PAGE})`)) return;
+        botSetTimeout(() => ruinsTick(state, settings), randomDelay(400, 900));
+        return;
+      }
+    }
+
     // Navigate to ruins level
-    if (!PAGE.includes('/ancestral/show/' + level)) {
+    if (!isOnRuinsShowFor(level)) {
       // Check cycle completion after incrementing
       if (state.ruinsCurrentIdx >= levels.length) {
         if (settings.ruinsCadence === 'once') {
@@ -2204,15 +2737,31 @@
         botLog('info', `Ruins: Cycle ${state.ruinsCurrentCycle}/${settings.ruinsCadence === 'infinite' ? '∞' : settings.ruinsCycles}`);
       }
 
-      botLog('info', `Ruins: Navigating to layer ${levels[state.ruinsCurrentIdx]}`);
+      const navLevel = levels[state.ruinsCurrentIdx];
+      const prevNav = state.ruinsNavTarget;
+      state.ruinsNavTarget = { level: navLevel, ts: Date.now(),
+        tries: (prevNav && prevNav.level === navLevel && (Date.now() - prevNav.ts) < 120000) ? (prevNav.tries || 0) + 1 : 0 };
+      botLog('info', `Ruins: Navigating to layer ${navLevel}`);
       state.ruinsState = 'navigating';
       saveState(state);
-      botSetTimeout(() => { window.location.href = BASE + '/ancestral/show/' + levels[state.ruinsCurrentIdx]; }, randomDelay(800, 2000));
+      botSetTimeout(() => { window.location.href = BASE + '/ancestral/show/' + navLevel; }, randomDelay(800, 2000));
       return;
     }
 
     // On the correct ruins show page — analyze enemy, check presets, simulate, fight
     if (isRuinsShowPage()) {
+      // v1.6.20 — daily limit reached on this layer → block until reset, move on
+      const layerCdSec = parseRuinsLayerCooldown();
+      const noEnemyOnLayer = Object.keys(parseRuinsEnemies()).length === 0;
+      if (layerCdSec > 0 || noEnemyOnLayer) {
+        // Fallback when the countdown element is missing but the layer is empty: 30 min
+        const blockSec = layerCdSec > 0 ? layerCdSec : 30 * 60;
+        if (ruinsBlockLayerAndAdvance(state, settings, levels, level, blockSec,
+              layerCdSec > 0 ? 'daily limit reached' : 'no enemies on page')) return;
+        botSetTimeout(() => ruinsTick(state, settings), randomDelay(400, 900));
+        return;
+      }
+      state.ruinsNavTarget = null;   // arrived on the right show page
       // Save current layer for simulator (smart preset pre-fill)
       try {
         if (chrome && chrome.storage && chrome.storage.local) {
@@ -2242,7 +2791,7 @@
           botLog('warn', `⛔ STOP — Not enough units: ${shortages.join(', ')}`);
           botLog('warn', 'Ruins Bot stopped for safety. Replenish units and restart.');
           settings.ruinsEnabled = false;
-          saveSettings(settings);
+          patchSettings({ ruinsEnabled: false });
           state.ruinsState = 'done';
           saveState(state);
           updateRuinsUI(settings, state);
@@ -2316,9 +2865,9 @@
             saveState(state);
             botSetTimeout(() => { fightBtn.click(); }, randomDelay(300, 800));
           } else {
-            botLog('warn', `Ruins layer ${level}: fightBtn locked, skipping`);
-            state.ruinsCurrentIdx++;
-            saveState(state);
+            // v1.6.22 — locked entry = layer unavailable; block it so we don't hammer it
+            const lockSec = parseRuinsLayerCooldown() || 30 * 60;
+            if (ruinsBlockLayerAndAdvance(state, settings, levels, level, lockSec, 'fight button locked')) return;
             botSetTimeout(() => botTick(state, settings), randomDelay(1000, 2000));
           }
         }
@@ -2332,7 +2881,7 @@
           botLog('warn', `⛔ STOP — Layer ${level}: no winning formation!`);
           botLog('warn', 'Ruins Bot stopped. Replenish units or add preset.');
           settings.ruinsEnabled = false;
-          saveSettings(settings);
+          patchSettings({ ruinsEnabled: false });
           state.ruinsState = 'done';
           saveState(state);
           updateRuinsUI(settings, state);
@@ -2384,7 +2933,7 @@
             botLog('warn', `⛔ STOP — Preset requires [${needed}] but you have [${have}]`);
             botLog('warn', 'Ruins Bot stopped — not enough for preset. Replenish units and restart.');
             settings.ruinsEnabled = false;
-            saveSettings(settings);
+            patchSettings({ ruinsEnabled: false });
             state.ruinsState = 'done';
             saveState(state);
             updateRuinsUI(settings, state);
@@ -2415,7 +2964,7 @@
               if (action === 'stop') {
                 botLog('warn', `⛔ STOP — T4 short for Kill E3 R1 (need ${minT4}, have ${haveT4}). Train T4 and restart.`);
                 settings.ruinsEnabled = false;
-                saveSettings(settings);
+                patchSettings({ ruinsEnabled: false });
                 state.ruinsState = 'done';
                 saveState(state);
                 updateRuinsUI(settings, state);
@@ -2835,7 +3384,9 @@
           <span style="color:#5a7a4a;font-size:0.55rem;min-width:14px;text-align:right">${idx + 1}.</span>
           <label class="bf-bot-checkbox" style="flex:1;margin:0">
             <input type="checkbox" class="bf-recruit-prio-en" data-tier="${n}" ${checked}>
+            ${unitImgTag('T' + n, 18)}
             <span style="color:#e0c068;font-weight:bold">T${n}</span>
+            <span style="color:#9a8a6a;font-size:0.56rem">${unitName('T' + n)}</span>
             <span style="color:#5a7a4a;font-size:0.55rem">(${cost} BE)</span>
           </label>
           <button class="bf-recruit-prio-up" data-idx="${idx}" title="Move up" style="background:none;border:1px solid #3a3a3a;color:#888;cursor:pointer;width:18px;height:18px;font-size:0.6rem;border-radius:2px">▲</button>
@@ -3118,7 +3669,39 @@
   }
 
   function saveSettings(settings) {
+    // v1.6.23 — never persist schedule-mask artefacts (effective settings)
+    if (settings && settings._scheduleActiveSlotId !== undefined) {
+      settings = Object.assign({}, settings);
+      delete settings._scheduleActiveSlotId;
+    }
     sSet({ [SK('settings')]: settings });
+  }
+
+  // v1.6.23 — runtime code must not save the (possibly stale or
+  // schedule-masked) settings object it was handed: that overwrote the
+  // user's latest edits and, with Schedule on, persisted the slot's
+  // enable-mask as the user's real toggles ("settings reset by themselves").
+  // patchSettings() re-reads fresh settings and changes only given fields.
+  // Serialized read-modify-write: two quick edits can no longer read the
+  // same old copy and overwrite each other (lost update).
+  let _settingsChain = Promise.resolve();
+  function mutateSettings(fn, cb) {
+    _settingsChain = _settingsChain.then(() => new Promise(res => {
+      if (!ctxOk()) { res(); return; }
+      let done = false;
+      const finish = () => { if (!done) { done = true; res(); } };
+      setTimeout(finish, 4000);   // safety: never block the chain (plain timer on purpose — must run during STOP)
+      loadSettings(fresh => {
+        try { fn(fresh); } catch (e) { console.warn('[BF-Bot] settings mutate failed', e); }
+        const clean = Object.assign({}, fresh);
+        delete clean._scheduleActiveSlotId;
+        sSet({ [SK('settings')]: clean }, () => { if (cb) cb(fresh); finish(); });
+      });
+    }));
+    return _settingsChain;
+  }
+  function patchSettings(patch, cb) {
+    return mutateSettings(fresh => Object.assign(fresh, patch), cb);
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -3613,7 +4196,7 @@
     // If we initiated a navigation and arrived on /nourishing/index, this
     // is the *same* recruit cycle — execute the work without re-running gates.
     if (state.recruitNavigating && PAGE.includes('/nourishing/index')) {
-      botLog('info', '⚔ Recruit: Arrived at Crimson Sanctuary — executing training');
+      botLog('info', '⚔ Recruit: Arrived at Nourishing Pits — executing training');
       state.recruitNavigating = false;
       saveState(state);
       return recruitExecuteOnNourishingPage(state, settings, { trigger: settings.recruitTrigger });
@@ -3643,7 +4226,10 @@
       if (trigger === 'idle') {
         shouldRun = !anythingBusy;
       } else if (trigger === 'extraction') {
-        shouldRun = !!state.extractionsThisSession && !state.recruitDoneThisExtraction;
+        // v1.6.20+ extractions happen in the Crucible batch — wait until the
+        // batch is finished (hunt no longer storing / in Crucible).
+        shouldRun = !!state.extractionsThisSession && !state.recruitDoneThisExtraction
+          && state.huntState !== 'crucible' && state.huntState !== 'storing';
       } else if (trigger === 'threshold') {
         const th = settings.recruitThreshold || 100;
         shouldRun = (be !== null && be >= th) || PAGE.includes('/nourishing/index');
@@ -3690,7 +4276,7 @@
     //    applies even if the navigation somehow fails. The
     //    arriving tick will see recruitNavigating=true and skip
     //    the cooldown to execute the work.
-    botLog('info', '⚔ Recruit: Navigating to Crimson Sanctuary');
+    botLog('info', '⚔ Recruit: Navigating to Nourishing Pits (Živné jamy)');
     state.recruitNavigating = true;
     state.recruitLastCycle = now;
     saveState(state);
@@ -4253,7 +4839,7 @@
       state.grottoState = 'done';
       settings.grottoEnabled = false;
       saveState(state);
-      saveSettings(settings);
+      patchSettings({ grottoEnabled: false });
       updateGrottoUI(settings, state);
       return;
     }
@@ -4321,6 +4907,13 @@
     if (!PAGE.includes('/robbery/') || PAGE.includes('/robbery/humanhunt')) return false;
     // DOM-based detection (language-independent): attack link or attack form
     if (document.querySelector('a[href*="/robbery/attack"], a[href*="robbery/dofight"], form[action*="robbery/attack"]')) return true;
+    // v1.6.24 — after the game update the name-search result (player profile,
+    // URL /robbery/index?__token=…) uses <button> submits: PvP "Attack" form
+    // carries input[name=attackID] (+ payCheck); henchman fight is its own form.
+    // No search inputs on the page + one of these markers = profile page.
+    const hasSearchInputs = !!document.querySelector('input[name="optionsearch"], input[name="levelsearch"], input[name="namesearch"], input[name="henchmanfightsearch"]');
+    if (!hasSearchInputs && (document.querySelector('form input[name="attackID"]') || findHenchmanAttackForm())) return true;
+    if (!hasSearchInputs && document.querySelector('form[action*="/robbery/"] button[type="submit"], form[action*="/robbery/"] button:not([type])')) return true;
     // Fallback: any submit button on a page without search forms = attack page
     if (!document.querySelector('input[name="optionsearch"]') &&
         !document.querySelector('input[name="levelsearch"]') &&
@@ -4390,6 +4983,26 @@
   // detectCombatVictory(playerName) → true (user won) / false (user lost)
   //                                   / null (couldn't determine).
   // Callers MUST treat null as "don't update stats" (no false counting).
+  // v1.6.25 — own display name without manual setup: the fight report
+  // links every fighter to /profile/player/{id}; ours is PLAYER_ID.
+  function detectOwnNameOnPage() {
+    if (!PLAYER_ID) return '';
+    const a = document.querySelector(`a[href$="/profile/player/${PLAYER_ID}"], a[href*="/profile/player/${PLAYER_ID}?"]`);
+    return a ? (a.textContent || '').trim() : '';
+  }
+  function resolvePlayerName(settings) {
+    const configured = String((settings && settings.playerName) || '').trim();
+    if (configured) return configured;
+    const auto = detectOwnNameOnPage();
+    if (auto) {
+      patchSettings({ playerName: auto });
+      const el = document.getElementById('bf-player-name');
+      if (el && !el.value) el.value = auto;
+      botLog('info', `Player name auto-detected: "${auto}" (saved to PvP tab)`);
+    }
+    return auto;
+  }
+
   function detectCombatVictory(playerName) {
     const name = String(playerName || '').trim();
 
@@ -4504,7 +5117,7 @@
       // v1.6.19 — Winner-name-based detection. Returns null when the user
       // hasn't configured their playerName, in which case we still navigate
       // back but skip the stats update (warn once, so the user knows why).
-      const isWin = detectCombatVictory(settings.playerName);
+      const isWin = detectCombatVictory(resolvePlayerName(settings));
       if (isWin === true)  state.pvpKills  = (state.pvpKills  || 0) + 1;
       else if (isWin === false) state.pvpDeaths = (state.pvpDeaths || 0) + 1;
       // null → undeterminable; don't touch stats.
@@ -4517,9 +5130,16 @@
       // Result delivered → drop the 'hunting' marker so the no-opponents
       // guard on the next /robbery/index landing doesn't false-positive.
       state.pvpState = 'navigating';
-      // Whitelist round complete — reset the tried-names ledger so the
-      // next round starts fresh from the first name.
-      state.pvpWhitelistTried = [];
+      // v1.6.25 — do NOT reset the tried-names ledger after a fight: the
+      // attacked target is usually unavailable for a while, and restarting
+      // from the first name made the bot re-search the player it had just
+      // fought. The ledger is reset when the whole list is exhausted.
+      if (state.pvpLastTriedWhitelistName) {
+        const lt = state.pvpLastTriedWhitelistName;
+        if (!(state.pvpWhitelistTried || []).some(n => String(n).toLowerCase() === lt.toLowerCase()))
+          state.pvpWhitelistTried = (state.pvpWhitelistTried || []).concat([lt]);
+        state.pvpLastTriedWhitelistName = '';
+      }
       saveState(state);
       if (isWin === null) {
         botLog('warn', 'PvP: Result detected but player name not configured — set "Your in-game player name" in the PvP tab to enable win/loss counting.');
@@ -4542,8 +5162,11 @@
       // form, different button) — the substring "robbery/attack" doesn't appear
       // contiguously inside "robbery/henchmanattack", so the existing selector
       // is already safe.
-      const attackForm = document.querySelector('form[action*="robbery/attack"], form[action*="robbery/dofight"]');
-      const attackBtn = attackForm ? attackForm.querySelector('input[type="submit"], button[type="submit"]') : null;
+      // v1.6.24 — post-update PvP form is identified by input[name=attackID]
+      const attackIdInput = document.querySelector('form input[name="attackID"]');
+      const attackForm = document.querySelector('form[action*="robbery/attack"], form[action*="robbery/dofight"]')
+        || (attackIdInput ? attackIdInput.form : null);
+      const attackBtn = attackForm ? attackForm.querySelector('input[type="submit"], button[type="submit"], button:not([type])') : null;
       // v1.6.19 — also detect a disabled PvP "Attack" button (the game ships
       // it with class="btndisable" when the target is unfightable for the
       // current player). Treated the same as "no attack option" → skip.
@@ -4861,9 +5484,13 @@
     if (!displayedName || !Array.isArray(list) || !list.length) return false;
     const tokens = String(displayedName).trim().toLowerCase().split(/\s+/);
     if (!tokens.length) return false;
+    const full = tokens.join(' ');
     for (const raw of list) {
-      const n = String(raw || '').trim().toLowerCase();
-      if (n && tokens.includes(n)) return true;
+      const n = String(raw || '').trim().toLowerCase().replace(/\s+/g, ' ');
+      if (!n) continue;
+      if (tokens.includes(n)) return true;
+      // v1.6.23 — multi-word names ("Dark Knight") after a race prefix
+      if (n.includes(' ') && (full === n || full.endsWith(' ' + n))) return true;
     }
     return false;
   }
@@ -4905,7 +5532,7 @@
     // ── On battle result page — parse result and go back ──
     if (isPvPBattleResultPage()) {
       // v1.6.19 — winner-name-based detection (shared with PvP).
-      const isWin = detectCombatVictory(settings.playerName);
+      const isWin = detectCombatVictory(resolvePlayerName(settings));
       if (isWin === true)  state.henchmanKills  = (state.henchmanKills  || 0) + 1;
       else if (isWin === false) state.henchmanDeaths = (state.henchmanDeaths || 0) + 1;
       // null → undeterminable; don't touch stats.
@@ -4917,9 +5544,14 @@
       // Result delivered → drop the 'hunting' marker so the no-opponents
       // guard on the next /robbery/index landing doesn't false-positive.
       state.henchmanState = 'navigating';
-      // Whitelist round complete — reset the tried-names ledger so the
-      // next round starts fresh from the first name.
-      state.henchmanWhitelistTried = [];
+      // v1.6.25 — keep the ledger (see PvP note): continue with the NEXT
+      // whitelist name instead of re-searching the one just fought.
+      if (state.henchmanLastTriedWhitelistName) {
+        const lt = state.henchmanLastTriedWhitelistName;
+        if (!(state.henchmanWhitelistTried || []).some(n => String(n).toLowerCase() === lt.toLowerCase()))
+          state.henchmanWhitelistTried = (state.henchmanWhitelistTried || []).concat([lt]);
+        state.henchmanLastTriedWhitelistName = '';
+      }
       saveState(state);
       if (isWin === null) {
         botLog('warn', 'Henchman: Result detected but player name not configured — set "Your in-game player name" in the PvP tab to enable win/loss counting.');
@@ -4956,6 +5588,18 @@
       // ever drops that button from the profile layout — there we reset
       // henchmanState to 'navigating' so the guard doesn't false-positive.
       const skipAndSearchAgain = (reason) => {
+        // v1.6.24 — Whitelist mode: skipping must move to the NEXT whitelist
+        // name, never trigger the random henchman search.
+        if (settings.henchmanMode === 2 || settings.henchmanMode === '2') {
+          if (state.henchmanLastTriedWhitelistName) {
+            state.henchmanWhitelistTried = (state.henchmanWhitelistTried || []).concat([state.henchmanLastTriedWhitelistName]);
+            state.henchmanLastTriedWhitelistName = '';
+          }
+          state.henchmanState = 'navigating';
+          saveState(state);
+          botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
+          return;
+        }
         const inPageSearchBtn = document.querySelector('input[name="henchmanfightsearch"][type="submit"]');
         if (inPageSearchBtn) {
           // Keep state === 'hunting' — clicking the in-page button is itself
@@ -4989,6 +5633,25 @@
         }
       }
 
+      // v1.6.23 — Mode 2: confirm the shown profile IS the searched name.
+      // Race prefix ("Upír Darken.Sanger") is ignored by the token matcher.
+      // All h2 / report-name cells are checked, not only the first h2.
+      if ((settings.henchmanMode === 2 || settings.henchmanMode === '2') && state.henchmanLastTriedWhitelistName) {
+        const want = state.henchmanLastTriedWhitelistName.trim().toLowerCase();
+        const cands = [...document.querySelectorAll('.reportTable td b, h2, .username, #profileName')].map(el => el.textContent || '');
+        const hit = cands.some(t => matchPlayerByNameList(t, [want]));
+        if (!hit) {
+          botLog('warn', `Henchman: profile shown ("${playerNameTrim || '?'}") is not "${state.henchmanLastTriedWhitelistName}" → skipping`);
+          state.henchmanWhitelistTried = (state.henchmanWhitelistTried || []).concat([state.henchmanLastTriedWhitelistName]);
+          state.henchmanLastTriedWhitelistName = '';
+          state.henchmanState = 'navigating';
+          saveState(state);
+          botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
+          return;
+        }
+        botLog('info', `Henchman: whitelist target "${state.henchmanLastTriedWhitelistName}" found`);
+      }
+
       // Mode 2 (whitelist by name): record this player as TRIED so the
       // iteration in the hunt-page branch advances on the next round.
       if ((settings.henchmanMode === 2 || settings.henchmanMode === '2') && playerNameTrim) {
@@ -4999,7 +5662,7 @@
       }
 
       const attackForm = findHenchmanAttackForm();
-      const attackBtn = attackForm ? attackForm.querySelector('button[type="submit"], button[type="button"], input[type="submit"]') : null;
+      const attackBtn = attackForm ? attackForm.querySelector('button[type="submit"], button[type="button"], input[type="submit"], button:not([type])') : null;
 
       if (attackBtn) {
         // v1.6.11 — Detect "own race" / cross-race confirmation flow:
@@ -5074,6 +5737,21 @@
 
       // No henchman attack button — opponent might be on a "search again"
       // page (e.g. profile shown without a fight option). Re-search cleanly.
+      // v1.6.24 — in Whitelist mode never fall back to the RANDOM search
+      // (skipAndSearchAgain clicks henchmanfightsearch) — mark the name as
+      // tried and return to the hunt page for the next whitelist entry.
+      if (settings.henchmanMode === 2 || settings.henchmanMode === '2') {
+        const forms = [...document.querySelectorAll('form')].map(f => (f.id ? '#' + f.id : '') + '[' + (f.getAttribute('action') || '').replace(/^https?:\/\/[^/]+/, '').split('?')[0] + ']').join(' ');
+        botLog('warn', `Henchman: henchman fight button not found on profile (forms: ${forms || 'none'}) → next whitelist name`);
+        if (state.henchmanLastTriedWhitelistName) {
+          state.henchmanWhitelistTried = (state.henchmanWhitelistTried || []).concat([state.henchmanLastTriedWhitelistName]);
+          state.henchmanLastTriedWhitelistName = '';
+        }
+        state.henchmanState = 'navigating';
+        saveState(state);
+        botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
+        return;
+      }
       botLog('warn', 'Henchman: Henchman attack button not found → searching again');
       skipAndSearchAgain('no-attack-btn');
       return;
@@ -5141,6 +5819,33 @@
           return;
         }
 
+        // v1.6.23 — the namesearch form must exist on this page; if not, we
+        // landed on an unexpected /robbery/index variant (e.g. a POST result
+        // view). Reload the plain hunt page once before concluding anything,
+        // and do NOT mark the last name as "not found" from such a page.
+        const nameFormHere = findPvPNameSearchForm();
+        if (!nameFormHere) {
+          const inputs = [...document.querySelectorAll('form input[name]')].map(i => i.name).filter((v, i, a) => a.indexOf(v) === i).join(',') || 'none';
+          const recent = state.henchmanFormMissingAt && (Date.now() - state.henchmanFormMissingAt) < 90000;
+          if (!recent) {
+            state.henchmanFormMissingAt = Date.now();
+            state.henchmanState = 'navigating';
+            saveState(state);
+            botLog('warn', `Henchman: Namesearch form not on this page (${PAGE}${window.location.search}; form inputs: ${inputs}) → reloading hunt page`);
+            botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
+            return;
+          }
+          const cd = randomDelay(4 * 60 * 1000, 6 * 60 * 1000);
+          state.henchmanFormMissingAt = 0;
+          state.henchmanState = 'waiting';
+          state.henchmanNextAttack = Date.now() + cd;
+          saveState(state);
+          botLog('error', `Henchman: Namesearch form still missing after reload (inputs: ${inputs}) — pausing ${Math.ceil(cd / 60000)} min. Please send the HTML of /robbery/index.`);
+          botSetTimeout(() => { loadState(st => { loadSettings(se => { henchmanTick(st, se); }); }); }, Math.min(cd + 1000, 300000));
+          return;
+        }
+        state.henchmanFormMissingAt = 0;
+
         // If we just came back from a failed namesearch (state === 'hunting'
         // AND we have a recorded last-tried name), record that name as TRIED.
         if (state.henchmanState === 'hunting' && state.henchmanLastTriedWhitelistName) {
@@ -5175,11 +5880,7 @@
         }
 
         const targetName = remaining[0];
-        const nameForm = findPvPNameSearchForm();
-        if (!nameForm) {
-          botLog('warn', 'Henchman: Namesearch form not found');
-          return;
-        }
+        const nameForm = nameFormHere;
         const nameInput = nameForm.querySelector('input[type="text"]');
         if (!nameInput) {
           botLog('warn', 'Henchman: Namesearch input not found');
@@ -5848,13 +6549,42 @@
     panel.id = 'bf-bot-panel';
     panel.innerHTML = `
       <div id="bf-bot-header">
-        <span>🤖 BF Bot <span style="font-size:0.55rem;opacity:0.4;margin-left:4px">v1.6.15.4 · ${SERVER_ID}</span></span>
+        <span>🤖 BF Bot <span style="font-size:0.55rem;opacity:0.4;margin-left:4px">v${(() => { try { return chrome.runtime.getManifest().version; } catch (_) { return '?'; } })()} · ${SERVER_ID}</span></span>
         <div style="display:flex;gap:4px;align-items:center">
           <span id="bf-player-badge" style="font-size:0.52rem;color:#9a7a5a;opacity:0.7">${PLAYER_ID ? '👤 #' + PLAYER_ID : ''}</span>
           <button id="bf-bot-pin" title="Pin panel (stays open after reload)">📌</button>
+          <button id="bf-bot-look" title="Appearance settings">⚙</button>
           <button id="bf-bot-fullscreen" title="Fullscreen">⛶</button>
           <button id="bf-bot-close">✕</button>
         </div>
+      </div>
+      <div id="bf-look-pop">
+        <button class="lk-x" title="Close">✕</button>
+        <div class="lk-t">🎨 APPEARANCE</div>
+        <div class="lk-h">Theme</div>
+        <div class="lk-row"><button class="lk-b" data-theme="grim">📜 Grimoire</button><button class="lk-b" data-theme="classic">Classic (green)</button></div>
+        <div class="lk-h">Race style</div>
+        <div class="lk-row"><button class="lk-b" data-lrace="auto">Auto</button><button class="lk-b" data-lrace="1">🦇 Vampire</button><button class="lk-b" data-lrace="2">🐺 Werewolf</button></div>
+        <div class="lk-row"><label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="bf-look-crest" checked> Skull crest (eyes show bot state)</label></div>
+        <div class="lk-row"><label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="bf-look-lowfx"> Low effects (no glow animation)</label></div>
+        <div class="lk-h">Size (everything — text, frames, windows)</div>
+        <div class="lk-row">
+          <button class="lk-b" data-z="1">1×</button><button class="lk-b" data-z="1.25">1.25×</button><button class="lk-b" data-z="1.5">1.5×</button>
+          <button class="lk-b" data-z="2">2×</button><button class="lk-b" data-z="2.5">2.5×</button><button class="lk-b" data-z="3">3×</button>
+        </div>
+        <div class="lk-h">Text colour</div>
+        <div class="lk-row">
+          <button class="lk-b" data-txt="default"><span class="lk-sw" style="background:#5a7a4a"></span>Default</button>
+          <button class="lk-b" data-txt="light"><span class="lk-sw" style="background:#efe2cc"></span>Light</button>
+          <button class="lk-b" data-txt="white"><span class="lk-sw" style="background:#ffffff"></span>White</button>
+          <button class="lk-b" data-txt="custom"><span class="lk-sw" id="bf-look-custom-sw" style="background:#ffffff"></span>Custom</button>
+          <input type="color" id="bf-look-color" value="#ffffff">
+        </div>
+        <div class="lk-prev"><span>Preview:</span> <span id="bf-look-prev-txt">This is how ordinary bot text will look.</span> <span style="color:#2ecc71">✓ OK</span> <span style="color:#e74c3c">✕</span> <span style="color:#e0c068">★</span></div>
+        <div class="lk-h">Fullscreen</div>
+        <div class="lk-row"><button class="lk-b" data-full="0">Off</button><button class="lk-b" data-full="1">⛶ On</button></div>
+        <div class="lk-row"><label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="bf-look-native"> Native browser dropdowns</label></div>
+        <div class="lk-row" style="margin-bottom:0"><button class="lk-b" data-reset="1">↺ Reset to default</button></div>
       </div>
       <div class="bf-bot-tabs">
         <div class="bf-bot-tab active" data-tab="hunt">🩸 Hunt</div>
@@ -5950,14 +6680,40 @@
           </div>
 
           <div class="bf-bot-group">
-            <div class="bf-bot-group-title">🔴 Extraction</div>
+            <div class="bf-bot-group-title">🔴 Essence (Store → Crucible)</div>
             <label class="bf-bot-checkbox">
               <input type="checkbox" id="bf-extract-enabled" checked>
-              Automatic extraction
+              Auto-store accepted blood &amp; process in Crucible
+              <span class="bf-help-hint" title="After each hunt, accepted qualities are STORED into a free slot.&#10;When all slots are full (or AP runs out) the bot opens the Sacrificial Chamber (Crucible) and extracts / sacrifices every stored vial.">?</span>
             </label>
+            <div class="bf-bot-row" style="margin-top:4px">
+              <span class="bf-bot-label" style="min-width:60px">Crucible:</span>
+              <select id="bf-crucible-mode" class="bf-bot-select" style="flex:1">
+                <option value="extract">Extract all</option>
+                <option value="rite">Sacrifice for ritual + extract rest</option>
+              </select>
+            </div>
+            <div id="bf-crucible-rite-row" style="display:none;margin-top:4px">
+              <div style="font-size:0.62rem;color:#5a7a4a;margin-bottom:2px">Sacrifice ranks (only when no ritual is active, 1 per 3 days):</div>
+              <div class="bf-ignore-q-row" id="bf-crucible-rite-q">
+                <label class="bf-q-check"><input type="checkbox" value="S" data-rq> <span class="bf-q-badge bf-q-S">S</span></label>
+                <label class="bf-q-check"><input type="checkbox" value="A" data-rq> <span class="bf-q-badge bf-q-A">A</span></label>
+                <label class="bf-q-check"><input type="checkbox" value="B" data-rq> <span class="bf-q-badge bf-q-B">B</span></label>
+                <label class="bf-q-check"><input type="checkbox" value="C" data-rq> <span class="bf-q-badge bf-q-C">C</span></label>
+                <label class="bf-q-check"><input type="checkbox" value="D" data-rq> <span class="bf-q-badge bf-q-D">D</span></label>
+                <label class="bf-q-check"><input type="checkbox" value="E" data-rq> <span class="bf-q-badge bf-q-E">E</span></label>
+              </div>
+            </div>
+            <div class="bf-bot-row" style="margin-top:4px">
+              <span class="bf-bot-label" style="min-width:60px">Resume:</span>
+              <select id="bf-crucible-resume" class="bf-bot-select" style="flex:1">
+                <option value="all">When all slots are ready</option>
+                <option value="any">When first slot is ready</option>
+              </select>
+            </div>
             <label class="bf-bot-checkbox">
               <input type="checkbox" id="bf-extract-repeat" checked>
-              Repeat after orb cooldown (5h)
+              Repeat after slot cooldown (~5h)
             </label>
           </div>
 
@@ -5968,7 +6724,7 @@
             <label class="bf-bot-checkbox">
               <input type="checkbox" id="bf-recruit-enabled">
               Auto-train units
-              <span class="bf-help-hint" title="Runs as a GLOBAL module (like Spend Gold).&#10;&#10;Works during idle/cooldown periods (yellow/white indicator) regardless of which main bot is active. Decoupled from Hunt — no longer requires extractions to fire.&#10;&#10;On every cycle the bot navigates to Crimson Sanctuary, parses live army state, and trains units per your strategy. 60-second minimum cycle.">?</span>
+              <span class="bf-help-hint" title="Runs as a GLOBAL module (like Spend Gold).&#10;&#10;Works during idle/cooldown periods (yellow/white indicator) regardless of which main bot is active. Decoupled from Hunt — no longer requires extractions to fire.&#10;&#10;On every cycle the bot opens Nourishing Pits (Živné jamy, /nourishing/index), parses live army state, and trains units per your strategy. 60-second minimum cycle.">?</span>
             </label>
 
             <!-- Trigger -->
@@ -5978,7 +6734,7 @@
                 <option value="idle">Idle / cooldown (yellow & white)</option>
                 <option value="threshold">When BE ≥ threshold</option>
                 <option value="continuous">Continuous (every tick)</option>
-                <option value="extraction">After each extraction (legacy)</option>
+                <option value="extraction">After Crucible extraction</option>
               </select>
             </div>
             <div class="bf-bot-row" id="bf-recruit-threshold-row" style="display:none;margin-top:4px">
@@ -6214,6 +6970,24 @@
               <span style="color:#5a7a4a;font-size:0.6rem">± units per tier</span>
             </div>
             <div id="bf-ruins-opt-t4-info" style="font-size:0.56rem;color:#5a7a4a;margin-top:5px;line-height:1.3;display:none"></div>
+          </div>
+
+          <div class="bf-bot-group">
+            <div class="bf-bot-group-title">🔬 Battle Report Verify</div>
+            <label class="bf-bot-checkbox" style="align-items:flex-start;gap:6px;margin-bottom:4px">
+              <input type="checkbox" id="bf-br-enabled" checked style="margin-top:3px">
+              <span>
+                Fetch game battle reports &amp; compare with simulator
+                <span style="display:block;font-size:0.55rem;color:#5a7a4a">Background only (no navigation). Collects round-by-round data to refine the engine.</span>
+              </span>
+            </label>
+            <div id="bf-br-stats" style="font-size:0.6rem;color:#9ab08a;margin-bottom:4px">Reports: 0</div>
+            <div id="bf-br-list" style="max-height:90px;overflow-y:auto;margin-bottom:4px"></div>
+            <div class="bf-bot-row" style="gap:4px">
+              <button class="bf-bot-btn" id="bf-br-sync" style="flex:1;font-size:0.6rem;padding:3px 6px" title="Scan the Battle Log list and fetch all reports not collected yet">⟳ Sync</button>
+              <button class="bf-bot-btn" id="bf-br-export" style="flex:1;font-size:0.6rem;padding:3px 6px" title="Download all collected reports + diffs as JSON">⬇ Export JSON</button>
+              <button class="bf-bot-btn" id="bf-br-clear" style="flex:0;font-size:0.6rem;padding:3px 6px;background:rgba(100,0,0,0.3)" title="Delete collected reports">🗑</button>
+            </div>
           </div>
 
           <div class="bf-bot-group">
@@ -6646,7 +7420,7 @@
           </div>
 
           <div class="bf-bot-group" id="bf-pvp-wl-group">
-            <div class="bf-bot-group-title">📋 Whitelist (priority – attack by name)</div>
+            <div class="bf-bot-group-title">⚔ PvP 1v1 — Whitelist (priority – attack by name)</div>
             <input type="text" class="bf-bot-input" id="bf-pvp-whitelist" placeholder="Player1, Player2, ..." style="width:100%">
             <div style="font-size:0.56rem;color:#5a7a4a;margin:2px 0">
               Comma-separated. Used by "Whitelist only" mode — each name is namesearched in order; names that aren't found are skipped.
@@ -6654,7 +7428,7 @@
           </div>
 
           <div class="bf-bot-group" id="bf-pvp-bl-group">
-            <div class="bf-bot-group-title" style="color:#e74c3c">📋 Blacklist (do not attack)</div>
+            <div class="bf-bot-group-title" style="color:#e74c3c">⚔ PvP 1v1 — Blacklist (do not attack)</div>
             <input type="text" class="bf-bot-input" id="bf-pvp-blacklist" placeholder="Player1, Player2, ..." style="width:100%">
             <div style="font-size:0.56rem;color:#5a7a4a;margin:2px 0">
               Comma-separated. Used by all modes — random results matching these names get skipped.
@@ -6718,7 +7492,7 @@
           </div>
 
           <div class="bf-bot-group" id="bf-henchman-wl-group">
-            <div class="bf-bot-group-title">📋 Whitelist (attack)</div>
+            <div class="bf-bot-group-title">🧛 Henchman — Whitelist (attack)</div>
             <input type="text" class="bf-bot-input" id="bf-henchman-whitelist" placeholder="Player1, Player2, ..." style="width:100%">
             <div style="font-size:0.56rem;color:#5a7a4a;margin:2px 0">
               Comma-separated. Used by "Whitelist only" mode — these names get attacked.
@@ -6726,7 +7500,7 @@
           </div>
 
           <div class="bf-bot-group" id="bf-henchman-bl-group">
-            <div class="bf-bot-group-title" style="color:#e74c3c">📋 Blacklist (do not attack)</div>
+            <div class="bf-bot-group-title" style="color:#e74c3c">🧛 Henchman — Blacklist (do not attack)</div>
             <input type="text" class="bf-bot-input" id="bf-henchman-blacklist" placeholder="Player1, Player2, ..." style="width:100%">
             <div style="font-size:0.56rem;color:#5a7a4a;margin:2px 0">
               Comma-separated. Used by "Anyone" mode — random results matching these names get skipped.
@@ -6833,6 +7607,16 @@
             <div class="bf-bot-group-title">🌐 Server</div>
             <div style="font-size:0.66rem;color:#9a7a5a">${SERVER_ID}</div>
             <div style="font-size:0.62rem;color:#7a9a6a;margin-top:2px" id="bf-global-player-badge">${PLAYER_ID ? '👤 Player: #' + PLAYER_ID : '👤 Player: detecting...'}</div>
+          </div>
+          <div class="bf-bot-group">
+            <div class="bf-bot-group-title">💾 Backup
+              <span class="bf-help-hint" title="Settings and presets are also mirrored automatically into this site's local storage and restored if the extension storage is wiped.&#10;&#10;Updating: replace the files in the SAME folder and press ↻ Reload on chrome://extensions — do NOT Remove the extension (that deletes its storage).">?</span>
+            </div>
+            <div class="bf-bot-row" style="gap:4px">
+              <button class="bf-bot-btn" id="bf-backup-export" style="flex:1;font-size:0.6rem;padding:3px 6px" title="Download settings, presets, battle & essence logs, battle reports">⬇ Export</button>
+              <button class="bf-bot-btn" id="bf-backup-import" style="flex:1;font-size:0.6rem;padding:3px 6px" title="Load a backup file (replaces current data for this character)">⬆ Import</button>
+              <input type="file" id="bf-backup-file" accept=".json,application/json" style="display:none">
+            </div>
           </div>
           <div class="bf-bot-group">
             <div class="bf-bot-group-title">💰 Gold</div>
@@ -7173,9 +7957,9 @@
           panel.style.left = '0';
           panel.style.right = '0';
           panel.style.bottom = '0';
-          panel.style.width = '100vw';
-          panel.style.height = '100vh';
-          panel.style.maxHeight = '100vh';
+          panel.style.width = 'calc(100vw / var(--bf-z, 1))';
+          panel.style.height = 'calc(100vh / var(--bf-z, 1))';
+          panel.style.maxHeight = 'calc(100vh / var(--bf-z, 1))';
           fsBtn.title = 'Exit Fullscreen';
         } else {
           panel.classList.remove('bf-bot-fullscreen');
@@ -7189,6 +7973,332 @@
           fsBtn.title = 'Fullscreen';
         }
       });
+    }
+
+    // ── v1.6.23 — APPEARANCE (⚙) ─────────────────────────────────
+    // Size scales the whole panel with a CSS transform (frames, tables and
+    // text scale together; nothing re-wraps or breaks). Text colour only
+    // recolours "ordinary" muted text (low-saturation greys/greens/browns);
+    // status colours (green ✓, red ✕, gold, orange …) are left untouched.
+    {
+      const LOOK_TXT = { light: '#efe2cc', white: '#ffffff' };
+      const pop = document.getElementById('bf-look-pop');
+      const lookBtn = document.getElementById('bf-bot-look');
+      let _lookInitDone = false;
+      let look = { lookZoom: 1, lookTxt: 'default', lookTxtCustom: '#ffffff', lookNative: false, lookTheme: 'grim', lookRace: 'auto', lookCrest: true, lookLowFx: false };
+    // ── v1.6.27 — GRIMOIRE THEME + SKULL CREST ───────────────────────
+    // Theme classes live on <html> (bf-grim, bf-grim-race-1|2, bf-lowfx).
+    // Legacy inline greens inside bot UI are re-tinted to the race palette.
+    // The crest is the game's own Crucible artwork (loaded from the game
+    // server, never bundled): the "default" image is the base, and the glow
+    // layer = (active − default) so ONLY eyes/jaw/torches carry colour; its
+    // hue is rotated per bot state.
+    const GRIM_HUE = { 1: 352, 2: 32 };       // tint hue for re-mapped legacy colours
+    const CREST_NATIVE = { 1: 355, 2: 28 };   // native glow hue of the artwork
+    const CREST_TARGET = {
+      running: null,                           // native fire / blood
+      battle: { 1: 28, 2: 355 },               // vampire → fire, werewolf → blood
+      waiting: 212, alert: 115,
+    };
+    let _grimObserver = null, _crest = null;
+    function themeRace() {
+      if (look.lookRace === '1' || look.lookRace === '2') return parseInt(look.lookRace);
+      return _unitCtx.race || 2;
+    }
+    function rgbToHsl(r, g, b) {
+      r /= 255; g /= 255; b /= 255;
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b); let h = 0, s = 0; const l = (mx + mn) / 2;
+      if (mx !== mn) {
+        const d = mx - mn; s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+        h = mx === r ? ((g - b) / d + (g < b ? 6 : 0)) : mx === g ? ((b - r) / d + 2) : ((r - g) / d + 4); h *= 60;
+      }
+      return [h, s, l];
+    }
+    function hslToRgb(h, s, l) {
+      h = ((h % 360) + 360) % 360 / 360;
+      if (!s) { const v = Math.round(l * 255); return [v, v, v]; }
+      const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+      const f = t => { t < 0 && (t += 1); t > 1 && (t -= 1); return t < 1 / 6 ? p + (q - p) * 6 * t : t < 1 / 2 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p; };
+      return [Math.round(f(h + 1 / 3) * 255), Math.round(f(h) * 255), Math.round(f(h - 1 / 3) * 255)];
+    }
+    function remapColorStr(str, hue) {
+      return str.replace(/#([0-9a-f]{6}|[0-9a-f]{3})\b|rgba?\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*(?:,\s*[\d.]+\s*)?\)/gi, m => {
+        let r, g, b, a = 1;
+        if (m[0] === '#') {
+          let hx = m.slice(1); if (hx.length === 3) hx = hx.split('').map(c => c + c).join('');
+          r = parseInt(hx.slice(0, 2), 16); g = parseInt(hx.slice(2, 4), 16); b = parseInt(hx.slice(4, 6), 16);
+        } else {
+          const p = m.match(/[\d.]+/g).map(Number); [r, g, b] = p; if (p.length > 3) a = p[3];
+        }
+        const [h, s, l] = rgbToHsl(r, g, b);
+        if (!(h >= 70 && h <= 170 && s < 0.62 && s > 0.04)) return m;   // only the legacy green palette
+        const [nr, ng, nb] = hslToRgb(hue, Math.min(0.5, s * 1.1 + 0.06), l);
+        return a < 1 ? `rgba(${nr},${ng},${nb},${a})` : `rgb(${nr},${ng},${nb})`;
+      });
+    }
+    function grimRemap(root) {
+      const hue = GRIM_HUE[themeRace()] || 32;
+      const els = root.nodeType === 1 ? [root, ...root.querySelectorAll('[style]')] : [];
+      for (const el of els) {
+        const st = el.getAttribute && el.getAttribute('style');
+        if (!st || !/#[0-9a-f]{3}|rgb/i.test(st)) continue;
+        const ns = remapColorStr(st, hue);
+        if (ns !== st) el.setAttribute('style', ns);
+      }
+    }
+    function grimRoots() {
+      return [panel, document.getElementById('bf-battlelog-panel'), document.getElementById('bf-bot-btn')].filter(Boolean);
+    }
+    function ensureGrimFonts() {
+      if (document.getElementById('bf-grim-fonts')) return;
+      const l = document.createElement('link');
+      l.id = 'bf-grim-fonts'; l.rel = 'stylesheet';
+      l.href = 'https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Crimson+Text:ital,wght@0,400;0,600;1,400&display=swap';
+      (document.head || document.documentElement).appendChild(l);
+    }
+    function applyTheme() {
+      const root = document.documentElement;
+      const grim = look.lookTheme !== 'classic';
+      const race = themeRace();
+      root.classList.toggle('bf-grim', grim);
+      root.classList.toggle('bf-grim-race-1', grim && race === 1);
+      root.classList.toggle('bf-grim-race-2', grim && race === 2);
+      root.classList.toggle('bf-lowfx', !!look.lookLowFx);
+      if (_grimObserver) { _grimObserver.disconnect(); _grimObserver = null; }
+      if (grim) {
+        ensureGrimFonts();
+        grimRoots().forEach(grimRemap);
+        let t = null;
+        _grimObserver = new MutationObserver(() => {
+          if (t) return;
+          t = setTimeout(() => {   // plain timer on purpose: cosmetic, must run during STOP too
+            t = null;
+            _grimObserver && _grimObserver.disconnect();
+            grimRoots().forEach(grimRemap);
+            if (_grimObserver) grimRoots().forEach(r => _grimObserver.observe(r, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] }));
+          }, 120);
+        });
+        grimRoots().forEach(r => _grimObserver.observe(r, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] }));
+      }
+      buildCrest(grim && look.lookCrest !== false ? race : null);
+    }
+
+    // ── Crest ──
+    function loadImg(src) {
+      return new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('img ' + src)); im.src = src; });
+    }
+    function buildCrest(race) {
+      const header = document.getElementById('bf-bot-header');
+      if (!header) return;
+      const old = header.querySelector('.bf-crest');
+      if (!race) { if (old) old.remove(); header.classList.remove('bf-has-crest'); _crest = null; return; }
+      if (_crest && _crest.race === race && old) return;           // already built for this race
+      if (old) old.remove();
+      const base = `${BASE}/img/blood/crucible/crucibleBackground_${race}_`;
+      Promise.all([loadImg(base + 'default_780x1100.jpg'), loadImg(base + 'active_780x1100.jpg').catch(() => null)])
+        .then(([def, act]) => {
+          const W = def.naturalWidth, H = def.naturalHeight;
+          const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+          const cx = cv.getContext('2d');
+          cx.drawImage(def, 0, 0); const dd = cx.getImageData(0, 0, W, H);
+          let glowData = null, gx = 0, gy = 0, gn = 0;
+          if (act && act.naturalWidth === W && act.naturalHeight === H) {
+            cx.clearRect(0, 0, W, H); cx.drawImage(act, 0, 0);
+            const ad = cx.getImageData(0, 0, W, H);
+            const out = cx.createImageData(W, H);
+            const A = ad.data, D = dd.data, O = out.data;
+            for (let i = 0; i < A.length; i += 4) {
+              const la = 0.3 * A[i] + 0.59 * A[i + 1] + 0.11 * A[i + 2];
+              const ld = 0.3 * D[i] + 0.59 * D[i + 1] + 0.11 * D[i + 2];
+              const diff = la - ld;
+              if (diff > 10) {
+                O[i] = A[i]; O[i + 1] = A[i + 1]; O[i + 2] = A[i + 2];
+                O[i + 3] = Math.min(255, (diff - 10) * 6);
+                const p = i / 4, x = p % W, y = (p / W) | 0;
+                if (diff > 40 && x > W * 0.3 && x < W * 0.7 && y < H * 0.6) { gx += x; gy += y; gn++; }
+              }
+            }
+            glowData = out;
+          }
+          // Frame the head: centre on the glow (eyes + jaw), else a sane default
+          const hdrW = header.clientWidth || 388, hdrH = 150;
+          const cropW = Math.round(W * 0.78), cropH = Math.round(cropW * hdrH / hdrW);
+          const cxc = gn ? gx / gn : W * 0.5, cyc = gn ? gy / gn : H * 0.3;
+          const sx = Math.max(0, Math.min(W - cropW, Math.round(cxc - cropW / 2)));
+          const sy = Math.max(0, Math.min(H - cropH, Math.round(cyc - cropH * 0.6)));   // glow centroid (eyes+jaw) a bit below centre
+          const mk = (cls) => { const c = document.createElement('canvas'); c.width = cropW; c.height = cropH; c.className = cls; c.style.width = '100%'; c.style.height = '100%'; return c; };
+          const baseCv = mk('bf-crest-base');
+          baseCv.getContext('2d').putImageData(dd, -sx, -sy, sx, sy, cropW, cropH);
+          const wrap = document.createElement('div');
+          wrap.className = 'bf-crest'; wrap.setAttribute('aria-hidden', 'true');
+          wrap.appendChild(baseCv);
+          let glowCv = null;
+          if (glowData) {
+            glowCv = mk('bf-crest-glow');
+            glowCv.getContext('2d').putImageData(glowData, -sx, -sy, sx, sy, cropW, cropH);
+            wrap.appendChild(glowCv);
+          }
+          header.insertBefore(wrap, header.firstChild);
+          header.classList.add('bf-has-crest');
+          _crest = { race, wrap, glow: glowCv, state: null };
+          setCrestState(_crestState || 'idle');
+        })
+        .catch(() => { header.classList.remove('bf-has-crest'); _crest = null; });   // artwork not on this server → plain plank
+    }
+    function setCrestState(st) {
+      _crestState = st;
+      if (!_crest) return;
+      _crest.wrap.setAttribute('data-state', st);
+      const race = _crest.race, nat = CREST_NATIVE[race];
+      let tgt = CREST_TARGET[st];
+      if (tgt && typeof tgt === 'object') tgt = tgt[race];
+      if (_crest.glow) _crest.glow.style.filter = (tgt == null) ? 'saturate(1.15)' : `hue-rotate(${tgt - nat}deg) saturate(1.3) brightness(1.08)`;
+      const LBL = { idle: ['DORMANT', 'var(--g-mute)'], stopped: ['HALTED', '#e06060'], running: ['AWAKENED', 'var(--g-accent)'],
+                    battle: ['IN BATTLE', '#f06a5a'], waiting: ['WAITING', '#8ab8e8'], alert: ['ATTENTION', '#7ad870'] };
+      let badge = document.getElementById('bf-crest-state');
+      const titleSpan = document.querySelector('#bf-bot-header > span');
+      if (!badge && titleSpan) { badge = document.createElement('span'); badge.id = 'bf-crest-state'; badge.className = 'bf-crest-state'; titleSpan.appendChild(badge); }
+      if (badge) { const [t, c] = LBL[st] || LBL.idle; badge.textContent = t; badge.style.color = c; }
+    }
+    _crestSetState = setCrestState;
+
+      let mo = null;
+
+      const parseRGB = (c) => {
+        const m = String(c || '').match(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+))?/);
+        if (!m) return null;
+        if (m[4] !== undefined && parseFloat(m[4]) === 0) return null; // transparent
+        return [parseInt(m[1]), parseInt(m[2]), parseInt(m[3])];
+      };
+      const isOrdinary = (rgb) => {
+        const [r, g, b] = rgb.map(v => v / 255);
+        const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2;
+        const sat = mx === mn ? 0 : (l > 0.5 ? (mx - mn) / (2 - mx - mn) : (mx - mn) / (mx + mn));
+        return sat < 0.45 || (l < 0.3 && sat < 0.6);
+      };
+      const target = () => look.lookTxt === 'custom' ? (look.lookTxtCustom || '#ffffff') : LOOK_TXT[look.lookTxt];
+
+      function restoreColours(root) {
+        (root || panel).querySelectorAll('[data-bf-oc]').forEach(el => {
+          const oc = el.getAttribute('data-bf-oc');
+          if (oc) el.style.setProperty('color', oc); else el.style.removeProperty('color');
+          el.removeAttribute('data-bf-oc');
+        });
+      }
+      function recolour(root) {
+        const col = target();
+        if (!col) return;
+        const els = [root, ...root.querySelectorAll('*')];
+        for (const el of els) {
+          if (!(el instanceof Element) || el.closest('#bf-look-pop')) continue;  // popover keeps its own colours (preview is set explicitly)
+          if (el.hasAttribute('data-bf-oc')) { el.style.setProperty('color', col, 'important'); continue; }
+          const isField = /^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(el.tagName);
+          const hasText = isField || [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim());
+          if (!hasText) continue;
+          const rgb = parseRGB(getComputedStyle(el).color);
+          if (!rgb || !isOrdinary(rgb)) continue;
+          el.setAttribute('data-bf-oc', el.style.color || '');
+          el.style.setProperty('color', col, 'important');
+        }
+      }
+      function applyLook() {
+        const _prevTheme = document.documentElement.classList.contains('bf-grim') ? 'grim' : 'classic';
+        applyTheme();
+        if (_prevTheme === 'grim' && look.lookTheme === 'classic' && _lookInitDone) { botSetTimeout(() => window.location.reload(), 300); }
+        const z = [1, 1.25, 1.5, 2, 2.5, 3].includes(+look.lookZoom) ? +look.lookZoom : 1;
+        panel.style.setProperty('--bf-z', String(z));
+        panel.style.transform = z !== 1 ? `scale(${z})` : '';
+        panel.classList.toggle('bf-look-zoomed', z !== 1);
+        // keep the scaled panel on screen
+        if (z !== 1 && !panel.classList.contains('bf-bot-fullscreen')) {
+          const r = panel.getBoundingClientRect();
+          if (r.right > window.innerWidth) panel.style.left = Math.max(0, window.innerWidth - r.width) + 'px';
+          if (r.bottom > window.innerHeight) panel.style.top = Math.max(0, window.innerHeight - r.height) + 'px';
+        }
+        panel.classList.toggle('bf-look-native', !!look.lookNative);
+        // colours
+        restoreColours();
+        if (mo) { mo.disconnect(); mo = null; }
+        if (look.lookTxt !== 'default') {
+          recolour(panel);
+          let t = null;
+          mo = new MutationObserver(muts => {
+            if (t) return;
+            t = setTimeout(() => {   // plain timeout on purpose: cosmetic, must also work while STOP is active
+              t = null;
+              if (mo) mo.disconnect();
+              recolour(panel);
+              if (mo) mo.observe(panel, { childList: true, subtree: true });
+            }, 150);
+          });
+          mo.observe(panel, { childList: true, subtree: true });
+        }
+        // popover state
+        if (pop) {
+          pop.querySelectorAll('[data-z]').forEach(b => b.classList.toggle('on', +b.dataset.z === z));
+          pop.querySelectorAll('[data-txt]').forEach(b => b.classList.toggle('on', b.dataset.txt === look.lookTxt));
+          const fsOn = panel.classList.contains('bf-bot-fullscreen');
+          pop.querySelectorAll('[data-full]').forEach(b => b.classList.toggle('on', (b.dataset.full === '1') === fsOn));
+          const nat = document.getElementById('bf-look-native'); if (nat) nat.checked = !!look.lookNative;
+          pop.querySelectorAll('[data-theme]').forEach(b => b.classList.toggle('on', b.dataset.theme === look.lookTheme));
+          pop.querySelectorAll('[data-lrace]').forEach(b => b.classList.toggle('on', b.dataset.lrace === (look.lookRace || 'auto')));
+          const autoBtn = pop.querySelector('[data-lrace="auto"]');
+          if (autoBtn) autoBtn.textContent = 'Auto (' + ((_unitCtx.race === 1) ? 'Vampire' : (_unitCtx.race === 2) ? 'Werewolf' : '?') + ')';
+          const cr = document.getElementById('bf-look-crest'); if (cr) cr.checked = look.lookCrest !== false;
+          const lf = document.getElementById('bf-look-lowfx'); if (lf) lf.checked = !!look.lookLowFx;
+          const cp = document.getElementById('bf-look-color'); if (cp) cp.value = look.lookTxtCustom || '#ffffff';
+          const sw = document.getElementById('bf-look-custom-sw'); if (sw) sw.style.background = look.lookTxtCustom || '#ffffff';
+          const prev = document.getElementById('bf-look-prev-txt');
+          if (prev) prev.style.color = target() || '#9ab08a';
+        }
+      }
+      function setLook(patch) {
+        Object.assign(look, patch);
+        applyLook();
+        patchSettings(patch);
+      }
+
+      loadSettings(se => {
+        look = { lookZoom: se.lookZoom || 1, lookTxt: se.lookTxt || 'default', lookTxtCustom: se.lookTxtCustom || '#ffffff', lookNative: !!se.lookNative,
+                 lookTheme: se.lookTheme === 'classic' ? 'classic' : 'grim', lookRace: se.lookRace || 'auto', lookCrest: se.lookCrest !== false, lookLowFx: !!se.lookLowFx };
+        applyLook();
+        _lookInitDone = true;
+      });
+
+      lookBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        pop?.classList.toggle('open');
+        lookBtn.classList.toggle('on', pop?.classList.contains('open'));
+        applyLook();
+      });
+      lookBtn?.addEventListener('mousedown', e => e.stopPropagation()); // don't start a header drag
+      pop?.addEventListener('mousedown', e => e.stopPropagation());
+      pop?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const b = e.target.closest('button');
+        if (!b) return;
+        if (b.classList.contains('lk-x')) { pop.classList.remove('open'); lookBtn?.classList.remove('on'); return; }
+        if (b.dataset.z) setLook({ lookZoom: +b.dataset.z });
+        else if (b.dataset.txt) setLook({ lookTxt: b.dataset.txt });
+        else if (b.dataset.theme) setLook({ lookTheme: b.dataset.theme });
+        else if (b.dataset.lrace) { if (_crest) { _crest.race = null; } setLook({ lookRace: b.dataset.lrace }); }
+        else if (b.dataset.full !== undefined) {
+          const want = b.dataset.full === '1';
+          if (want !== panel.classList.contains('bf-bot-fullscreen')) document.getElementById('bf-bot-fullscreen')?.click();
+          applyLook();
+        } else if (b.dataset.reset) {
+          if (panel.classList.contains('bf-bot-fullscreen')) document.getElementById('bf-bot-fullscreen')?.click();
+          setLook({ lookZoom: 1, lookTxt: 'default', lookTxtCustom: '#ffffff', lookNative: false, lookTheme: 'grim', lookRace: 'auto', lookCrest: true, lookLowFx: false });
+        }
+      });
+      document.getElementById('bf-look-color')?.addEventListener('input', (e) => {
+        look.lookTxtCustom = e.target.value; look.lookTxt = 'custom'; applyLook();
+      });
+      document.getElementById('bf-look-color')?.addEventListener('change', (e) => setLook({ lookTxt: 'custom', lookTxtCustom: e.target.value }));
+      document.getElementById('bf-look-native')?.addEventListener('change', (e) => setLook({ lookNative: !!e.target.checked }));
+      document.getElementById('bf-look-crest')?.addEventListener('change', (e) => setLook({ lookCrest: !!e.target.checked }));
+      document.getElementById('bf-look-lowfx')?.addEventListener('change', (e) => setLook({ lookLowFx: !!e.target.checked }));
+      document.getElementById('bf-bot-fullscreen')?.addEventListener('click', () => botSetTimeout(applyLook, 0));
     }
 
     // Tabs (with persistence)
@@ -7254,50 +8364,220 @@
       });
     });
 
+    // ── v1.6.23 — per-module DOM → settings gatherers ─────────────
+    // Shared by the Start/Stop toggles AND the live auto-save below, so a
+    // value typed into a tab is persisted immediately (before v1.6.23 most
+    // tabs only saved on Start/Stop → any page navigation by a running bot
+    // discarded the edit and the field "reset to default").
+    function gatherHuntFromDOM(settings) {
+      // Gather UI values
+      settings.huntMode = document.querySelector('input[name="bf-hunt-mode"]:checked')?.value || 'auto';
+      settings.huntManualType = parseInt(document.getElementById('bf-manual-type')?.value) || 5;
+      settings.extractEnabled = document.getElementById('bf-extract-enabled')?.checked ?? true;
+      settings.extractAutoRepeat = document.getElementById('bf-extract-repeat')?.checked ?? true;
+      readCrucibleSettingsFromDOM(settings);
+      // ── Auto Recruitment (v1.6.5 — defensive save) ─────────
+      // Only overwrite a recruit field if its DOM element is actually
+      // present + readable. This prevents the v1.6.4 bug where toggling
+      // Hunt from a state with no recruit-panel rendering wiped tiers and
+      // priority back to defaults.
+      const recEn = document.getElementById('bf-recruit-enabled');
+      if (recEn) settings.recruitEnabled = !!recEn.checked;
+      const recTrig = document.getElementById('bf-recruit-trigger');
+      if (recTrig) settings.recruitTrigger = recTrig.value || 'idle';
+      const recTh = document.getElementById('bf-recruit-threshold');
+      if (recTh) settings.recruitThreshold = parseInt(recTh.value) || 100;
+      const recStrat = document.getElementById('bf-recruit-strategy');
+      if (recStrat) settings.recruitStrategy = recStrat.value || 'priority';
+      const recRes = document.getElementById('bf-recruit-reserve');
+      if (recRes) settings.recruitReserveBE = parseInt(recRes.value) || 0;
+      // Percent allocation (T1-T8) — only update if at least one input exists
+      const pctInputs = document.querySelectorAll('.bf-recruit-pct');
+      if (pctInputs.length > 0) {
+        const recruitPct = {};
+        pctInputs.forEach(inp => {
+          const unitId = inp.dataset.unit;
+          if (unitId) recruitPct[unitId] = parseInt(inp.value) || 0;
+        });
+        settings.recruitPercent = recruitPct;
+      }
+      // Priority list — only update if rows were rendered
+      const prioRows = document.querySelectorAll('#bf-recruit-priority-list .bf-recruit-prio-row');
+      if (prioRows.length > 0) {
+        settings.recruitEnabledTiers = readEnabledTiersFromDOM();
+        settings.recruitPriority = readPriorityOrderFromDOM();
+      }
+      // Gather ignore qualities
+      settings.huntIgnoreQ = [...document.querySelectorAll('#bf-ignore-q input[data-iq]:checked')].map(cb => cb.value);
+      // Gather manual mode accept qualities
+      settings.huntManualAcceptQ = [...document.querySelectorAll('#bf-manual-accept-q input[data-maq]:checked')].map(cb => cb.value);
+      return settings;
+    }
+    function gatherRuinsFromDOM(settings) {
+      // Gather UI values
+      settings.ruinsLevels = getSelectedRuinsLevels();
+      settings.ruinsCadence = document.querySelector('input[name="bf-ruins-cadence"]:checked')?.value || 'infinite';
+      settings.ruinsCycles = parseInt(document.getElementById('bf-ruins-cycles')?.value) || 5;
+      settings.ruinsIntervalMin = parseInt(document.getElementById('bf-ruins-interval')?.value) || 60;
+      // v1.5.9 — gather per-band intervals
+      const bands = settings.ruinsIntervalBands || {};
+      document.querySelectorAll('#bf-ruins-interval-bands .bf-ruins-band-input').forEach(inp => {
+        const band = inp.getAttribute('data-band');
+        const v = parseInt(inp.value);
+        if (band && v > 0 && v <= 1440) bands[band] = v;
+      });
+      settings.ruinsIntervalBands = bands;
+      // Safety settings
+      settings.ruinsStopNoWin = document.getElementById('bf-ruins-stop-nowin')?.checked ?? true;
+      settings.ruinsStopPresetShort = document.getElementById('bf-ruins-stop-preset-short')?.checked ?? true;
+      settings.ruinsIgnorePresets = document.getElementById('bf-ruins-ignore-presets')?.checked ?? false;
+      settings.brVerifyEnabled = document.getElementById('bf-br-enabled')?.checked ?? true;
+      settings.ruinsStopMinUnits = document.getElementById('bf-ruins-stop-min-units')?.checked ?? false;
+      settings.ruinsMinUnits = {
+        T1: parseInt(document.getElementById('bf-ruins-min-t1')?.value) || 0,
+        T2: parseInt(document.getElementById('bf-ruins-min-t2')?.value) || 0,
+        T3: parseInt(document.getElementById('bf-ruins-min-t3')?.value) || 0,
+        T4: parseInt(document.getElementById('bf-ruins-min-t4')?.value) || 0,
+      };
+      // v1.5.8 — UNLOCKED tiers
+      const unlocks = [];
+      document.querySelectorAll('#bf-ruins-unlock-bar [data-rt]').forEach(btn => {
+        if (btn.dataset.unlocked === '1') unlocks.push(btn.getAttribute('data-rt'));
+      });
+      if (unlocks.length) settings.ruinsAllyUnlocks = unlocks;
+      // v1.5.8 — Optimization
+      settings.ruinsOptStratKillE3 = document.getElementById('bf-ruins-opt-killE3')?.checked ?? false;
+      settings.ruinsOptMode = document.querySelector('input[name="bf-ruins-opt-mode"]:checked')?.value || 'deep';
+      settings.ruinsOptParallel = document.getElementById('bf-ruins-opt-parallel')?.checked ?? true;
+      // v1.6.18 — Fast scan budget (clamped 1k..5M; 50k default)
+      settings.ruinsOptFastMaxSims = Math.max(1000, Math.min(5000000,
+        parseInt(document.getElementById('bf-ruins-opt-fastsims')?.value) || 50000));
+      settings.ruinsWarmStartSource = document.getElementById('bf-ruins-warm-source')?.value || 'none';
+      settings.ruinsWarmStartRange = parseInt(document.getElementById('bf-ruins-warm-range')?.value) || 15;
+      // v1.5.8 — T4 short action
+      settings.ruinsT4ShortAction = document.querySelector('input[name="bf-ruins-t4short"]:checked')?.value || 'stop';
+      settings.ruinsT4WaitMin = parseInt(document.getElementById('bf-ruins-t4wait-min')?.value) || 10;
+      // v1.5.8 — Auto-import
+      settings.ruinsAutoImportNew = document.getElementById('bf-ruins-autoimport')?.checked ?? false;
+      settings.ruinsAutoImportMaxPerLevel = parseInt(document.getElementById('bf-ruins-autoimport-max')?.value) || 3;
+      // v1.5.9 — Auto-import as Smart preset
+      settings.ruinsAutoImportSmart = document.getElementById('bf-ruins-autoimport-smart')?.checked ?? false;
+      return settings;
+    }
+    function gatherStoryFromDOM(settings) {
+      // Gather story UI values
+      settings.storyPriority = document.getElementById('bf-story-priority')?.value || 'gold';
+      settings.storyWhitelist = (document.getElementById('bf-story-whitelist')?.value || '')
+        .split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+      settings.storyBlacklist = (document.getElementById('bf-story-blacklist')?.value || '')
+        .split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+      settings.storyStayAlive = document.getElementById('bf-story-stayalive')?.checked ?? true;
+      settings.storyStayAliveMode = document.querySelector('input[name="bf-story-salm"]:checked')?.value || 'pct';
+      settings.storyPauseAtPct = parseInt(document.getElementById('bf-story-pause-pct')?.value) || 16;
+      settings.storyResumeAtPct = parseInt(document.getElementById('bf-story-resume-pct')?.value) || 18;
+      settings.storyPauseAtHP = parseInt(document.getElementById('bf-story-pause-hp')?.value) || 10000;
+      settings.storyResumeAtHP = parseInt(document.getElementById('bf-story-resume-hp')?.value) || 12000;
+      settings.storyChurch = document.getElementById('bf-story-church')?.checked ?? true;
+      settings.storyOption42Enabled = document.getElementById('bf-story-opt42')?.checked ?? false;
+      settings.storyOption42MinHP = parseInt(document.getElementById('bf-story-opt42-hp')?.value) || 20000;
+      settings.storyOption42MinHPPct = parseInt(document.getElementById('bf-story-opt42-pct')?.value) || 50;
+      settings.storyHealPriorityPct = (v => isNaN(v) ? -1 : v)(parseInt(document.getElementById('bf-story-heal-pct')?.value)); // v1.6.23 — `?? -1` never caught NaN
+      settings.storyHealBackPct = parseInt(document.getElementById('bf-story-healback-pct')?.value) || 80;
+      // Aspect targets
+      settings.storyAspectTargets = {
+        human: parseInt(document.getElementById('bf-aspect-human')?.value) || 0,
+        knowledge: parseInt(document.getElementById('bf-aspect-knowledge')?.value) || 0,
+        order: parseInt(document.getElementById('bf-aspect-order')?.value) || 0,
+        nature: parseInt(document.getElementById('bf-aspect-nature')?.value) || 0,
+        beast: parseInt(document.getElementById('bf-aspect-beast')?.value) || 0,
+        destruction: parseInt(document.getElementById('bf-aspect-destruction')?.value) || 0,
+        chaos: parseInt(document.getElementById('bf-aspect-chaos')?.value) || 0,
+        corruption: parseInt(document.getElementById('bf-aspect-corruption')?.value) || 0,
+      };
+      return settings;
+    }
+    function gatherGrottoFromDOM(settings) {
+      settings.grottoDifficulty = document.getElementById('bf-grotto-diff')?.value || 'easy';
+      settings.grottoCount = parseInt(document.getElementById('bf-grotto-count')?.value) || 0;
+      settings.grottoPermanent = document.getElementById('bf-grotto-permanent')?.checked ?? false;
+      settings.grottoMinHP = parseInt(document.getElementById('bf-grotto-minhp')?.value) || 50;
+      settings.grottoStayAlive = document.getElementById('bf-grotto-stayalive')?.checked ?? false;
+      settings.grottoStayAliveMode = document.querySelector('input[name="bf-grotto-salm"]:checked')?.value || 'switch';
+      settings.grottoSwitchDifficulty = document.getElementById('bf-grotto-switch-diff')?.value || 'easy';
+      settings.grottoChurchAP = parseInt(document.getElementById('bf-grotto-church-ap')?.value) || 15;
+      return settings;
+    }
+    function gatherPvPFromDOM(settings) {
+      // v1.6.19 — capture the user's in-game name for the result parser.
+      // Trim only — names are case-sensitive on Bitefight, so we preserve case.
+      settings.playerName = (document.getElementById('bf-player-name')?.value || '').trim();
+      settings.pvpMode = parseInt(document.getElementById('bf-pvp-mode')?.value) || 1;
+      settings.pvpMinHP = parseInt(document.getElementById('bf-pvp-minhp')?.value) || 50;
+      settings.pvpWhitelist = document.getElementById('bf-pvp-whitelist')?.value || '';
+      settings.pvpBlacklist = document.getElementById('bf-pvp-blacklist')?.value || '';
+      settings.pvpBVFrom = document.getElementById('bf-pvp-bv-from')?.value || '';
+      settings.pvpBVTo = document.getElementById('bf-pvp-bv-to')?.value || '';
+      settings.pvpIncludeInactive = document.getElementById('bf-pvp-inactive')?.checked ?? true;
+      settings.pvpSmartBreak = document.getElementById('bf-pvp-break')?.checked ?? false;
+      settings.pvpDelay = parseInt(document.getElementById('bf-pvp-delay')?.value) || 20;
+      settings.pvpMargin = parseInt(document.getElementById('bf-pvp-margin')?.value) || 3;
+      return settings;
+    }
+    function gatherHenchmanFromDOM(settings) {
+      // v1.6.19 — same shared playerName field used by both bots' win detection
+      settings.playerName = (document.getElementById('bf-player-name')?.value || '').trim();
+      settings.henchmanMode = parseInt(document.getElementById('bf-henchman-mode')?.value) || 1;
+      settings.henchmanWhitelist = document.getElementById('bf-henchman-whitelist')?.value || '';
+      settings.henchmanBlacklist = document.getElementById('bf-henchman-blacklist')?.value || '';
+      settings.henchmanSmartBreak = document.getElementById('bf-henchman-break')?.checked ?? false;
+      settings.henchmanDelay = parseInt(document.getElementById('bf-henchman-delay')?.value) || 20;
+      settings.henchmanMargin = parseInt(document.getElementById('bf-henchman-margin')?.value) || 3;
+      settings.henchmanAttackOwnRace = document.getElementById('bf-henchman-own-race')?.checked ?? false;
+      return settings;
+    }
+    function gatherGiftsFromDOM(settings) {
+      settings.giftsAutoDBG = document.getElementById('bf-gifts-dbg')?.checked ?? false;
+      settings.giftsDBGUnderAP = parseInt(document.getElementById('bf-gifts-dbg-ap')?.value) || 5;
+      settings.giftsDisableAfterEvent = document.getElementById('bf-gifts-disable-event')?.checked ?? false;
+      settings.giftsMaxCaveTime = document.getElementById('bf-gifts-cave-time')?.checked ?? false;
+      settings.giftsPurpleMode = document.querySelector('input[name="bf-gifts-purple"]:checked')?.value || 'none';
+      settings.giftsPurpleGoldTarget = parseInt(document.getElementById('bf-gifts-pg-gold-val')?.value) || 100000;
+      settings.giftsPurpleQtyTarget = parseInt(document.getElementById('bf-gifts-pg-qty-val')?.value) || 10;
+      settings.giftsPurpleSpendGold = document.getElementById('bf-gifts-pg-spend')?.checked ?? false;
+      return settings;
+    }
+
+    // v1.6.23 — LIVE AUTO-SAVE per tab. Any change inside a tab section
+    // re-reads fresh settings, applies that tab's gatherer(s) and saves.
+    // Text/number fields also save ~0.7 s after typing stops.
+    function attachLiveSave(sectionId, gatherers) {
+      const sec = document.getElementById(sectionId);
+      if (!sec) return;
+      let pending = null;
+      const run = () => {
+        pending = null;
+        mutateSettings(se => { gatherers.forEach(g => { try { g(se); } catch (e) { console.warn('[BF-Bot] gather failed', e); } }); });
+      };
+      sec.addEventListener('change', () => { if (pending) { clearTimeout(pending); } run(); });
+      sec.addEventListener('input', (e) => {
+        const tg = e.target;
+        if (!tg || !(tg.tagName === 'INPUT' || tg.tagName === 'TEXTAREA') || tg.type === 'checkbox' || tg.type === 'radio') return;
+        if (pending) clearTimeout(pending);
+        pending = botSetTimeout(run, 700);
+      });
+    }
+    attachLiveSave('bf-bot-hunt',  [gatherHuntFromDOM]);
+    attachLiveSave('bf-bot-ruins', [gatherRuinsFromDOM]);
+    attachLiveSave('bf-bot-story', [gatherStoryFromDOM]);
+    attachLiveSave('bf-bot-grotto',[gatherGrottoFromDOM]);
+    attachLiveSave('bf-bot-pvp',   [gatherPvPFromDOM, gatherHenchmanFromDOM]);
+    attachLiveSave('bf-bot-gifts', [gatherGiftsFromDOM]);
+
     // Hunt toggle
     document.getElementById('bf-hunt-toggle').addEventListener('click', () => {
       loadSettings((settings) => {
         settings.huntEnabled = !settings.huntEnabled;
-        // Gather UI values
-        settings.huntMode = document.querySelector('input[name="bf-hunt-mode"]:checked')?.value || 'auto';
-        settings.huntManualType = parseInt(document.getElementById('bf-manual-type')?.value) || 5;
-        settings.extractEnabled = document.getElementById('bf-extract-enabled')?.checked ?? true;
-        settings.extractAutoRepeat = document.getElementById('bf-extract-repeat')?.checked ?? true;
-        // ── Auto Recruitment (v1.6.5 — defensive save) ─────────
-        // Only overwrite a recruit field if its DOM element is actually
-        // present + readable. This prevents the v1.6.4 bug where toggling
-        // Hunt from a state with no recruit-panel rendering wiped tiers and
-        // priority back to defaults.
-        const recEn = document.getElementById('bf-recruit-enabled');
-        if (recEn) settings.recruitEnabled = !!recEn.checked;
-        const recTrig = document.getElementById('bf-recruit-trigger');
-        if (recTrig) settings.recruitTrigger = recTrig.value || 'idle';
-        const recTh = document.getElementById('bf-recruit-threshold');
-        if (recTh) settings.recruitThreshold = parseInt(recTh.value) || 100;
-        const recStrat = document.getElementById('bf-recruit-strategy');
-        if (recStrat) settings.recruitStrategy = recStrat.value || 'priority';
-        const recRes = document.getElementById('bf-recruit-reserve');
-        if (recRes) settings.recruitReserveBE = parseInt(recRes.value) || 0;
-        // Percent allocation (T1-T8) — only update if at least one input exists
-        const pctInputs = document.querySelectorAll('.bf-recruit-pct');
-        if (pctInputs.length > 0) {
-          const recruitPct = {};
-          pctInputs.forEach(inp => {
-            const unitId = inp.dataset.unit;
-            if (unitId) recruitPct[unitId] = parseInt(inp.value) || 0;
-          });
-          settings.recruitPercent = recruitPct;
-        }
-        // Priority list — only update if rows were rendered
-        const prioRows = document.querySelectorAll('#bf-recruit-priority-list .bf-recruit-prio-row');
-        if (prioRows.length > 0) {
-          settings.recruitEnabledTiers = readEnabledTiersFromDOM();
-          settings.recruitPriority = readPriorityOrderFromDOM();
-        }
-        // Gather ignore qualities
-        settings.huntIgnoreQ = [...document.querySelectorAll('#bf-ignore-q input[data-iq]:checked')].map(cb => cb.value);
-        // Gather manual mode accept qualities
-        settings.huntManualAcceptQ = [...document.querySelectorAll('#bf-manual-accept-q input[data-maq]:checked')].map(cb => cb.value);
+        gatherHuntFromDOM(settings);
 
         saveSettings(settings);
 
@@ -7357,53 +8637,7 @@
     document.getElementById('bf-ruins-toggle').addEventListener('click', () => {
       loadSettings((settings) => {
         settings.ruinsEnabled = !settings.ruinsEnabled;
-        // Gather UI values
-        settings.ruinsLevels = getSelectedRuinsLevels();
-        settings.ruinsCadence = document.querySelector('input[name="bf-ruins-cadence"]:checked')?.value || 'infinite';
-        settings.ruinsCycles = parseInt(document.getElementById('bf-ruins-cycles')?.value) || 5;
-        settings.ruinsIntervalMin = parseInt(document.getElementById('bf-ruins-interval')?.value) || 60;
-        // v1.5.9 — gather per-band intervals
-        const bands = settings.ruinsIntervalBands || {};
-        document.querySelectorAll('#bf-ruins-interval-bands .bf-ruins-band-input').forEach(inp => {
-          const band = inp.getAttribute('data-band');
-          const v = parseInt(inp.value);
-          if (band && v > 0 && v <= 1440) bands[band] = v;
-        });
-        settings.ruinsIntervalBands = bands;
-        // Safety settings
-        settings.ruinsStopNoWin = document.getElementById('bf-ruins-stop-nowin')?.checked ?? true;
-        settings.ruinsStopPresetShort = document.getElementById('bf-ruins-stop-preset-short')?.checked ?? true;
-        settings.ruinsIgnorePresets = document.getElementById('bf-ruins-ignore-presets')?.checked ?? false;
-        settings.ruinsStopMinUnits = document.getElementById('bf-ruins-stop-min-units')?.checked ?? false;
-        settings.ruinsMinUnits = {
-          T1: parseInt(document.getElementById('bf-ruins-min-t1')?.value) || 0,
-          T2: parseInt(document.getElementById('bf-ruins-min-t2')?.value) || 0,
-          T3: parseInt(document.getElementById('bf-ruins-min-t3')?.value) || 0,
-          T4: parseInt(document.getElementById('bf-ruins-min-t4')?.value) || 0,
-        };
-        // v1.5.8 — UNLOCKED tiers
-        const unlocks = [];
-        document.querySelectorAll('#bf-ruins-unlock-bar [data-rt]').forEach(btn => {
-          if (btn.dataset.unlocked === '1') unlocks.push(btn.getAttribute('data-rt'));
-        });
-        if (unlocks.length) settings.ruinsAllyUnlocks = unlocks;
-        // v1.5.8 — Optimization
-        settings.ruinsOptStratKillE3 = document.getElementById('bf-ruins-opt-killE3')?.checked ?? false;
-        settings.ruinsOptMode = document.querySelector('input[name="bf-ruins-opt-mode"]:checked')?.value || 'deep';
-        settings.ruinsOptParallel = document.getElementById('bf-ruins-opt-parallel')?.checked ?? true;
-        // v1.6.18 — Fast scan budget (clamped 1k..5M; 50k default)
-        settings.ruinsOptFastMaxSims = Math.max(1000, Math.min(5000000,
-          parseInt(document.getElementById('bf-ruins-opt-fastsims')?.value) || 50000));
-        settings.ruinsWarmStartSource = document.getElementById('bf-ruins-warm-source')?.value || 'none';
-        settings.ruinsWarmStartRange = parseInt(document.getElementById('bf-ruins-warm-range')?.value) || 15;
-        // v1.5.8 — T4 short action
-        settings.ruinsT4ShortAction = document.querySelector('input[name="bf-ruins-t4short"]:checked')?.value || 'stop';
-        settings.ruinsT4WaitMin = parseInt(document.getElementById('bf-ruins-t4wait-min')?.value) || 10;
-        // v1.5.8 — Auto-import
-        settings.ruinsAutoImportNew = document.getElementById('bf-ruins-autoimport')?.checked ?? false;
-        settings.ruinsAutoImportMaxPerLevel = parseInt(document.getElementById('bf-ruins-autoimport-max')?.value) || 3;
-        // v1.5.9 — Auto-import as Smart preset
-        settings.ruinsAutoImportSmart = document.getElementById('bf-ruins-autoimport-smart')?.checked ?? false;
+        gatherRuinsFromDOM(settings);
 
         saveSettings(settings);
 
@@ -8460,35 +9694,7 @@
     document.getElementById('bf-story-toggle').addEventListener('click', () => {
       loadSettings((settings) => {
         settings.storyEnabled = !settings.storyEnabled;
-        // Gather story UI values
-        settings.storyPriority = document.getElementById('bf-story-priority')?.value || 'gold';
-        settings.storyWhitelist = (document.getElementById('bf-story-whitelist')?.value || '')
-          .split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
-        settings.storyBlacklist = (document.getElementById('bf-story-blacklist')?.value || '')
-          .split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
-        settings.storyStayAlive = document.getElementById('bf-story-stayalive')?.checked ?? true;
-        settings.storyStayAliveMode = document.querySelector('input[name="bf-story-salm"]:checked')?.value || 'pct';
-        settings.storyPauseAtPct = parseInt(document.getElementById('bf-story-pause-pct')?.value) || 16;
-        settings.storyResumeAtPct = parseInt(document.getElementById('bf-story-resume-pct')?.value) || 18;
-        settings.storyPauseAtHP = parseInt(document.getElementById('bf-story-pause-hp')?.value) || 10000;
-        settings.storyResumeAtHP = parseInt(document.getElementById('bf-story-resume-hp')?.value) || 12000;
-        settings.storyChurch = document.getElementById('bf-story-church')?.checked ?? true;
-        settings.storyOption42Enabled = document.getElementById('bf-story-opt42')?.checked ?? false;
-        settings.storyOption42MinHP = parseInt(document.getElementById('bf-story-opt42-hp')?.value) || 20000;
-        settings.storyOption42MinHPPct = parseInt(document.getElementById('bf-story-opt42-pct')?.value) || 50;
-        settings.storyHealPriorityPct = parseInt(document.getElementById('bf-story-heal-pct')?.value) ?? -1;
-        settings.storyHealBackPct = parseInt(document.getElementById('bf-story-healback-pct')?.value) || 80;
-        // Aspect targets
-        settings.storyAspectTargets = {
-          human: parseInt(document.getElementById('bf-aspect-human')?.value) || 0,
-          knowledge: parseInt(document.getElementById('bf-aspect-knowledge')?.value) || 0,
-          order: parseInt(document.getElementById('bf-aspect-order')?.value) || 0,
-          nature: parseInt(document.getElementById('bf-aspect-nature')?.value) || 0,
-          beast: parseInt(document.getElementById('bf-aspect-beast')?.value) || 0,
-          destruction: parseInt(document.getElementById('bf-aspect-destruction')?.value) || 0,
-          chaos: parseInt(document.getElementById('bf-aspect-chaos')?.value) || 0,
-          corruption: parseInt(document.getElementById('bf-aspect-corruption')?.value) || 0,
-        };
+        gatherStoryFromDOM(settings);
 
         saveSettings(settings);
 
@@ -8519,14 +9725,8 @@
     document.getElementById('bf-grotto-toggle').addEventListener('click', () => {
       loadSettings((settings) => {
         settings.grottoEnabled = !settings.grottoEnabled;
-        settings.grottoDifficulty = document.getElementById('bf-grotto-diff')?.value || 'easy';
-        settings.grottoCount = parseInt(document.getElementById('bf-grotto-count')?.value) || 0;
-        settings.grottoPermanent = document.getElementById('bf-grotto-permanent')?.checked ?? false;
-        settings.grottoMinHP = parseInt(document.getElementById('bf-grotto-minhp')?.value) || 50;
-        settings.grottoStayAlive = document.getElementById('bf-grotto-stayalive')?.checked ?? false;
-        settings.grottoStayAliveMode = document.querySelector('input[name="bf-grotto-salm"]:checked')?.value || 'switch';
-        settings.grottoSwitchDifficulty = document.getElementById('bf-grotto-switch-diff')?.value || 'easy';
-        settings.grottoChurchAP = parseInt(document.getElementById('bf-grotto-church-ap')?.value) || 15;
+        gatherGrottoFromDOM(settings);
+
         saveSettings(settings);
         if (settings.grottoEnabled) {
           loadState((state) => {
@@ -8552,19 +9752,8 @@
     document.getElementById('bf-pvp-toggle').addEventListener('click', () => {
       loadSettings((settings) => {
         settings.pvpEnabled = !settings.pvpEnabled;
-        // v1.6.19 — capture the user's in-game name for the result parser.
-        // Trim only — names are case-sensitive on Bitefight, so we preserve case.
-        settings.playerName = (document.getElementById('bf-player-name')?.value || '').trim();
-        settings.pvpMode = parseInt(document.getElementById('bf-pvp-mode')?.value) || 1;
-        settings.pvpMinHP = parseInt(document.getElementById('bf-pvp-minhp')?.value) || 50;
-        settings.pvpWhitelist = document.getElementById('bf-pvp-whitelist')?.value || '';
-        settings.pvpBlacklist = document.getElementById('bf-pvp-blacklist')?.value || '';
-        settings.pvpBVFrom = document.getElementById('bf-pvp-bv-from')?.value || '';
-        settings.pvpBVTo = document.getElementById('bf-pvp-bv-to')?.value || '';
-        settings.pvpIncludeInactive = document.getElementById('bf-pvp-inactive')?.checked ?? true;
-        settings.pvpSmartBreak = document.getElementById('bf-pvp-break')?.checked ?? false;
-        settings.pvpDelay = parseInt(document.getElementById('bf-pvp-delay')?.value) || 20;
-        settings.pvpMargin = parseInt(document.getElementById('bf-pvp-margin')?.value) || 3;
+        gatherPvPFromDOM(settings);
+
         // v1.6.9: PvP and Henchman are mutually exclusive — turning PvP on
         // implicitly stops the Henchman bot.
         if (settings.pvpEnabled && settings.henchmanEnabled) {
@@ -8602,15 +9791,8 @@
     document.getElementById('bf-henchman-toggle')?.addEventListener('click', () => {
       loadSettings((settings) => {
         settings.henchmanEnabled = !settings.henchmanEnabled;
-        // v1.6.19 — same shared playerName field used by both bots' win detection
-        settings.playerName = (document.getElementById('bf-player-name')?.value || '').trim();
-        settings.henchmanMode = parseInt(document.getElementById('bf-henchman-mode')?.value) || 1;
-        settings.henchmanWhitelist = document.getElementById('bf-henchman-whitelist')?.value || '';
-        settings.henchmanBlacklist = document.getElementById('bf-henchman-blacklist')?.value || '';
-        settings.henchmanSmartBreak = document.getElementById('bf-henchman-break')?.checked ?? false;
-        settings.henchmanDelay = parseInt(document.getElementById('bf-henchman-delay')?.value) || 20;
-        settings.henchmanMargin = parseInt(document.getElementById('bf-henchman-margin')?.value) || 3;
-        settings.henchmanAttackOwnRace = document.getElementById('bf-henchman-own-race')?.checked ?? false;
+        gatherHenchmanFromDOM(settings);
+
         // Mutual exclusivity with PvP.
         if (settings.henchmanEnabled && settings.pvpEnabled) {
           settings.pvpEnabled = false;
@@ -8651,14 +9833,7 @@
     // Gifts toggle (Purple Gifts)
     document.getElementById('bf-gifts-toggle').addEventListener('click', () => {
       loadSettings((settings) => {
-        settings.giftsAutoDBG = document.getElementById('bf-gifts-dbg')?.checked ?? false;
-        settings.giftsDBGUnderAP = parseInt(document.getElementById('bf-gifts-dbg-ap')?.value) || 5;
-        settings.giftsDisableAfterEvent = document.getElementById('bf-gifts-disable-event')?.checked ?? false;
-        settings.giftsMaxCaveTime = document.getElementById('bf-gifts-cave-time')?.checked ?? false;
-        settings.giftsPurpleMode = document.querySelector('input[name="bf-gifts-purple"]:checked')?.value || 'none';
-        settings.giftsPurpleGoldTarget = parseInt(document.getElementById('bf-gifts-pg-gold-val')?.value) || 100000;
-        settings.giftsPurpleQtyTarget = parseInt(document.getElementById('bf-gifts-pg-qty-val')?.value) || 10;
-        settings.giftsPurpleSpendGold = document.getElementById('bf-gifts-pg-spend')?.checked ?? false;
+        gatherGiftsFromDOM(settings);
         // Toggle purple gifts bot
         const wasRunning = document.getElementById('bf-gifts-status')?.textContent !== 'Disabled';
         saveSettings(settings);
@@ -9027,6 +10202,59 @@
     // immediately. Called on every user change so we don't rely on the
     // Hunt master toggle to save recruit fields (which caused the
     // v1.6.4 reset bug).
+    // v1.6.20 — Essence / Crucible live persist
+    function persistCrucibleFromDOM() {
+      loadSettings((se) => {
+        const en = document.getElementById('bf-extract-enabled');
+        if (en) se.extractEnabled = !!en.checked;
+        const rp = document.getElementById('bf-extract-repeat');
+        if (rp) se.extractAutoRepeat = !!rp.checked;
+        readCrucibleSettingsFromDOM(se);
+        saveSettings(se);
+      });
+    }
+    document.getElementById('bf-extract-enabled')?.addEventListener('change', persistCrucibleFromDOM);
+    document.getElementById('bf-extract-repeat')?.addEventListener('change', persistCrucibleFromDOM);
+    document.getElementById('bf-crucible-mode')?.addEventListener('change', (e) => {
+      const row = document.getElementById('bf-crucible-rite-row');
+      if (row) row.style.display = e.target.value === 'rite' ? 'block' : 'none';
+      persistCrucibleFromDOM();
+    });
+    document.getElementById('bf-crucible-resume')?.addEventListener('change', persistCrucibleFromDOM);
+    document.querySelectorAll('#bf-crucible-rite-q input[data-rq]').forEach(cb => cb.addEventListener('change', persistCrucibleFromDOM));
+
+    // v1.6.23 — Backup export / import
+    document.getElementById('bf-backup-export')?.addEventListener('click', exportBotData);
+    document.getElementById('bf-backup-import')?.addEventListener('click', () => document.getElementById('bf-backup-file')?.click());
+    document.getElementById('bf-backup-file')?.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const f = e.target.files && e.target.files[0];
+      if (f) importBotData(f, false);
+      e.target.value = '';
+    });
+
+    // v1.6.21 — Battle Report Verify
+    document.getElementById('bf-br-enabled')?.addEventListener('change', (e) => {
+      const on = !!e.target.checked;
+      loadSettings(se => { se.brVerifyEnabled = on; saveSettings(se); if (on) botSetTimeout(brProcessQueue, 500); });
+    });
+    document.getElementById('bf-br-sync')?.addEventListener('click', () => {
+      botLog('info', '🔬 Syncing battle report list...');
+      brSyncList(n => botLog(n >= 0 ? 'info' : 'warn', n >= 0 ? `🔬 Battle log list: ${n} report link(s) found` : '🔬 Battle log list fetch failed'));
+    });
+    document.getElementById('bf-br-export')?.addEventListener('click', brExportJSON);
+    document.getElementById('bf-br-clear')?.addEventListener('click', (e) => {
+      // two-step confirm (no browser dialogs — they block the extension)
+      const btn = e.currentTarget;
+      if (btn.dataset.armed !== '1') {
+        btn.dataset.armed = '1'; btn.textContent = 'Sure?';
+        botSetTimeout(() => { btn.dataset.armed = ''; btn.textContent = '🗑'; }, 3000);
+        return;
+      }
+      btn.dataset.armed = ''; btn.textContent = '🗑';
+      sSet({ [SK('brReports')]: [], [SK('brQueue')]: [] }, () => { botLog('info', '🔬 Battle reports cleared'); updateBrUI(); });
+    });
+
     function persistRecruitFromDOM() {
       loadSettings((se) => {
         const recEn = document.getElementById('bf-recruit-enabled');
@@ -9451,11 +10679,13 @@
       sGet([SK('centralStop')], r => {
         if (r[SK('centralStop')] === true) {
           dot.classList.add('dot-red');
+          _crestSetState('stopped');
           return;
         }
         // 2. Check for error
         if (_lastBotError) {
           dot.classList.add('dot-error');
+          _crestSetState('alert');
           return;
         }
         const huntActive = settings.huntEnabled && state.huntState !== 'idle' && state.huntState !== 'done';
@@ -9483,12 +10713,18 @@
         if (anyBotEnabled && !allWaiting) {
           // 3. Green — actively running
           dot.classList.add('dot-green');
+          const inRuinsFight = ruinsActive && (state.ruinsState === 'fighting' || /^\/ancestral\//.test(PAGE));
+          _crestSetState(inRuinsFight ? 'battle' : 'running');
         } else if (anyBotEnabled && allWaiting) {
           // 4. Yellow — enabled but all are waiting
           dot.classList.add('dot-yellow');
+          _crestSetState('waiting');
         } else if (globalActive) {
           // 5. White — only global features active
           dot.classList.add('dot-white');
+          _crestSetState('waiting');
+        } else {
+          _crestSetState('idle');
         }
         // else: transparent (everything off)
       });
@@ -10047,6 +11283,15 @@
     if (extractEn) extractEn.checked = settings.extractEnabled !== false;
     const extractRep = document.getElementById('bf-extract-repeat');
     if (extractRep) extractRep.checked = settings.extractAutoRepeat !== false;
+    // v1.6.20 — Crucible
+    const crMode = document.getElementById('bf-crucible-mode');
+    if (crMode) crMode.value = settings.crucibleMode === 'rite' ? 'rite' : 'extract';
+    const crRow = document.getElementById('bf-crucible-rite-row');
+    if (crRow) crRow.style.display = settings.crucibleMode === 'rite' ? 'block' : 'none';
+    const crRanks = settings.crucibleRiteRanks || ['S'];
+    document.querySelectorAll('#bf-crucible-rite-q input[data-rq]').forEach(cb => { cb.checked = crRanks.includes(cb.value); });
+    const crRes = document.getElementById('bf-crucible-resume');
+    if (crRes) crRes.value = settings.crucibleResume === 'any' ? 'any' : 'all';
 
     // ── Auto Recruitment (v1.6.4) ──────────────────────────────
     const recruitEn = document.getElementById('bf-recruit-enabled');
@@ -10140,6 +11385,9 @@
     // v1.6.2 — Ignore Presets toggle
     const ignorePresetsEl = document.getElementById('bf-ruins-ignore-presets');
     if (ignorePresetsEl) ignorePresetsEl.checked = !!settings.ruinsIgnorePresets;
+    const brEn = document.getElementById('bf-br-enabled');
+    if (brEn) brEn.checked = settings.brVerifyEnabled !== false;
+    updateBrUI();
     const stopMinU = document.getElementById('bf-ruins-stop-min-units');
     if (stopMinU) {
       stopMinU.checked = !!settings.ruinsStopMinUnits;
@@ -10486,9 +11734,122 @@
     });
   }
 
+  // ── v1.6.26 — UNIT IDENTITY (names + artwork, per race) ─────────
+  // Names are harvested from game pages in the server's language and kept
+  // server-wide (SERVER_ID + '_unitNames'); the own race is per character
+  // (SK('race')). Artwork is loaded from the game server (BFUnits.imgUrl).
+  const UNIT_NAMES_KEY = SERVER_ID + '_unitNames';
+  let _unitCtx = { race: null, names: null };
+  // v1.6.27 — skull crest state bridge (set by the Appearance block)
+  let _crestSetState = () => {};
+  let _crestState = null;
+  function loadUnitCtx(cb) {
+    sGet([UNIT_NAMES_KEY, SK('race')], r => {
+      _unitCtx.names = r[UNIT_NAMES_KEY] || { ally: {}, enemy: {} };
+      _unitCtx.race = r[SK('race')] || null;
+      if (cb) cb(_unitCtx);
+    });
+  }
+  function harvestUnitsFromDoc(doc) {
+    if (!window.BFUnits) return;
+    let found;
+    try { found = window.BFUnits.harvest(doc || document); } catch (_) { return; }
+    // Own race only from OUR pages (not PvP/profile pages of other players)
+    const ownPage = !doc || doc === document
+      ? /^\/(nourishing|ancestral|crucible)\//.test(PAGE)
+      : true; // fetched docs are only ever our own reports / army page
+    const out = {};
+    if (found.race && ownPage && found.race !== _unitCtx.race) {
+      _unitCtx.race = found.race;
+      out[SK('race')] = found.race;
+      out[SERVER_ID + '_lastRace'] = found.race;
+    }
+    const m = window.BFUnits.mergeNames(_unitCtx.names || { ally: {}, enemy: {} }, found);
+    _unitCtx.names = m.names;
+    if (m.changed) out[UNIT_NAMES_KEY] = m.names;
+    if (Object.keys(out).length) sSet(out);
+  }
+  function unitName(id) {
+    return window.BFUnits ? window.BFUnits.name(id, _unitCtx.race || 1, _unitCtx.names) : id;
+  }
+  function unitImgTag(id, size) {
+    if (!window.BFUnits) return '';
+    const url = window.BFUnits.imgUrl(id, _unitCtx.race || 1, BASE);
+    const px = size || 18;
+    return url ? `<img src="${url}" alt="" class="bf-unit-img" style="width:${px}px;height:${px}px;object-fit:cover;border-radius:2px;border:1px solid #3a2a1a;vertical-align:middle;flex:0 0 auto">` : '';
+  }
+
+  // v1.6.23 — restore settings / presets from the page-localStorage backup
+  // when the extension storage for this character is empty.
+  function restoreFromBackupIfMissing(done) {
+    if (!PLAYER_ID) { done(); return; }
+    const keys = BK_SUFFIXES.map(sf => SERVER_ID + '_p' + PLAYER_ID + sf);
+    sGet(keys, r => {
+      const restore = {};
+      keys.forEach(k => {
+        if (r[k] !== undefined && r[k] !== null) return;
+        try {
+          const raw = window.localStorage.getItem(BK_PREFIX + k);
+          if (!raw) return;
+          const bk = JSON.parse(raw);
+          if (bk && bk.v) restore[k] = bk.v;
+        } catch (_) {}
+      });
+      const n = Object.keys(restore).length;
+      if (!n) { done(); return; }
+      chrome.storage.local.set(restore, () => {
+        console.log('[BF-Bot] Restored from backup:', Object.keys(restore));
+        _restoredFromBackup = Object.keys(restore).map(k => k.split('_bot_')[1]);
+        done();
+      });
+    });
+  }
+  let _restoredFromBackup = null;
+
+  // v1.6.23 — full export / import of this character's bot data (file)
+  const EXPORT_SUFFIXES = ['settings', 'ruinsPresets', 'ruinsBattleLog', 'extractionLog', 'brReports'];
+  function exportBotData() {
+    const keys = EXPORT_SUFFIXES.map(k => SK(k));
+    sGet(keys, r => {
+      const data = {};
+      EXPORT_SUFFIXES.forEach(k => { if (r[SK(k)] !== undefined) data[k] = r[SK(k)]; });
+      const payload = { app: 'BiteFight Pro Bot', version: (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || '?',
+        exportedAt: new Date().toISOString(), server: SERVER_ID, player: PLAYER_ID, data };
+      const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `bf-bot-backup-${SERVER_ID}${PLAYER_ID ? '-p' + PLAYER_ID : ''}-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a); a.click();
+      botSetTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+      botLog('ok', `💾 Exported bot data (${Object.keys(data).join(', ')})`);
+    });
+  }
+  function importBotData(file, onlySettings) {
+    const rd = new FileReader();
+    rd.onload = () => {
+      let payload;
+      try { payload = JSON.parse(rd.result); } catch (e) { botLog('error', '💾 Import: not a valid JSON file'); return; }
+      if (!payload || !payload.data || typeof payload.data !== 'object') { botLog('error', '💾 Import: file has no bot data'); return; }
+      const out = {};
+      Object.keys(payload.data).forEach(k => {
+        if (!EXPORT_SUFFIXES.includes(k)) return;
+        if (onlySettings && k !== 'settings' && k !== 'ruinsPresets') return;
+        out[SK(k)] = payload.data[k];
+      });
+      if (!Object.keys(out).length) { botLog('warn', '💾 Import: nothing to import'); return; }
+      sSet(out, () => {
+        botLog('ok', `💾 Imported ${Object.keys(out).map(k => k.split('_bot_')[1]).join(', ')} from ${payload.server || '?'} (v${payload.version || '?'}) — reloading…`);
+        botSetTimeout(() => window.location.reload(), 1200);
+      });
+    };
+    rd.readAsText(file);
+  }
+
   function boot() {
-    detectPlayerId().then(() => {
+    detectPlayerId().then(() => new Promise(res => restoreFromBackupIfMissing(res)))
+      .then(() => new Promise(res => loadUnitCtx(() => { harvestUnitsFromDoc(document); res(); }))).then(() => {
       createBotPanel();
+      if (_restoredFromBackup) botLog('ok', `💾 Restored ${_restoredFromBackup.join(' + ')} from local backup (extension storage was empty)`);
       createBattleLogPanel();
       // Pre-load smart preset cache so findBestFormation can use warm-start synchronously
       try {
@@ -10502,6 +11863,8 @@
       botSetTimeout(runAutoImportTick, 8000);
       // v1.6.7 — schedule watcher (30s tick) — drives slot transitions
       botSetTimeout(startScheduleWatcher, 4000);
+      // v1.6.21 — background battle-report verification queue
+      botSetTimeout(brProcessQueue, 3000);
     });
   }
   if (document.readyState === 'loading') {
