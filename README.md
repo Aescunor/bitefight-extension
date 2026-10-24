@@ -93,6 +93,12 @@ bitefight-bot/
     └── worker.js                  # Background service worker (MV3) — chrome.storage relay
 ```
 
+<img width="848" height="539" alt="image" src="https://github.com/user-attachments/assets/4b21a9b6-8566-411a-8330-55710af199fc" />
+
+
+
+
+
 ### Manifest wiring (for reference)
 
 | Role | Files |
