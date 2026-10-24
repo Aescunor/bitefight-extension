@@ -43,6 +43,9 @@
         if (fromDOM) { cacheAndResolve(fromDOM); return; }
       }
 
+      const fromPage = detectFromDOM();
+      if (fromPage) { cacheAndResolve(fromPage); return; }
+
       // B) Check storage cache with TTL
       chrome.storage.local.get([PID_CACHE_KEY], (r) => {
         const cached = r[PID_CACHE_KEY];
@@ -80,10 +83,20 @@
           const id = (senderEl.textContent || '').trim();
           if (/^\d+$/.test(id)) return id;
         }
-        const profLink = document.querySelector('a[href*="/profile/player/"]');
-        if (profLink) {
-          const m = profLink.getAttribute('href').match(/\/profile\/player\/(\d+)/);
+        // v1.6.26 — same fix as bot.js v1.6.23: read the own id from the
+        // page's script template; a /profile/player/ link may belong to
+        // another player (and this cache key is shared with bot.js).
+        try {
+          const html = document.documentElement ? document.documentElement.innerHTML : '';
+          const m = html.match(/id=\\?["']senderid\\?["'][^>]*>\s*(\d+)\s*</);
           if (m) return m[1];
+        } catch (_) {}
+        if (_onProfileNow) {
+          const profLink = document.querySelector('a[href*="/profile/player/"]');
+          if (profLink) {
+            const m = profLink.getAttribute('href').match(/\/profile\/player\/(\d+)/);
+            if (m) return m[1];
+          }
         }
         return null;
       }
@@ -247,10 +260,20 @@
   function sendGameState() {
     if (!ctxOk()) return;
     const state = readGameState();
-    const iframe = document.getElementById('bf-sim-iframe');
-    if (iframe?.contentWindow) {
-      iframe.contentWindow.postMessage({ type: 'BF_GAME_STATE', state }, '*');
-    }
+    // v1.6.26 — unit identity for the simulator: game origin (artwork is
+    // loaded from the game server), own race and names harvested by bot.js.
+    state.origin = window.location.origin;
+    const raceKey = SERVER_ID + '_p' + PLAYER_ID + '_bot_race';
+    safeStorageGet([SERVER_ID + '_unitNames', raceKey, SERVER_ID + '_lastRace'], (r) => {
+      state.units = {
+        race: r[raceKey] || r[SERVER_ID + '_lastRace'] || null,
+        names: r[SERVER_ID + '_unitNames'] || null,
+      };
+      const iframe = document.getElementById('bf-sim-iframe');
+      if (iframe?.contentWindow) {
+        iframe.contentWindow.postMessage({ type: 'BF_GAME_STATE', state }, '*');
+      }
+    });
   }
 
   function createPanel() {
@@ -270,7 +293,7 @@
     container.style.display = 'none';
     container.innerHTML = `
       <div id="bf-sim-header">
-        <span>⚔ BF Simulator <span style="font-size:0.6rem;opacity:0.4;margin-left:4px">v1.6.10 · ${SERVER_ID}${PLAYER_ID ? ' · #' + PLAYER_ID : ''}</span></span>
+        <span>⚔ BF Simulator <span style="font-size:0.6rem;opacity:0.4;margin-left:4px">v${(() => { try { return chrome.runtime.getManifest().version; } catch (_) { return '?'; } })()} · ${SERVER_ID}${PLAYER_ID ? ' · #' + PLAYER_ID : ''}</span></span>
         <div style="display:flex;gap:6px;align-items:center">
           <span id="bf-ap-badge"  class="bf-badge">AP: –</span>
           <span id="bf-be-badge"  class="bf-badge bf-badge-blood">BE: –</span>
