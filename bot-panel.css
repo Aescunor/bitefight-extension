@@ -169,8 +169,53 @@
 /* When the .bf-bot-fullscreen class is added by JS, override the
    panel's normal 85vh cap so it truly fills the viewport. */
 #bf-bot-panel.bf-bot-fullscreen {
-  max-height: 100vh !important;
+  max-height: calc(100vh / var(--bf-z, 1)) !important;
   border-radius: 0;
+}
+
+/* ── v1.6.23 — Appearance (⚙) ───────────────────────────────── */
+/* Size: the whole panel is scaled with transform (layout, borders and
+   tables scale together, nothing re-wraps). The 85vh cap is divided by
+   the scale so the scaled panel still fits the viewport. */
+#bf-bot-panel { transform-origin: top left; }
+#bf-bot-panel.bf-look-zoomed { max-height: calc(85vh / var(--bf-z, 1)); }
+#bf-bot-look {
+  background: none; border: 1px solid transparent;
+  color: #5a7a4a; font-size: 0.85rem;
+  cursor: pointer; padding: 2px 6px;
+  border-radius: 3px; line-height: 1;
+  transition: all 0.2s;
+}
+#bf-bot-look:hover, #bf-bot-look.on { border-color: #4caf50; background: rgba(76,175,80,0.12); color: #7ad19a; }
+#bf-look-pop {
+  display: none; position: absolute; top: 38px; right: 8px; z-index: 5;
+  width: 270px; padding: 10px 12px 12px; box-sizing: border-box;
+  background: #0d110c; border: 1px solid #2a4a2a; border-radius: 6px;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.85);
+  font-size: 0.64rem; color: #9ab08a; cursor: default;
+}
+#bf-look-pop.open { display: block; }
+#bf-look-pop .lk-t { color: #e0c068; font-weight: bold; letter-spacing: 0.1em; margin-bottom: 8px; }
+#bf-look-pop .lk-x { position: absolute; top: 6px; right: 8px; background: none; border: none; color: #5a7a4a; cursor: pointer; font-size: 0.8rem; }
+#bf-look-pop .lk-x:hover { color: #e74c3c; }
+#bf-look-pop .lk-h { margin: 8px 0 4px; color: #c8d8b8; }
+#bf-look-pop .lk-row { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; align-items: center; }
+#bf-look-pop .lk-b {
+  background: #141c12; border: 1px solid #2a4a2a; color: #c8d8b8;
+  border-radius: 3px; padding: 3px 7px; cursor: pointer; font-size: 0.62rem;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+#bf-look-pop .lk-b:hover { border-color: #4caf50; }
+#bf-look-pop .lk-b.on { border-color: #e0c068; color: #e0c068; background: #1f2414; }
+#bf-look-pop .lk-sw { width: 9px; height: 9px; border-radius: 2px; border: 1px solid #444; display: inline-block; }
+#bf-look-pop input[type="color"] { width: 26px; height: 20px; padding: 0; border: 1px solid #2a4a2a; background: none; cursor: pointer; }
+#bf-look-pop .lk-prev { margin-top: 6px; padding: 5px 6px; border: 1px dashed #2a4a2a; border-radius: 4px; line-height: 1.5; }
+
+/* Native browser dropdowns: drop the custom select skin */
+#bf-bot-panel.bf-look-native select {
+  appearance: auto !important; -webkit-appearance: menulist !important; -moz-appearance: menulist !important;
+  background-image: none !important;
+  padding-right: 4px !important;
 }
 
 /* ── Tabs ───────────────────────────────────────────────────── */
@@ -848,3 +893,204 @@
 .bf-layout-btn:disabled {
   cursor: not-allowed;
 }
+
+/* ══════════════════════════════════════════════════════════════════
+   v1.6.27 — GRIMOIRE THEME (dark wood · parchment · race accents)
+   Enabled by JS: <html class="bf-grim bf-grim-race-1|2">  (1 = vampire,
+   2 = werewolf). Everything is scoped under html.bf-grim so the classic
+   green look stays available (⚙ Appearance → Theme → Classic).
+   Inline legacy greens inside the panel are re-tinted by JS (bf-grim-remap).
+   ══════════════════════════════════════════════════════════════════ */
+html.bf-grim {
+  --g-wood1: #3a2414; --g-wood2: #2a190e; --g-wood3: #402817;
+  --g-parch: #17110c; --g-parch2: #221810; --g-field: #120c08;
+  --g-line: #5a3d22; --g-line2: #3e2a19;
+  --g-metal: #b08848;
+  --g-accent: #e0a64a; --g-accent-rgb: 224,166,74;
+  --g-title: #f0d29a; --g-text: #eadcc2; --g-dim: #b9a684; --g-mute: #8f8068;
+  --g-btn1: #4a2e17; --g-btn2: #2a1a0e;
+}
+html.bf-grim.bf-grim-race-1 {
+  --g-wood1: #321618; --g-wood2: #241012; --g-wood3: #3a1c1f;
+  --g-parch: #160c10; --g-parch2: #201014; --g-field: #110709;
+  --g-line: #4a2228; --g-line2: #33181c;
+  --g-metal: #a9adb8;
+  --g-accent: #e06a7a; --g-accent-rgb: 224,106,122;
+  --g-title: #e9d6da; --g-text: #ece0e2; --g-dim: #b8a8ac; --g-mute: #8e7e84;
+  --g-btn1: #4a1a22; --g-btn2: #260e12;
+}
+
+/* ── Window frame ─────────────────────────────────────────────── */
+html.bf-grim #bf-bot-panel {
+  background: radial-gradient(140% 90% at 50% 10%, var(--g-parch2) 0%, var(--g-parch) 60%, #0c0806 100%) !important;
+  border: 6px solid transparent !important;
+  border-image: repeating-linear-gradient(92deg, var(--g-wood1) 0 3px, var(--g-wood2) 3px 7px, var(--g-wood3) 7px 11px, var(--g-wood2) 11px 16px) 6 !important;
+  border-radius: 0 !important;
+  box-shadow: 0 14px 44px rgba(0,0,0,.9), 0 0 0 1px var(--g-metal), inset 0 0 0 1px #0a0604, inset 0 0 40px rgba(0,0,0,.75) !important;
+  color: var(--g-text) !important;
+  font-family: 'Crimson Text', Georgia, serif !important;
+  font-size: 0.86rem !important;
+  overflow: visible !important;
+}
+html.bf-grim #bf-bot-panel > .bf-grim-inner-clip { overflow: hidden; }
+/* metal corners + thorn ornaments (pure CSS/SVG, no game assets) */
+html.bf-grim #bf-bot-panel::before,
+html.bf-grim #bf-bot-panel::after {
+  content: ''; position: absolute; width: 74px; height: 74px; pointer-events: none; z-index: 6;
+  background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'><path d='M8 88 C10 50 30 22 88 8' fill='none' stroke='%23140b06' stroke-width='8' stroke-linecap='round'/><path d='M8 88 C10 50 30 22 88 8' fill='none' stroke='%237a5430' stroke-width='2.4' stroke-linecap='round'/><path d='M14 62 l-10 -6 M22 42 l-12 -10 M36 26 l-8 -14 M56 15 l-4 -12 M74 10 l2 -10' stroke='%238a6438' stroke-width='2.6' stroke-linecap='round'/><circle cx='20' cy='20' r='7.5' fill='%23d8c8a8' stroke='%23140b06' stroke-width='2'/><circle cx='17.4' cy='19' r='1.7' fill='%23140b06'/><circle cx='22.6' cy='19' r='1.7' fill='%23140b06'/></svg>") no-repeat center / contain;
+}
+html.bf-grim #bf-bot-panel::before { top: -16px; left: -16px; }
+html.bf-grim #bf-bot-panel::after  { top: -16px; right: -16px; transform: scaleX(-1); }
+html.bf-grim.bf-grim-race-1 #bf-bot-panel::before,
+html.bf-grim.bf-grim-race-1 #bf-bot-panel::after {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'><path d='M8 88 C6 46 26 16 88 8' fill='none' stroke='%23140708' stroke-width='8' stroke-linecap='round'/><path d='M8 88 C6 46 26 16 88 8' fill='none' stroke='%238a3a46' stroke-width='2.4' stroke-linecap='round'/><path d='M12 60 l-9 -2 M18 40 l-11 -6 M30 24 l-8 -10 M50 13 l-3 -11 M70 9 l3 -9' stroke='%23a9adb8' stroke-width='2.2' stroke-linecap='round'/><path d='M14 30 C10 18 18 8 30 12 C22 14 18 20 20 30 Z' fill='%233a1418' stroke='%23a9adb8' stroke-width='1.5'/></svg>");
+}
+html.bf-grim #bf-bot-panel.bf-bot-fullscreen::before,
+html.bf-grim #bf-bot-panel.bf-bot-fullscreen::after { display: none; }
+
+/* ── Header plank / crest ─────────────────────────────────────── */
+html.bf-grim #bf-bot-header {
+  position: relative;
+  background: linear-gradient(180deg, var(--g-wood1) 0%, var(--g-wood2) 100%) !important;
+  border-bottom: 1px solid var(--g-line) !important;
+  box-shadow: 0 2px 0 #0a0604;
+  color: var(--g-title) !important;
+  font-family: 'Cinzel', Georgia, serif !important;
+  letter-spacing: .12em !important;
+  text-shadow: 0 1px 2px #000;
+  overflow: hidden;
+}
+html.bf-grim #bf-bot-header > * { position: relative; z-index: 2; }
+html.bf-grim #bf-bot-header.bf-has-crest { height: 150px; align-items: flex-end; padding: 8px 12px 10px !important; }
+html.bf-grim #bf-bot-header.bf-has-crest > div:not(.bf-crest) { align-self: flex-start; }
+html.bf-grim #bf-bot-header .bf-crest {
+  position: absolute !important; top: 0; left: 0; right: 0; bottom: 0; z-index: 0 !important; pointer-events: none; background: #0a0604;
+}
+html.bf-grim #bf-bot-header .bf-crest canvas {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: block;
+}
+html.bf-grim #bf-bot-header .bf-crest .bf-crest-glow { transition: filter .6s ease, opacity .6s ease; mix-blend-mode: screen; }
+html.bf-grim #bf-bot-header .bf-crest::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(10,6,4,.45) 0%, rgba(10,6,4,0) 28%, rgba(10,6,4,0) 52%, rgba(12,8,6,.9) 90%, var(--g-parch) 100%);
+  box-shadow: inset 0 0 40px 8px rgba(0,0,0,.85);
+}
+html.bf-grim #bf-bot-header .bf-crest-state {
+  font-family: 'Cinzel', serif; font-size: 0.6rem; letter-spacing: .1em; padding: 2px 8px; border-radius: 10px;
+  background: rgba(8,5,3,.8); border: 1px solid currentColor; margin-left: 8px; white-space: nowrap;
+}
+/* glow states (hue-rotate is set inline per race by JS; these drive motion) */
+@keyframes bfGlowPulse { 0%,100% { opacity: .82; } 50% { opacity: 1; } }
+@keyframes bfGlowSlow  { 0%,100% { opacity: .55; } 50% { opacity: .8; } }
+@keyframes bfGlowFlick { 0%,100% { opacity: .9; } 8% { opacity: .35; } 12% { opacity: 1; } 55% { opacity: .7; } 60% { opacity: 1; } }
+html.bf-grim .bf-crest[data-state="running"] .bf-crest-glow { animation: bfGlowPulse 2.6s ease-in-out infinite; }
+html.bf-grim .bf-crest[data-state="battle"]  .bf-crest-glow { animation: bfGlowPulse 1.2s ease-in-out infinite; }
+html.bf-grim .bf-crest[data-state="waiting"] .bf-crest-glow { animation: bfGlowSlow 4.5s ease-in-out infinite; }
+html.bf-grim .bf-crest[data-state="alert"]   .bf-crest-glow { animation: bfGlowFlick 2.2s linear infinite; }
+html.bf-grim .bf-crest[data-state="idle"]    .bf-crest-glow { opacity: 0 !important; }
+html.bf-grim .bf-crest[data-state="stopped"] .bf-crest-glow { opacity: 0 !important; }
+html.bf-grim .bf-crest[data-state="stopped"] .bf-crest-base { filter: grayscale(.6) brightness(.55); }
+html.bf-grim.bf-lowfx .bf-crest .bf-crest-glow { animation: none !important; }
+
+/* header buttons */
+html.bf-grim #bf-bot-close, html.bf-grim #bf-bot-fullscreen, html.bf-grim #bf-bot-look, html.bf-grim #bf-bot-pin {
+  background: rgba(16,10,6,.85) !important; border: 1px solid var(--g-line) !important; color: var(--g-title) !important;
+  border-radius: 5px !important; padding: 3px 7px !important;
+}
+html.bf-grim #bf-bot-close:hover, html.bf-grim #bf-bot-fullscreen:hover, html.bf-grim #bf-bot-look:hover, html.bf-grim #bf-bot-pin:hover,
+html.bf-grim #bf-bot-look.on, html.bf-grim #bf-bot-pin.active {
+  border-color: var(--g-accent) !important; color: var(--g-accent) !important; box-shadow: 0 0 8px rgba(var(--g-accent-rgb), .35);
+}
+
+/* ── Tabs: book-marks ─────────────────────────────────────────── */
+html.bf-grim .bf-bot-tabs { background: #0f0a07 !important; border-bottom: 1px solid var(--g-line2) !important; padding: 6px 6px 0; gap: 3px; }
+html.bf-grim .bf-bot-tab {
+  font-family: 'Cinzel', serif !important; font-size: 0.62rem !important; letter-spacing: .06em !important;
+  color: var(--g-dim) !important; background: var(--g-field) !important;
+  border: 1px solid var(--g-line2) !important; border-bottom: none !important; border-radius: 5px 5px 0 0;
+  padding: 5px 7px 6px !important;
+}
+html.bf-grim .bf-bot-tab:hover { color: var(--g-title) !important; border-color: var(--g-line) !important; }
+html.bf-grim .bf-bot-tab.active {
+  color: var(--g-title) !important; border-color: var(--g-metal) !important;
+  background: linear-gradient(180deg, var(--g-btn1), var(--g-btn2)) !important;
+  box-shadow: 0 -2px 10px rgba(var(--g-accent-rgb), .25);
+}
+
+/* ── Body / groups ────────────────────────────────────────────── */
+html.bf-grim .bf-bot-body::-webkit-scrollbar-track { background: #0c0806 !important; }
+html.bf-grim .bf-bot-body::-webkit-scrollbar-thumb { background: var(--g-line) !important; }
+html.bf-grim .bf-bot-group {
+  background: linear-gradient(180deg, rgba(40,26,14,.35), rgba(14,9,6,.55)) !important;
+  border: 1px solid var(--g-line) !important; border-radius: 6px !important;
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,.4);
+}
+html.bf-grim.bf-grim-race-1 .bf-bot-group { background: linear-gradient(180deg, rgba(40,14,20,.35), rgba(14,6,8,.55)) !important; }
+html.bf-grim .bf-bot-group-title {
+  font-family: 'Cinzel', serif !important; font-size: 0.7rem !important; letter-spacing: .12em !important;
+  color: var(--g-accent) !important; text-transform: uppercase;
+  border-bottom: 1px solid var(--g-line2); padding-bottom: 4px;
+}
+html.bf-grim .bf-bot-label, html.bf-grim .bf-bot-checkbox { color: var(--g-dim) !important; font-size: 0.8rem !important; }
+html.bf-grim .bf-bot-checkbox input { accent-color: var(--g-accent) !important; }
+html.bf-grim .bf-bot-select, html.bf-grim .bf-bot-input {
+  background-color: var(--g-field) !important; border: 1px solid var(--g-line) !important; color: var(--g-text) !important;
+  font-family: 'Crimson Text', Georgia, serif !important; font-size: 0.8rem !important; border-radius: 4px !important;
+}
+html.bf-grim .bf-bot-select { background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M0 0 L5 6 L10 0 Z' fill='%23c9a96a'/></svg>") !important; }
+html.bf-grim .bf-bot-select option { background-color: var(--g-field) !important; color: var(--g-text) !important; }
+html.bf-grim .bf-bot-select:hover, html.bf-grim .bf-bot-select:focus, html.bf-grim .bf-bot-input:focus { border-color: var(--g-accent) !important; }
+
+/* ── Buttons: forged plates; Start/Stop = seal ─────────────────── */
+html.bf-grim .bf-bot-btn {
+  font-family: 'Cinzel', serif !important; letter-spacing: .08em !important; font-size: 0.7rem !important;
+  color: var(--g-title) !important; border: 1px solid var(--g-metal) !important; border-radius: 5px !important;
+  background: linear-gradient(180deg, var(--g-btn1), var(--g-btn2)) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 2px 6px rgba(0,0,0,.6);
+}
+html.bf-grim .bf-bot-btn:hover { border-color: var(--g-accent) !important; box-shadow: 0 0 10px rgba(var(--g-accent-rgb), .35), inset 0 1px 0 rgba(255,255,255,.08); }
+@keyframes bfSeal { 0%,100% { box-shadow: 0 0 8px 1px rgba(var(--g-accent-rgb), .45), inset 0 0 10px rgba(var(--g-accent-rgb), .25); } 50% { box-shadow: 0 0 16px 4px rgba(var(--g-accent-rgb), .7), inset 0 0 14px rgba(var(--g-accent-rgb), .45); } }
+html.bf-grim .bf-bot-btn.running {
+  color: #fff1d8 !important; border-color: var(--g-accent) !important;
+  background: radial-gradient(120% 140% at 50% 30%, rgba(var(--g-accent-rgb), .35), var(--g-btn2) 70%) !important;
+  animation: bfSeal 2.6s ease-in-out infinite;
+}
+html.bf-grim.bf-lowfx .bf-bot-btn.running { animation: none; }
+
+/* ── Status, log (chronicle), cooldown ────────────────────────── */
+html.bf-grim .bf-bot-status { background: rgba(10,6,4,.55) !important; border: 1px solid var(--g-line2) !important; }
+html.bf-grim .bf-bot-status .status-text { color: var(--g-dim) !important; }
+html.bf-grim .bf-bot-status .status-value { color: var(--g-accent) !important; }
+html.bf-grim .bf-bot-log {
+  background: linear-gradient(180deg, var(--g-parch2), #0f0a07) !important; border: 1px solid var(--g-line) !important;
+  color: var(--g-dim) !important; font-family: 'Crimson Text', Georgia, serif !important; font-size: 0.78rem !important;
+}
+html.bf-grim .bf-bot-log::-webkit-scrollbar-thumb { background: var(--g-line) !important; }
+html.bf-grim .bf-log-entry { border-bottom: 1px solid rgba(0,0,0,.35) !important; }
+html.bf-grim .bf-log-time { color: var(--g-mute) !important; }
+html.bf-grim .bf-log-info { color: #9ec2e0 !important; }
+html.bf-grim .bf-bot-cooldown, html.bf-grim .bf-cooldown-bar-bg { border-color: var(--g-line) !important; }
+html.bf-grim .bf-cooldown-bar-fill { background: linear-gradient(90deg, rgba(var(--g-accent-rgb), .5), var(--g-accent)) !important; }
+html.bf-grim .bf-ruins-lvl { background: var(--g-field) !important; border-color: var(--g-line2) !important; color: var(--g-dim) !important; }
+html.bf-grim .bf-ruins-lvl.selected { background: rgba(var(--g-accent-rgb), .22) !important; border-color: var(--g-accent) !important; color: var(--g-title) !important; }
+html.bf-grim .bf-help-hint { border-color: var(--g-line) !important; color: var(--g-dim) !important; }
+html.bf-grim #bf-look-pop { background: var(--g-parch) !important; border-color: var(--g-line) !important; color: var(--g-dim) !important; }
+html.bf-grim #bf-look-pop .lk-t { color: var(--g-accent) !important; }
+html.bf-grim #bf-look-pop .lk-b { background: var(--g-field) !important; border-color: var(--g-line) !important; color: var(--g-text) !important; }
+html.bf-grim #bf-look-pop .lk-b.on { border-color: var(--g-accent) !important; color: var(--g-accent) !important; }
+html.bf-grim .bf-unit-img { border-color: var(--g-metal) !important; }
+
+/* ── Launcher button + battle log panel ───────────────────────── */
+html.bf-grim #bf-bot-btn {
+  background: linear-gradient(180deg, var(--g-wood1), var(--g-wood2)) !important;
+  border: 2px solid var(--g-metal) !important; color: var(--g-title) !important;
+  box-shadow: 0 4px 20px rgba(0,0,0,.7), 0 0 12px rgba(var(--g-accent-rgb), .25) !important;
+}
+html.bf-grim #bf-battlelog-panel { background: var(--g-parch) !important; border-color: var(--g-line) !important; color: var(--g-text) !important; }
+html.bf-grim #bf-bl-header { background: linear-gradient(180deg, var(--g-wood1), var(--g-wood2)) !important; color: var(--g-title) !important; border-color: var(--g-line) !important; }
+html.bf-grim .bf-bl-tab { color: var(--g-dim) !important; }
+html.bf-grim .bf-bl-tab.active { color: var(--g-title) !important; border-color: var(--g-accent) !important; }
+html.bf-grim .bf-bot-checkbox > .bf-help-hint, html.bf-grim .bf-bot-group-title .bf-help-hint { flex: 0 0 auto !important; }
+html.bf-grim #bf-bot-header > span:first-of-type { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 70%; }
+html.bf-grim #bf-bot-header.bf-has-crest > span:first-of-type { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; font-size: 1rem; }
+html.bf-grim #bf-bot-header.bf-has-crest .bf-crest-state { margin-left: 0; }
