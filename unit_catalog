@@ -1,0 +1,178 @@
+// ============================================================
+// BiteFight Pro Bot — Unit Catalog (v1.6.26)
+// Copyright (C) 2026 Aescunor — GNU General Public License v3.0
+// ------------------------------------------------------------
+// Shared by the bot (content script), the simulator panel and the
+// optimizer-free UI parts. Holds the IDENTITY of every unit — tier code,
+// race-specific names and artwork — while combat stats stay in
+// sim_engine.js (ALLY_TIERS / ENEMY_TIERS). The classic tier codes
+// (T1…T8, E1…E10, E9S) remain the primary keys everywhere.
+//
+// Names:   1) names harvested live from the game (server language), per race
+//          2) built-in English fallback (ruins-helper.site naming)
+// Images:  loaded from the game server itself (/img/blood/units/…), so the
+//          extension never redistributes game artwork. Without a game origin
+//          (offline mobile simulator) images are simply omitted.
+// Races:   1 = vampire, 2 = werewolf (game asset suffix: Tier3_Frame-A_2.jpg)
+// ============================================================
+(function (root) {
+  'use strict';
+
+  const RACES = { 1: 'vampire', 2: 'werewolf' };
+  const RACE_LABEL = { 1: 'Vampire', 2: 'Werewolf' };
+
+  const ALLY = [
+    { id: 'T1', tier: 1, en: { 1: 'Bats',          2: 'Rats' } },
+    { id: 'T2', tier: 2, en: { 1: 'Ghouls',        2: 'Flesh Golems' } },
+    { id: 'T3', tier: 3, en: { 1: 'Vampire Thralls', 2: 'Wolf Thralls' } },
+    { id: 'T4', tier: 4, en: { 1: 'Banshees',      2: 'Wendigos' } },
+    { id: 'T5', tier: 5, en: { 1: 'Necromancers',  2: 'Voodoo Priests' } },
+    { id: 'T6', tier: 6, en: { 1: 'Gargoyles',     2: 'Chimeras' } },
+    { id: 'T7', tier: 7, en: { 1: 'Blood Witches', 2: 'Moon Witches' } },
+    { id: 'T8', tier: 8, en: { 1: 'Rotmaws',       2: 'Hellmaws' } },
+  ];
+  const ENEMY = [
+    { id: 'E1',  tier: 1,  en: 'Skeleton' },
+    { id: 'E2',  tier: 2,  en: 'Zombie' },
+    { id: 'E3',  tier: 3,  en: 'Undead Cultist' },
+    { id: 'E4',  tier: 4,  en: 'Bonewing' },
+    { id: 'E5',  tier: 5,  en: 'Bloated Corpse' },
+    { id: 'E6',  tier: 6,  en: 'Wraith' },
+    { id: 'E7',  tier: 7,  en: 'Revenant' },
+    { id: 'E8',  tier: 8,  en: 'Bone Giant' },
+    { id: 'E9',  tier: 9,  en: 'Broodmother' },
+    { id: 'E10', tier: 10, en: 'Lich' },
+    { id: 'E9S', tier: 9,  en: 'Spiderling', summon: true },
+  ];
+  const BY_ID = {};
+  ALLY.forEach(u => { BY_ID[u.id] = Object.assign({ side: 'ally' }, u); });
+  ENEMY.forEach(u => { BY_ID[u.id] = Object.assign({ side: 'enemy' }, u); });
+
+  function normRace(r) {
+    if (r === 'vampire') return 1;
+    if (r === 'werewolf') return 2;
+    const n = parseInt(r);
+    return (n === 1 || n === 2) ? n : null;
+  }
+
+  // Game asset paths (relative to the game origin)
+  function imgPath(id, race, opts) {
+    const u = BY_ID[id];
+    if (!u) return null;
+    if (u.side === 'ally') {
+      const r = normRace(race) || 1;
+      return (opts && opts.greyed)
+        ? `/img/blood/units/frameA/greyed-out/Tier${u.tier}_Frame-A_${r}_greyed-out.jpg`
+        : `/img/blood/units/frameA/Tier${u.tier}_Frame-A_${r}.jpg`;
+    }
+    if (u.summon) return '/img/blood/units/enemy/80x80/enemyUnit_9.1.png';
+    return `/img/blood/units/enemy/80x80/enemyUnit_${u.tier}.jpg`;
+  }
+  function imgUrl(id, race, origin, opts) {
+    if (!origin) return null;
+    const p = imgPath(id, race, opts);
+    return p ? String(origin).replace(/\/+$/, '') + p : null;
+  }
+
+  // names = { ally: { '1': {T1:'…'}, '2': {…} }, enemy: { E1:'…' } }
+  function name(id, race, names) {
+    const u = BY_ID[id];
+    if (!u) return id;
+    const r = normRace(race) || 1;
+    if (u.side === 'ally') {
+      const live = names && names.ally && names.ally[r] && names.ally[r][id];
+      return live || u.en[r] || id;
+    }
+    const live = names && names.enemy && names.enemy[id];
+    return live || u.en;
+  }
+
+  // ── Harvest names + own race from a game document (structural only) ──
+  // Returns { race: 1|2|null, ally: {race: {T1:…}}, enemy: {E1:…} }
+  function tierFromSrc(src) {
+    src = String(src || '');
+    let m = src.match(/Tier(\d)_Frame-A_(\d)/i);
+    if (m) return { id: 'T' + m[1], race: parseInt(m[2]) };
+    m = src.match(/enemyUnit_9\.1\./);
+    if (m) return { id: 'E9S' };
+    m = src.match(/enemyUnit_(\d+)\./);
+    if (m) return { id: 'E' + m[1] };
+    return null;
+  }
+  function bgSrc(el) {
+    const st = (el && el.getAttribute && el.getAttribute('style')) || '';
+    const m = st.match(/url\(['"]?([^'")]+)/);
+    return m ? m[1] : '';
+  }
+  function harvest(doc) {
+    doc = doc || document;
+    const out = { race: null, ally: {}, enemy: {} };
+    const put = (t, nm) => {
+      nm = String(nm || '').replace(/\s+/g, ' ').trim();
+      if (!t || !nm || nm.length > 60) return;
+      if (t.id.charAt(0) === 'T') {
+        if (!t.race) return;
+        (out.ally[t.race] = out.ally[t.race] || {})[t.id] = nm;
+        out.race = out.race || t.race;
+      } else out.enemy[t.id] = nm;
+    };
+    try {
+      // Own race: any own-army artwork on the page (Nourishing Pits, Ruins, Crucible)
+      const raceAttr = doc.querySelector('.crimsonContainer[data-race]');
+      if (raceAttr) out.race = normRace(raceAttr.getAttribute('data-race'));
+      if (!out.race) {
+        const img = doc.querySelector('img[src*="/units/frameA/"]');
+        const t = img && tierFromSrc(img.getAttribute('src'));
+        if (t && t.race) out.race = t.race;
+      }
+      // Nourishing Pits: data-unit-values JSON (own race, all 8 tiers)
+      const uv = doc.getElementById('units-total-army');
+      if (uv && uv.getAttribute('data-unit-values') && out.race) {
+        try {
+          JSON.parse(uv.getAttribute('data-unit-values')).forEach(u => {
+            if (u && u.id && u.name) put({ id: 'T' + u.id, race: out.race }, u.name);
+          });
+        } catch (_) {}
+      }
+      // Ruins battle report (detail): summary tables + round log entities
+      doc.querySelectorAll('.brTable tbody tr').forEach(tr => {
+        const img = tr.querySelector('.unitIcon img, img');
+        const nm = tr.querySelector('.unitName');
+        if (img && nm) put(tierFromSrc(img.getAttribute('src')), nm.textContent);
+      });
+      doc.querySelectorAll('.brEntity').forEach(en => {
+        const img = en.querySelector('img');
+        const nm = en.querySelector('.brEntityName');
+        if (img && nm) put(tierFromSrc(img.getAttribute('src')), nm.textContent);
+      });
+      // Battle report list chips (title = name)
+      doc.querySelectorAll('.unit-chip[title]').forEach(ch => {
+        const img = ch.querySelector('img');
+        if (img) put(tierFromSrc(img.getAttribute('src')), ch.getAttribute('title'));
+      });
+      // Ruins fight result: fallen units (background artwork)
+      doc.querySelectorAll('.fallenUnit').forEach(fu => {
+        const nm = fu.querySelector('.fallenUnitName');
+        if (nm) put(tierFromSrc(bgSrc(fu)), nm.textContent);
+      });
+    } catch (_) {}
+    return out;
+  }
+  function mergeNames(base, found) {
+    base = base || { ally: {}, enemy: {} };
+    base.ally = base.ally || {}; base.enemy = base.enemy || {};
+    let changed = false;
+    Object.keys(found.ally || {}).forEach(r => {
+      base.ally[r] = base.ally[r] || {};
+      Object.entries(found.ally[r]).forEach(([k, v]) => { if (base.ally[r][k] !== v) { base.ally[r][k] = v; changed = true; } });
+    });
+    Object.entries(found.enemy || {}).forEach(([k, v]) => { if (base.enemy[k] !== v) { base.enemy[k] = v; changed = true; } });
+    return { names: base, changed };
+  }
+
+  root.BFUnits = {
+    VERSION: '1.0.0',
+    RACES, RACE_LABEL, ALLY, ENEMY, BY_ID,
+    normRace, imgPath, imgUrl, name, harvest, mergeNames, tierFromSrc,
+  };
+})(typeof globalThis !== 'undefined' ? globalThis : this);
