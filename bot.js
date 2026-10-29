@@ -962,6 +962,9 @@
     lookRace: 'auto',           // 'auto' (detected) | '1' vampire | '2' werewolf
     lookCrest: true,            // skull crest in the panel header
     lookLowFx: false,           // disable glow animations
+    lookShowBR: true,           // v1.6.31 — show the 🔬 Battle Report Verify group (Ruins tab)
+    lookShowPvP: true,          // v1.6.31 — show the ⚔ Player vs Player groups (PvP tab)
+    lookHenchFirst: false,      // v1.6.31 — Henchman vs Henchman on top of the PvP tab
     brVerifyEnabled: true,      // v1.6.21 — fetch game battle reports & diff against BFEngine (data collection)
     // Ruins — UNLOCKED tiers (which ally tiers the optimizer is allowed to use)
     // T1..T8; defaults to T1..T6 (player must unlock T7/T8 explicitly)
@@ -1108,6 +1111,11 @@
     fixedInfobar: false,
     hideEventPanel: false,
     backgroundRefresh: false,
+    // v1.6.28 — human-like behaviour
+    humanNav: true,       // reach pages by clicking real links, one hop at a time (natural page order + Referer)
+    humanTiming: true,    // reaction-time shaped delays + rare distraction pauses
+    humanDetours: true,   // occasionally open a harmless page (profile, messages, city, clan)
+    humanBreaks: false,   // pause 5–20 min after 40–90 min of activity
     backgroundRefreshInterval: 60, // minutes
     backgroundRefreshRandomize: 5, // v1.6.10 — ± randomizer minutes
     // ── Inventory Discard / Cleanup (v1.6.13) ───────────────────
@@ -1438,10 +1446,33 @@
 
   // Earliest timestamp a layer may be attacked again (interval band AND daily limit).
   function ruinsLayerReadyAt(lvl, settings, state) {
-    const last = (state.ruinsAttackTimes && state.ruinsAttackTimes[lvl]) || 0;
-    const byInterval = last + getRuinsIntervalForLevel(lvl, settings) * 60 * 1000;
-    const blocked = (state.ruinsLayerBlockedUntil && state.ruinsLayerBlockedUntil[lvl]) || 0;
+    const now = Date.now();
+    let last = (state.ruinsAttackTimes && state.ruinsAttackTimes[lvl]) || 0;
+    // v1.6.31 — sanity: a timestamp "in the future" (clock change, bad data) counts as now
+    if (last > now) { last = now; if (state.ruinsAttackTimes) state.ruinsAttackTimes[lvl] = now; }
+    const byInterval = last ? last + getRuinsIntervalForLevel(lvl, settings) * 60 * 1000 : 0;
+    let blocked = (state.ruinsLayerBlockedUntil && state.ruinsLayerBlockedUntil[lvl]) || 0;
+    // the game's daily limit resets at midnight → never more than ~24 h ahead
+    if (blocked > now + 25 * 3600 * 1000) { blocked = now + 25 * 3600 * 1000; state.ruinsLayerBlockedUntil[lvl] = blocked; }
     return Math.max(byInterval, blocked);
+  }
+
+  // v1.6.31 — "Next attack" line in the Ruins tab
+  function fmtClock(ts) { const d = new Date(ts); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
+  function fmtDur(ms) {
+    const m = Math.max(0, Math.round(ms / 60000)), h = Math.floor(m / 60);
+    return h ? `${h}h ${m % 60}m` : `${m}m`;
+  }
+  function renderRuinsNext(settings, state) {
+    const el = document.getElementById('bf-ruins-next'); if (!el) return;
+    const levels = settings.ruinsLevels || [];
+    if (!settings.ruinsEnabled || !levels.length || state.ruinsState === 'done') { el.textContent = ''; return; }
+    const now = Date.now();
+    let best = null;
+    for (const lvl of levels) { const t = ruinsLayerReadyAt(lvl, settings, state); if (!best || t < best.t) best = { lvl, t }; }
+    if (!best) { el.textContent = ''; return; }
+    if (best.t <= now) el.innerHTML = `Next: <b style="color:#2ecc71">layer ${levels[state.ruinsCurrentIdx || 0] ?? best.lvl} — now</b>`;
+    else el.innerHTML = `Next: <b style="color:#e0a030">layer ${best.lvl} at ${fmtClock(best.t)}</b> (in ${fmtDur(best.t - now)})`;
   }
 
   // v1.6.22 — exact show-page match (PAGE.includes('/ancestral/show/1') also matched /show/16!)
@@ -1491,12 +1522,11 @@
     return lo + '-' + hi;
   }
 
+  // v1.6.31 — one timer for all layers (the per-band table was removed from
+  // the UI; old band values stay stored but are no longer used).
   function getRuinsIntervalForLevel(level, settings) {
-    const fallback = (settings && settings.ruinsIntervalMin) || 60;
-    const bands = settings && settings.ruinsIntervalBands;
-    if (!bands) return fallback;
-    const v = parseInt(bands[getLevelBandKey(level)]);
-    return (v && v > 0) ? v : fallback;
+    const v = parseInt(settings && settings.ruinsIntervalMin);
+    return (v && v > 0 && v <= 1440) ? v : 60;
   }
 
   // List of all band keys in display order (used by the UI builder).
@@ -1714,7 +1744,7 @@
     state.crucibleSkip = [];
     saveState(state);
     botLog('info', `🩸 Crucible: ${reason === 'full' ? 'all slots full' : 'not enough AP for next hunt'} → going to Obetná komnata`);
-    botSetTimeout(() => { window.location.href = BASE + '/crucible/index'; }, randomDelay(1000, 2500));
+    botSetTimeout(() => { humanNav('/crucible/index', { noDetour: true }); }, randomDelay(1000, 2500));
   }
 
   function handleHuntResultPage(state, settings, ap) {
@@ -1804,7 +1834,7 @@
         }
       }
       botLog('info', `Navigating to hunt: ${HUNT_TYPES.find(h => h.id === huntType)?.name}`);
-      botSetTimeout(() => { window.location.href = BASE + '/robbery/humanhunt/' + huntType; }, randomDelay(600, 1500));
+      botSetTimeout(() => { humanNav('/robbery/humanhunt/' + huntType, { noDetour: true }); }, randomDelay(600, 1500));
       return;
     }
 
@@ -1847,7 +1877,7 @@
       : `🩸 Crucible: Extracting rank ${slot.rank || '?'} (slot ${slot.index})`);
     sSet({ [SK('state')]: state }, () => {
       clickWithConfirm(btn);
-      botSetTimeout(() => { window.location.href = BASE + '/crucible/index'; }, randomDelay(3500, 5000));
+      botSetTimeout(() => { humanNav('/crucible/index', { noDetour: true }); }, randomDelay(3500, 5000));
     });
   }
 
@@ -1856,7 +1886,7 @@
 
     if (!PAGE.includes('/crucible/')) {
       botLog('info', 'Crucible: navigating to Obetná komnata');
-      botSetTimeout(() => { window.location.href = BASE + '/crucible/index'; }, randomDelay(800, 1800));
+      botSetTimeout(() => { humanNav('/crucible/index', { noDetour: true }); }, randomDelay(800, 1800));
       return;
     }
     const c = parseCrucible();
@@ -1864,7 +1894,7 @@
       botLog('warn', 'Crucible: slot list not found on page (layout changed?) — resuming hunt');
       state.huntState = 'navigating';
       saveState(state);
-      botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1500, 3000));
+      botSetTimeout(() => { humanNav('/robbery/index'); }, randomDelay(1500, 3000));
       return;
     }
 
@@ -1941,7 +1971,7 @@
         botLog('info', `Crucible: ${c.empty} slot(s) free → continuing hunt`);
         state.huntState = 'navigating';
         saveState(state);
-        botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1200, 2500));
+        botSetTimeout(() => { humanNav('/robbery/index'); }, randomDelay(1200, 2500));
         return;
       }
       // Hunt page keeps saying "full" but Crucible shows empty slots → don't loop
@@ -2266,6 +2296,26 @@
     const huntWaiting = state.huntState === 'waiting_orb';
     const huntDoneOrWaiting = state.huntState === 'done' || state.huntState === 'waiting_orb';
 
+    // ── v1.6.31 — URGENT DONATION FIRST ──────────────────────
+    // Gold at/above the donation threshold is handled BEFORE hunt/ruins/story
+    // (before: ruins/story could schedule their own navigation in the same
+    // tick, the gold trip lost the race and was never retried). Not in the
+    // middle of something that must finish on this page.
+    let goldUrgent = false;
+    if (settings.goldMode === 2) {
+      const _gold = readGold();
+      const _min = settings.goldDonateMin || 10000;
+      const _keep = settings.goldKeep ? (settings.goldKeepAmount || 0) : 0;
+      if (_gold !== null && _gold >= _min && _gold - _keep > 0) goldUrgent = true;
+    }
+    const goldMustWait = state.ruinsState === 'fighting' || isRuinsFightResultPage()
+      || state.huntState === 'crucible' || state.huntState === 'storing' || state.huntState === 'on_result'
+      || isHuntResultPage() || isCruciblePage() || /^\/city\/adventure\/./.test(PAGE);
+    if (goldUrgent && !goldMustWait) {
+      const goldHandled = globalGoldTick(state, settings);
+      if (goldHandled) return;
+    }
+
     // ── HUNT BOT (priority) ───────────────────────────────────
     if (huntEnabled) {
 
@@ -2276,7 +2326,7 @@
           state.huntState = 'navigating';
           state.extractionsThisSession = 0;
           saveState(state);
-          botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 3000));
+          botSetTimeout(() => { humanNav('/robbery/index'); }, randomDelay(1000, 3000));
           return;
         }
         const remaining = Math.ceil(((state.orbWaitUntil || 0) - Date.now()) / 60000);
@@ -2325,7 +2375,7 @@
           state.huntState = 'navigating';
           state.lastKnownABPct = abPct; // save for use on result page
           saveState(state);
-          botSetTimeout(() => { window.location.href = BASE + '/robbery/humanhunt/' + huntType; }, randomDelay(600, 1500));
+          botSetTimeout(() => { humanNav('/robbery/humanhunt/' + huntType, { noDetour: true }); }, randomDelay(600, 1500));
           return;
         } else {
           botLog('warn', `AP: ${ap.current}/${neededAP}, nedostatok pre lov.`);
@@ -2345,7 +2395,7 @@
           botLog('info', 'Navigating to hunt page...');
           state.huntState = 'navigating';
           saveState(state);
-          botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(600, 1500));
+          botSetTimeout(() => { humanNav('/robbery/index'); }, randomDelay(600, 1500));
           return;
         }
       }
@@ -2381,17 +2431,8 @@
       (ruinsEnabled && state.ruinsState === 'navigating') ||
       (settings.storyEnabled && state.storyState === 'navigating');
 
-    let goldUrgent = false;
-    if (settings.goldMode === 2) {
-      const _gold = readGold();
-      const _min = settings.goldDonateMin || 10000;
-      if (_gold !== null && _gold >= _min) goldUrgent = true;
-    }
-
-    if (settings.goldMode > 0 && (goldUrgent || !anyBotActivelyNavigating)) {
-      if (goldUrgent && anyBotActivelyNavigating) {
-        botLog('info', '💰 Gold: Threshold reached — preempting other modules');
-      }
+    // (urgent donation already ran at the top of the tick)
+    if (settings.goldMode > 0 && !goldUrgent && !anyBotActivelyNavigating) {
       const goldHandled = globalGoldTick(state, settings);
       if (goldHandled) return; // Gold tick took action (navigation or click), wait for reload
     }
@@ -2467,6 +2508,124 @@
   }
 
   // ── RUINS TICK ───────────────────────────────────────────────
+  // v1.6.29 — every ruins "run" on a show page gets a token. Central STOP
+  // (cancelAllBotTimers) and every new run bump it, so a slider sequence or an
+  // optimizer result from before the STOP can never act after the release
+  // (that used to stack a second army on top of the first one).
+  let _ruinsRun = 0;
+  function ruinsRunAlive(run) { return !_centralStopActive && run === _ruinsRun; }
+
+  // Store a fight result + advance the layer index (shared by the result page
+  // and the interrupted-fight recovery). Returns true if Ruins is done.
+  function ruinsCommitResult(state, settings, levels, entry) {
+    sGet([SK('ruinsBattleLog')], r => {
+      const log = r[SK('ruinsBattleLog')] || [];
+      if (entry.reportId && log.some(x => x.reportId === entry.reportId)) return;   // never twice
+      log.push(entry);
+      while (log.length > 500) log.shift();
+      sSet({ [SK('ruinsBattleLog')]: log });
+    });
+    if (entry.reportId) {
+      const n = parseInt(entry.reportId);
+      if (n && n > (state.ruinsLastReportId || 0)) state.ruinsLastReportId = n;
+    }
+    const lossStr = Object.entries(entry.losses || {}).filter(([,v]) => v > 0).map(([k,v]) => `${k}:-${v}`).join(', ');
+    botLog(entry.won ? 'ok' : 'warn',
+      `Result L${entry.level}: ${entry.won ? '✅ Victory' : '❌ Defeat'} | Losses: ${lossStr || 'none'}${entry.gold ? ' | 💰+' + entry.gold.toLocaleString() : ''}${entry.xp ? ' | ⭐+' + entry.xp.toLocaleString() : ''}${entry.blood ? ' | 🩸+' + entry.blood.toLocaleString() : ''}${entry.recovered ? ' (from battle report)' : ''}`
+    );
+    state.ruinsLastBattle = null;
+    state.ruinsState = 'navigating';
+    state.ruinsCurrentIdx++;
+    if (state.ruinsCurrentIdx >= levels.length) {
+      if (settings.ruinsCadence === 'once') {
+        botLog('ok', 'Ruins: Single cycle complete');
+        state.ruinsState = 'done'; saveState(state); updateRuinsUI(settings, state); return true;
+      }
+      if (settings.ruinsCadence === 'cycles' && state.ruinsCurrentCycle >= settings.ruinsCycles) {
+        botLog('ok', `Ruins: ${settings.ruinsCycles} cycles complete`);
+        state.ruinsState = 'done'; saveState(state); updateRuinsUI(settings, state); return true;
+      }
+      state.ruinsCurrentCycle++;
+      state.ruinsCurrentIdx = 0;
+      botLog('info', `Ruins: Cycle ${state.ruinsCurrentCycle}/${settings.ruinsCadence === 'infinite' ? '∞' : settings.ruinsCycles}`);
+    }
+    return false;
+  }
+
+  // Fight not submitted after all → undo what doFight() pre-recorded.
+  function ruinsUndoFight(state, why) {
+    const b = state.ruinsLastBattle || {};
+    if (state.ruinsAttackTimes && b.level != null) {
+      if (b.prevAttackTime) state.ruinsAttackTimes[b.level] = b.prevAttackTime;
+      else delete state.ruinsAttackTimes[b.level];
+    }
+    botLog('warn', `Ruins: fight on layer ${b.level} was not sent (${why}) → repeating layer ${b.level}`);
+    state.ruinsLastBattle = null;
+    state.ruinsState = 'navigating';
+  }
+
+  // v1.6.29 — state is 'fighting' but we are not on the result page (Central
+  // STOP / reload / closed tab between the click and the result). Ask the game:
+  // the newest ruins battle report tells whether the fight really happened.
+  let _ruinsRecovering = false;
+  function ruinsRecoverInterruptedFight(state, settings, levels) {
+    if (_ruinsRecovering) return;
+    _ruinsRecovering = true;
+    const battle = state.ruinsLastBattle;
+    const done = () => { _ruinsRecovering = false; };
+    const retry = (why) => {
+      done();
+      botLog('warn', `Ruins: can't verify the interrupted fight (${why}) → retry in 1 min`);
+      botSetTimeout(() => loadState(st => loadSettings(se => { if (se.ruinsEnabled) ruinsTick(st, se); })), 60000);
+    };
+    const finish = () => {
+      done(); saveState(state); updateRuinsUI(settings, state);
+      botSetTimeout(() => ruinsTick(state, settings), randomDelay(800, 1800));
+    };
+    fetch(BASE + '/ancestral/battlereport', { credentials: 'include' })
+      .then(r => r.text())
+      .then(html => {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const ids = [...doc.querySelectorAll('a[href*="/ancestral/battlereport/"]')]
+          .map(a => parseInt((a.getAttribute('href').match(/battlereport\/(\d+)/) || [])[1])).filter(Boolean);
+        const newest = ids.length ? Math.max(...ids) : 0;
+        const known = battle.knownReportId || 0;
+        // we know reports exist but the list shows none → page not readable (login, layout) → don't guess
+        if (!ids.length && (known || state.ruinsLastReportId)) throw new Error('report list empty');
+        if (!newest || (known && newest <= known)) {
+          if (_centralStopActive) return done();
+          ruinsUndoFight(state, known ? 'no new battle report' : 'no battle report');
+          return finish();
+        }
+        return fetch(BASE + '/ancestral/battlereport/' + newest, { credentials: 'include' })
+          .then(r => r.text())
+          .then(h2 => {
+            if (_centralStopActive) return done();
+            const d2 = new DOMParser().parseFromString(h2, 'text/html');
+            const rep = parseBattleReportDoc(d2);
+            if (!rep) throw new Error('report not readable');
+            const sentMatch = Object.entries(battle.formation || {}).filter(([, v]) => v > 0)
+              .every(([t, v]) => rep.allies[t] && rep.allies[t][0] === v);
+            const ours = rep.layer === battle.level && (known ? true : sentMatch)
+              && !(state.ruinsLastReportId && newest <= state.ruinsLastReportId);
+            if (!ours) {
+              ruinsUndoFight(state, `newest report #${newest} is not this fight`);
+              return finish();
+            }
+            const losses = {};
+            Object.entries(rep.allies).forEach(([t, n]) => { if (n[2] > 0) losses[t] = n[2]; });
+            const entry = { ts: battle.timestamp, level: battle.level, enemy: battle.enemy, formation: battle.formation,
+              source: battle.source, won: !!rep.won, losses, gold: rep.gold || 0, xp: rep.xp || 0, blood: rep.blood || 0,
+              reportId: String(newest), recovered: true };
+            botLog('info', `Ruins: the interrupted fight on layer ${battle.level} DID happen (report #${newest}) → continuing with the next layer`);
+            if (settings.brVerifyEnabled !== false) brEnqueue(String(newest), { source: battle.source, level: battle.level, formation: battle.formation });
+            if (ruinsCommitResult(state, settings, levels, entry)) { done(); return; }
+            finish();
+          });
+      })
+      .catch(e => retry(e && e.message ? e.message : 'network'));
+  }
+
   function ruinsTick(state, settings) {
     if (_centralStopActive) return;
     // If hunt bot is active and NOT on cooldown, defer to hunt (priority)
@@ -2575,42 +2734,11 @@
         const brLink = document.querySelector('a.combatBtnBattleReport[href*="/ancestral/battlereport/"], a[href*="/ancestral/battlereport/"]');
         const brId = brLink ? (brLink.getAttribute('href').match(/battlereport\/(\d+)/) || [])[1] : null;
         if (brId) {
-          entry.reportId = brId;
+          entry.reportId = brId;   // ruinsCommitResult also remembers it as ruinsLastReportId
           if (settings.brVerifyEnabled !== false) brEnqueue(brId, { source: battle.source, level: resultLevel, formation: battle.formation });
         }
 
-        // Save to battle history
-        sGet([SK('ruinsBattleLog')], r => {
-          const log = r[SK('ruinsBattleLog')] || [];
-          log.push(entry);
-          while (log.length > 500) log.shift();
-          sSet({ [SK('ruinsBattleLog')]: log });
-        });
-
-        const lossStr = Object.entries(losses).filter(([,v]) => v > 0).map(([k,v]) => `${k}:-${v}`).join(', ');
-        botLog(won ? 'ok' : 'warn',
-          `Result L${resultLevel}: ${won ? '✅ Victory' : '❌ Defeat'} | Losses: ${lossStr || 'none'}${goldReward ? ' | 💰+' + goldReward.toLocaleString() : ''}${xpReward ? ' | ⭐+' + xpReward.toLocaleString() : ''}${bloodReward ? ' | 🩸+' + bloodReward.toLocaleString() : ''}`
-        );
-
-        // Clear pre-battle snapshot
-        state.ruinsLastBattle = null;
-        state.ruinsState = 'navigating';
-        state.ruinsCurrentIdx++;
-
-        // Check cycle completion after incrementing
-        if (state.ruinsCurrentIdx >= levels.length) {
-          if (settings.ruinsCadence === 'once') {
-            botLog('ok', 'Ruins: Single cycle complete');
-            state.ruinsState = 'done'; saveState(state); updateRuinsUI(settings, state); return;
-          }
-          if (settings.ruinsCadence === 'cycles' && state.ruinsCurrentCycle >= settings.ruinsCycles) {
-            botLog('ok', `Ruins: ${settings.ruinsCycles} cycles complete`);
-            state.ruinsState = 'done'; saveState(state); updateRuinsUI(settings, state); return;
-          }
-          state.ruinsCurrentCycle++;
-          state.ruinsCurrentIdx = 0;
-          botLog('info', `Ruins: Cycle ${state.ruinsCurrentCycle}/${settings.ruinsCadence === 'infinite' ? '∞' : settings.ruinsCycles}`);
-        }
+        if (ruinsCommitResult(state, settings, levels, entry)) return;
 
         // Click "Pokračovať" to go back to ruins index
         if (contLink) {
@@ -2622,7 +2750,7 @@
         // No continue link — navigate manually
         saveState(state);
         botLog('info', `Ruins: Navigating to layer ${levels[state.ruinsCurrentIdx]}`);
-        botSetTimeout(() => { window.location.href = BASE + '/ancestral/show/' + levels[state.ruinsCurrentIdx]; }, randomDelay(800, 2000));
+        botSetTimeout(() => { humanNav('/ancestral/show/' + levels[state.ruinsCurrentIdx], { noDetour: true }); }, randomDelay(800, 2000));
         return;
       }
       // Still on fighting state but not on result page — might be loading
@@ -2631,8 +2759,21 @@
         botLog('warn', 'Ruins: ruinsLastBattle lost (race condition), restarting navigation');
         state.ruinsState = 'navigating';
         saveState(state);
+        botSetTimeout(() => ruinsTick(state, settings), randomDelay(800, 1500));
+        return;
       }
-      // If we're on a page that's not the fight result yet, just wait for it to load
+      // v1.6.29 — the result page never came (Central STOP / reload between
+      // the fight click and the result). Before: the bot waited here forever,
+      // or (after the layer's cooldown) skipped the layer → wrong order and
+      // the run ended early. Now: ask the battle reports what really happened.
+      const age = Date.now() - (state.ruinsLastBattle.timestamp || 0);
+      if (age < 15000) {
+        botSetTimeout(() => loadState(st => loadSettings(se => {
+          if (se.ruinsEnabled && st.ruinsState === 'fighting' && !isRuinsFightResultPage()) ruinsTick(st, se);
+        })), 15000 - age + 500);
+        return;
+      }
+      ruinsRecoverInterruptedFight(state, settings, levels);
       return;
     }
 
@@ -2672,10 +2813,10 @@
         const remaining = ruinsLayerReadyAt(lvl, settings, state) - now;
         if (remaining > 0 && remaining < minWait) minWait = remaining;
       }
-      const waitMs = Math.max(minWait, 30000); // at least 30s
-      const waitMin = Math.round(waitMs / 60000);
-      botLog('info', `Ruins: All layers on cooldown. Waiting ${waitMin} min.`);
+      const waitMs = Math.min(Math.max(minWait, 30000), 25 * 3600 * 1000); // 30 s .. 25 h
+      botLog('info', `Ruins: All layers on cooldown. Next attack at ${fmtClock(now + waitMs)} (in ${fmtDur(waitMs)}).`);
       saveState(state);
+      try { updateRuinsUI(settings, state); } catch (_) {}
       botSetTimeout(() => {
         loadState(st => {
           loadSettings(se => {
@@ -2738,13 +2879,17 @@
       }
 
       const navLevel = levels[state.ruinsCurrentIdx];
-      const prevNav = state.ruinsNavTarget;
-      state.ruinsNavTarget = { level: navLevel, ts: Date.now(),
-        tries: (prevNav && prevNav.level === navLevel && (Date.now() - prevNav.ts) < 120000) ? (prevNav.tries || 0) + 1 : 0 };
+      const navPlan = planNav('/ancestral/show/' + navLevel);
+      if (navPlan.final) {
+        // only the final hop counts for the redirect/limit guard (v1.6.22)
+        const prevNav = state.ruinsNavTarget;
+        state.ruinsNavTarget = { level: navLevel, ts: Date.now(),
+          tries: (prevNav && prevNav.level === navLevel && (Date.now() - prevNav.ts) < 120000) ? (prevNav.tries || 0) + 1 : 0 };
+      }
       botLog('info', `Ruins: Navigating to layer ${navLevel}`);
       state.ruinsState = 'navigating';
       saveState(state);
-      botSetTimeout(() => { window.location.href = BASE + '/ancestral/show/' + navLevel; }, randomDelay(800, 2000));
+      botSetTimeout(() => { execNav(navPlan); }, randomDelay(800, 2000));
       return;
     }
 
@@ -2799,68 +2944,106 @@
         }
       }
 
+      const run = ++_ruinsRun;
+
       // 3. Check presets first, then fall back to simulation
       const fp = Object.entries(enemyQtys).filter(([,v]) => v > 0).sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) => `${k}:${v}`).join(',');
 
       // ── Slider sequence + fight (shared by preset hit + optimizer paths) ──
       function proceedWithFormation(useQtys, source) {
+        if (!ruinsRunAlive(run)) { botLog('info', 'Ruins: formation from before STOP discarded'); return; }
         const fmtStr = Object.entries(useQtys).filter(([,v]) => v > 0).map(([k,v]) => `${k}:${v}`).join(', ');
         botLog('ok', `Formation [${source}]: ${fmtStr}`);
 
-        // 4. Set sliders via realistic button clicks (+10, +1)
-        function clickSliderTo(tierId, targetQty) {
-          const TIER_TO_DATA_ID = { 'T1':'1', 'T2':'2', 'T3':'3', 'T4':'4', 'T5':'5', 'T6':'6', 'T7':'7', 'T8':'8' };
-          const dataId = TIER_TO_DATA_ID[tierId];
-          if (!dataId || !targetQty || targetQty <= 0) return Promise.resolve();
-
-          const plus10 = document.querySelector(`.stepBtn.btnPlus10[data-id="${dataId}"]`);
-          const plus1 = document.querySelector(`.stepBtn.btnPlus1[data-id="${dataId}"]`);
-          if (!plus10 && !plus1) {
-            const slider = document.getElementById('playerArmy' + dataId);
-            if (slider) { slider.value = targetQty; slider.dispatchEvent(new Event('input', { bubbles: true })); }
-            return Promise.resolve();
-          }
-
-          let remaining = targetQty;
+        // 4. Set sliders via realistic button clicks (±10, ±1).
+        // v1.6.29 — relative to the slider's CURRENT value (it may already hold
+        // units from a sequence interrupted by Central STOP), tiers that are not
+        // in the formation are brought back to 0, decreases go first.
+        const sliderOf = id => document.getElementById('playerArmy' + id)
+          || document.querySelector(`input.combatSlider[data-id="${id}"]`);
+        const curOf = id => { const sl = sliderOf(id); return sl ? (parseInt(sl.value) || 0) : 0; };
+        const targets = {};
+        document.querySelectorAll('input.combatSlider').forEach(sl => {
+          const id = sl.getAttribute('data-id'); const tid = SLIDER_TO_TIER[id];
+          if (tid) targets[id] = Math.max(0, parseInt(useQtys[tid]) || 0);
+        });
+        Object.entries(useQtys).forEach(([tid, q]) => { const id = tid.replace(/^T/, ''); if (!(id in targets) && q > 0) targets[id] = q; });
+        function setSliderDirect(id, v) {
+          const sl = sliderOf(id); if (!sl) return;
+          sl.value = v;
+          sl.dispatchEvent(new Event('input', { bubbles: true }));
+          sl.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        function clickSliderTo(dataId, targetQty) {
+          const delta = targetQty - curOf(dataId);
+          if (!delta) return Promise.resolve();
+          const dir = delta > 0 ? 'Plus' : 'Minus';
+          const b10 = document.querySelector(`.stepBtn.btn${dir}10[data-id="${dataId}"]`);
+          const b1 = document.querySelector(`.stepBtn.btn${dir}1[data-id="${dataId}"]`);
+          if (!b10 && !b1) { setSliderDirect(dataId, targetQty); return Promise.resolve(); }
+          let remaining = Math.abs(delta);
           const clicks = [];
-          while (remaining >= 10 && plus10) { clicks.push(plus10); remaining -= 10; }
-          while (remaining >= 1 && plus1) { clicks.push(plus1); remaining -= 1; }
-
+          while (remaining >= 10 && b10) { clicks.push(b10); remaining -= 10; }
+          while (remaining >= 1 && b1) { clicks.push(b1); remaining -= 1; }
+          if (remaining > 0) clicks.push(null);   // only a ±10 button exists → finish directly
           return new Promise(resolve => {
             let i = 0;
             function nextClick() {
+              if (!ruinsRunAlive(run)) return;            // STOP → abandon, never resolve
               if (i >= clicks.length) { resolve(); return; }
-              clicks[i].click();
-              i++;
+              const b = clicks[i++];
+              if (b) b.click(); else setSliderDirect(dataId, targetQty);
               botSetTimeout(nextClick, 80 + Math.floor(Math.random() * 120));
             }
             nextClick();
           });
         }
 
-        const tierOrder = Object.entries(useQtys).filter(([,v]) => v > 0);
+        const order = Object.keys(targets).filter(id => targets[id] !== curOf(id))
+          .sort((a, b) => (targets[a] - curOf(a)) - (targets[b] - curOf(b)));   // decreases first
         let sliderIdx = 0;
         function setNextSlider() {
-          if (sliderIdx >= tierOrder.length) {
-            botSetTimeout(doFight, 400 + Math.floor(Math.random() * 400));
+          if (!ruinsRunAlive(run)) return;
+          if (sliderIdx >= order.length) {
+            botSetTimeout(verifyAndFight, 400 + Math.floor(Math.random() * 400));
             return;
           }
-          const [tid, qty] = tierOrder[sliderIdx];
-          sliderIdx++;
-          clickSliderTo(tid, qty).then(() => {
+          const id = order[sliderIdx++];
+          clickSliderTo(id, targets[id]).then(() => {
             botSetTimeout(setNextSlider, 200 + Math.floor(Math.random() * 500));
           });
         }
 
+        // v1.6.29 — never fight with an army other than the chosen one
+        function verifyAndFight() {
+          if (!ruinsRunAlive(run)) return;
+          const off = () => Object.keys(targets).filter(id => sliderOf(id) && curOf(id) !== targets[id]);
+          let bad = off();
+          if (bad.length) {
+            botLog('warn', `Ruins: army differs from the formation (${bad.map(id => `T${id}: ${curOf(id)}≠${targets[id]}`).join(', ')}) → correcting`);
+            bad.forEach(id => setSliderDirect(id, targets[id]));
+            bad = off();
+          }
+          if (bad.length) {
+            botLog('error', `Ruins: can't set the army (${bad.map(id => `T${id}: ${curOf(id)}≠${targets[id]}`).join(', ')}) → reloading the layer, no fight`);
+            botSetTimeout(() => { humanNav('/ancestral/show/' + level, { noDetour: true }); }, randomDelay(1500, 3000));
+            return;
+          }
+          doFight();
+        }
+
         function doFight() {
+          if (!ruinsRunAlive(run)) return;
           const fightBtn = document.getElementById('fightBtn');
           if (fightBtn && !fightBtn.classList.contains('entryLocked')) {
             botLog('info', `Ruins: Attacking layer ${level}`);
-            state.ruinsAttackTimes[level] = now;
+            const prevAttackTime = state.ruinsAttackTimes[level] || 0;
+            state.ruinsAttackTimes[level] = Date.now();
             state.ruinsState = 'fighting';
             state.ruinsLastBattle = {
               level: level, enemy: enemyQtys, formation: { ...useQtys },
-              source: source, timestamp: now, maxUnitsBeforeFight: { ...maxUnits },
+              source: source, timestamp: Date.now(), maxUnitsBeforeFight: { ...maxUnits },
+              prevAttackTime, knownReportId: state.ruinsLastReportId || 0,
             };
             saveState(state);
             botSetTimeout(() => { fightBtn.click(); }, randomDelay(300, 800));
@@ -2894,6 +3077,7 @@
       }
 
       sGet([SK('ruinsPresets')], r => {
+        if (!ruinsRunAlive(run)) return;
         const presets = r[SK('ruinsPresets')] || {};
         const levelPresets = presets[String(level)] || [];
         const match = levelPresets.find(p => p.enemy === fp);
@@ -2980,7 +3164,7 @@
                 // Schedule reload of same ruins page so slider maxes refresh
                 botSetTimeout(() => {
                   if (_centralStopActive) return;
-                  window.location.href = BASE + '/ancestral/show/' + level;
+                  humanNav('/ancestral/show/' + level, { noDetour: true });
                 }, waitMin * 60 * 1000);
                 return;
               } else {
@@ -3049,6 +3233,7 @@
         };
 
         function onOptimizerResult(useQtys, source) {
+          if (!ruinsRunAlive(run)) { botLog('info', 'Ruins: optimizer result from before STOP discarded'); return; }
           if (!useQtys) { handleNoWinner(); return; }
           const finalSource = warmStart ? (source + '+WARM') : source;
           proceedWithFormation(useQtys, finalSource);
@@ -3113,7 +3298,7 @@
         if (settings.storyChurch && !isChurchPage()) {
           if (!settings.storyChurchOverAP || (ap.current !== null && ap.current >= 1)) {
             botLog('info', 'Navigating to church for healing...');
-            botSetTimeout(() => { window.location.href = BASE + '/city/church'; }, randomDelay(1500, 3000));
+            botSetTimeout(() => { humanNav('/city/church'); }, randomDelay(1500, 3000));
             return;
           }
         }
@@ -3165,7 +3350,7 @@
         return;
       }
       // After healing, navigate to adventure
-      botSetTimeout(() => { window.location.href = BASE + '/city/adventure'; }, randomDelay(1000, 2000));
+      botSetTimeout(() => { humanNav('/city/adventure'); }, randomDelay(1000, 2000));
       return;
     }
 
@@ -3191,7 +3376,7 @@
       }
 
       botLog('info', 'Starting story quest...');
-      botSetTimeout(() => { window.location.href = BASE + '/city/adventure/startquest'; }, randomDelay(800, 2000));
+      botSetTimeout(() => { humanNav('/city/adventure/startquest', { noDetour: true }); }, randomDelay(800, 2000));
       return;
     }
 
@@ -3214,7 +3399,7 @@
 
       if (!decisions.length) {
         botLog('warn', 'No decisions on the page');
-        botSetTimeout(() => { window.location.href = BASE + '/city/adventure'; }, randomDelay(2000, 4000));
+        botSetTimeout(() => { humanNav('/city/adventure'); }, randomDelay(2000, 4000));
         return;
       }
 
@@ -3247,7 +3432,7 @@
 
       // Navigate to decision
       botSetTimeout(() => {
-        window.location.href = BASE + '/city/adventure/decision/' + chosen.id;
+        humanNav('/city/adventure/decision/' + chosen.id, { noDetour: true });
       }, randomDelay(800, 2200));
       return;
     }
@@ -3268,7 +3453,7 @@
     // ── ON STORY PAGE (general — might be result or continuation)
     if (isStoryPage()) {
       // Might be a result page or a continuation — just reload adventure
-      botSetTimeout(() => { window.location.href = BASE + '/city/adventure'; }, randomDelay(1000, 2500));
+      botSetTimeout(() => { humanNav('/city/adventure'); }, randomDelay(1000, 2500));
       return;
     }
 
@@ -3278,7 +3463,7 @@
         botLog('info', 'Navigating to story page...');
         state.storyState = 'navigating';
         saveState(state);
-        botSetTimeout(() => { window.location.href = BASE + '/city/adventure'; }, randomDelay(600, 1500));
+        botSetTimeout(() => { humanNav('/city/adventure'); }, randomDelay(600, 1500));
         return;
       }
     }
@@ -3289,7 +3474,7 @@
         botLog('ok', 'AP recovered → Continuing story');
         state.storyState = 'active';
         saveState(state);
-        botSetTimeout(() => { window.location.href = BASE + '/city/adventure'; }, randomDelay(1000, 2000));
+        botSetTimeout(() => { humanNav('/city/adventure'); }, randomDelay(1000, 2000));
         return;
       }
       const waitTime = randomDelay(30000, 60000);
@@ -3475,7 +3660,184 @@
   }
 
   // ── HELPERS ──────────────────────────────────────────────────
-  function randomDelay(min, max) { return Math.floor(Math.random() * (max - min) + min); }
+  // ══════════════════════════════════════════════════════════════
+  // v1.6.28 — HUMAN-LIKE BEHAVIOUR
+  //  1) humanNav(path): reach a page the way a player would — click a real
+  //     link on the current page (menu, sanctuary tabs, "späť", …) and walk
+  //     the site hierarchy one hop per page load, so every request has a
+  //     natural predecessor page (Referer) and a natural page order.
+  //  2) Human timing: randomDelay() is no longer uniform — reaction-time
+  //     shaped (log-normal, most delays short, a few long) plus rare
+  //     "distraction" pauses on navigation-sized delays.
+  //  3) Optional session breaks and occasional harmless detours.
+  // ══════════════════════════════════════════════════════════════
+  let _humanCfg = { nav: true, timing: true, breaks: false, detours: true };
+  function updateHumanCfg(se) {
+    if (!se) return;
+    _humanCfg = { nav: se.humanNav !== false, timing: se.humanTiming !== false, breaks: !!se.humanBreaks, detours: se.humanDetours !== false };
+  }
+
+  // Parent of a game page in the site hierarchy (what a player clicks before it)
+  function navParent(path) {
+    const p = path.split('?')[0].replace(/\/+$/, '');
+    if (/^\/ancestral\/show\/\d+$/.test(p)) return '/ancestral/index';
+    if (/^\/ancestral\/(index|battlereport)/.test(p)) return '/crucible/index';
+    if (/^\/nourishing\//.test(p)) return '/crucible/index';
+    if (/^\/robbery\/humanhunt\//.test(p)) return '/robbery/index';
+    if (/^\/city\/adventure\/.+/.test(p)) return '/city/adventure';
+    if (/^\/city\/(?!index$).+/.test(p) && p !== '/city/voodoo') return '/city/index';
+    if (/^\/clan\/.+/.test(p) && p !== '/clan/index') return '/clan/index';
+    return null;   // top level: reachable from the left menu on every page
+  }
+  function samePath(href, path) {
+    try {
+      const u = new URL(href, BASE);
+      if (u.origin !== BASE) return false;
+      const a = u.pathname.replace(/\/+$/, ''), b = path.split('?')[0].replace(/\/+$/, '');
+      if (a !== b && !(b === '/clan' && a === '/clan/index') && !(b === '/clan/index' && a === '/clan')) return false;
+      const q = path.split('?')[1];
+      return !q || u.search.replace(/^\?/, '') === q;
+    } catch (_) { return false; }
+  }
+  function findNavLink(path) {
+    const links = [...document.querySelectorAll('a[href]')].filter(a => {
+      const h = a.getAttribute('href') || '';
+      if (!h || h.startsWith('#') || /^javascript:/i.test(h)) return false;
+      if (a.closest('#bf-bot-panel, #bf-sim-container, #bf-battlelog-panel')) return false;   // never our own UI
+      if (a.getAttribute('target') === '_blank') return false;
+      return samePath(h, path);
+    });
+    // prefer visible links (menu / tabs) over hidden ones
+    const vis = links.find(a => a.offsetParent !== null || a.getClientRects().length);
+    return vis || links[0] || null;
+  }
+  function onPath(path) {
+    const b = path.split('?')[0].replace(/\/+$/, '');
+    return PAGE.replace(/\/+$/, '') === b || (b === '/clan' && PAGE === '/clan/index');
+  }
+  function clickLink(a, why) {
+    try { botLog('info', `🧭 ${why} → ${new URL(a.getAttribute('href'), BASE).pathname}`); } catch (_) {}
+    a.click();
+  }
+  const DETOUR_PAGES = ['/profile/index', '/msg/index', '/city/index', '/clan/index'];
+  // planNav(target) decides the next hop WITHOUT navigating:
+  //   { link: <a>|null, url: string|null, final: bool, why }
+  // execNav(plan) performs it. humanNav(target) = execNav(planNav(target)).
+  function planNav(target, opts) {
+    opts = opts || {};
+    if (!_humanCfg.nav || opts.direct) return { url: BASE + target, final: true, why: 'Direct', target };
+    // already on the target page → a refresh (what a player does: F5)
+    if (onPath(target) && samePath(window.location.href, target)) return { url: BASE + target, final: true, why: 'Reload', target };
+    // 0) occasional harmless detour (top-level page), max once per 12 min
+    if (_humanCfg.detours && !opts.noDetour) {
+      let last = 0; try { last = parseInt(sessionStorage.getItem('bf_detour_at') || '0'); } catch (_) {}
+      if (Date.now() - last > 12 * 60 * 1000 && Math.random() < 0.04) {
+        const opts2 = DETOUR_PAGES.filter(p => !onPath(p));
+        const pick = opts2[Math.floor(Math.random() * opts2.length)];
+        const dl = pick && findNavLink(pick);
+        if (dl) return { link: dl, final: false, why: 'Detour', detour: true, target };
+      }
+    }
+    // 1) a link straight to the target is on this page
+    if (!onPath(target)) { const a = findNavLink(target); if (a) return { link: a, final: true, why: 'Nav', target }; }
+    // 2) walk the hierarchy: chain root → … → target
+    const chain = [target];
+    for (let p = navParent(target); p; p = navParent(p)) chain.unshift(p);
+    let at = -1;
+    for (let i = chain.length - 2; i >= 0; i--) if (onPath(chain[i])) { at = i; break; }
+    for (let i = chain.length - 2; i > at; i--) {
+      const a = findNavLink(chain[i]);
+      if (a) return { link: a, final: false, why: 'Nav', target };
+    }
+    if (at >= 0) {
+      const next = chain[at + 1];
+      return { url: BASE + next, final: next === target, why: 'Step', target };
+    }
+    // no link to any step of the way on this page (unusual layout) → a single
+    // typed request straight to the target; extra blind hops would not look more natural
+    return { url: BASE + target, final: true, why: 'Direct', target };
+  }
+  // An intermediate hop leaves a note for the next page load, so the walk
+  // continues there (continuePendingNav) before any module logic runs.
+  const NAV_PENDING_KEY = 'bf_nav_pending';
+  function readPendingNav() {
+    try { const v = JSON.parse(sessionStorage.getItem(NAV_PENDING_KEY) || 'null'); return v && v.t ? v : null; } catch (_) { return null; }
+  }
+  function execNav(plan) {
+    if (plan.detour) { try { sessionStorage.setItem('bf_detour_at', String(Date.now())); } catch (_) {} }
+    try {
+      if (plan.final) sessionStorage.removeItem(NAV_PENDING_KEY);
+      else {
+        const prev = readPendingNav();
+        const n = (prev && prev.t === plan.target) ? (prev.n || 0) + 1 : 1;
+        sessionStorage.setItem(NAV_PENDING_KEY, JSON.stringify({ t: plan.target, ts: Date.now(), n }));
+      }
+    } catch (_) {}
+    if (plan.link) { clickLink(plan.link, plan.why); return plan.final ? 'final' : 'hop'; }
+    window.location.href = plan.url;
+    return plan.final ? 'final' : 'hop';
+  }
+  function humanNav(target, opts) { return execNav(planNav(target, opts)); }
+  // Called on page load before module routing. true = a hop was scheduled
+  // (module logic must wait for the target page).
+  function continuePendingNav() {
+    const p = readPendingNav();
+    if (!p) return false;
+    try { sessionStorage.removeItem(NAV_PENDING_KEY); } catch (_) {}
+    if (!_humanCfg.nav) return false;
+    if (onPath(p.t)) return false;                                  // arrived
+    if (Date.now() - p.ts > 90 * 1000 || (p.n || 0) >= 5) return false; // stale / looping → let modules decide
+    const plan = planNav(p.t, { noDetour: true });
+    if (plan.final === false && !plan.link && !plan.url) return false;
+    // keep the hop counter for the next page
+    try { sessionStorage.setItem(NAV_PENDING_KEY, JSON.stringify(p)); } catch (_) {}
+    botSetTimeout(() => { execNav(plan); }, randomDelay(700, 1800));
+    return true;
+  }
+
+  // ── Session breaks (optional): after 40–90 min of activity pause 5–20 min ──
+  // Returns ms to wait before the next tick, or 0 to tick now.
+  function sessionBreakWait() {
+    if (!_humanCfg.breaks) return 0;
+    const K = SK('humanSession');
+    let s = null; try { s = JSON.parse(localStorage.getItem(K) || 'null'); } catch (_) {}
+    const now = Date.now();
+    const fresh = () => ({ since: now, after: (40 + Math.random() * 50) * 60000, until: 0 });
+    // more than 30 min without the bot running → a new session
+    if (!s || (s.seen && now - s.seen > 30 * 60000 && !(s.until > now))) s = fresh();
+    s.seen = now;
+    let wait = 0;
+    if (s.until > now) wait = s.until - now;
+    else if (s.until && s.until <= now) s = Object.assign(fresh(), { seen: now });
+    else if (now - s.since > s.after) {
+      const len = (5 + Math.random() * 15) * 60000;
+      s.until = now + len; wait = len;
+      botLog('info', `☕ Session break: pausing ${Math.round(len / 60000)} min (active ${Math.round((now - s.since) / 60000)} min)`);
+    }
+    try { localStorage.setItem(K, JSON.stringify(s)); } catch (_) {}
+    return wait;
+  }
+
+  // Reaction-time shaped delay within [min, max): log-normal around ~35 % of the range.
+  function humanDelay(min, max) {
+    if (!(max > min)) return Math.floor(min);
+    let z = 0; for (let i = 0; i < 3; i++) z += Math.random(); z = (z - 1.5) * 1.15;   // ~N(0,1)-ish
+    let f = Math.exp(z * 0.55) * 0.35;                                                   // log-normal, median 0.35
+    if (f > 1) f = 0.85 + Math.random() * 0.15;
+    let d = min + f * (max - min);
+    // rare distraction on navigation-sized delays
+    if (max >= 800) {
+      const r = Math.random();
+      if (r < 0.005) d += 60000 + Math.random() * 180000;        // 0.5 %: 1–4 min
+      else if (r < 0.045) d += 4000 + Math.random() * 20000;     // 4 %: 4–24 s
+    }
+    return Math.floor(d);
+  }
+
+  function randomDelay(min, max) {
+    if (_humanCfg.timing) return humanDelay(min, max);
+    return Math.floor(Math.random() * (max - min) + min);
+  }
 
   const LOG_MAX = 50;
   let logEntries = [];
@@ -3664,6 +4026,7 @@
         try { sSet({ [SK('settings')]: merged }); } catch(e) {}
       }
 
+      updateHumanCfg(merged);
       cb(merged);
     });
   }
@@ -4068,9 +4431,34 @@
       state.goldNavigating = false;
       saveState(state);
     }
+    // v1.6.31 — the flag used to stay TRUE forever when the trip to the clan
+    // page was overridden by another module's navigation (or cut by STOP) →
+    // the bot never tried to donate again. It now expires after 90 s.
+    if (state.goldNavigating && Date.now() - (state.goldNavAt || 0) > 90000) {
+      state.goldNavigating = false;
+      saveState(state);
+    }
+    // back-off after a failed donation / missing form
+    if (state.goldBackoffUntil && Date.now() < state.goldBackoffUntil) return false;
 
     const gold = readGold();
     if (gold === null || gold <= 0) return false;
+
+    // v1.6.31 — did the last donation actually go through? (gold must have dropped)
+    if (state.goldDonatePending) {
+      const p = state.goldDonatePending;
+      state.goldDonatePending = null;
+      if (gold >= p.before - Math.max(1, Math.floor(p.amount * 0.5)) && Date.now() - p.ts < 10 * 60000) {
+        state.goldFailCount = (state.goldFailCount || 0) + 1;
+        const mins = Math.min(60, 5 * state.goldFailCount);
+        state.goldBackoffUntil = Date.now() + mins * 60000;
+        botLog('warn', `💰 Gold: donation of ${p.amount.toLocaleString()} did not go through (gold still ${gold.toLocaleString()}) → retry in ${mins} min`);
+        saveState(state);
+        return false;
+      }
+      if (gold < p.before) { state.goldFailCount = 0; botLog('ok', `💰 Gold: donated ✓ (now ${gold.toLocaleString()})`); }
+      saveState(state);
+    }
 
     // Don't spend too often — cooldown 30 seconds between spends
     if (Date.now() - (state.goldLastSpend || 0) < 30000) return false;
@@ -4112,9 +4500,9 @@
       // Not on profile — navigate there
       if (!state.goldNavigating) {
         botLog('info', '💰 Gold: Navigating to profile for training');
-        state.goldNavigating = true;
+        state.goldNavigating = true; state.goldNavAt = Date.now();
         saveState(state);
-        botSetTimeout(() => { window.location.href = BASE + '/profile/index'; }, randomDelay(1000, 2000));
+        botSetTimeout(() => { humanNav('/profile/index'); }, randomDelay(1000, 2000));
         return true;
       }
       return false;
@@ -4143,19 +4531,32 @@
           botLog('info', `💰 Gold: Donating ${amount.toLocaleString()} to clan (${reason})`);
           state.goldLastSpend = Date.now();
           state.goldNavigating = false;
+          state.goldDonatePending = { before: gold, amount, ts: Date.now() };
           saveState(state);
           botSetTimeout(() => { donateBtn.click(); }, randomDelay(800, 1500));
           return true;
         }
+        // v1.6.31 — on a clan page without the donation form (sub-page / layout):
+        // go to the clan main page once, otherwise say so and back off
+        if (!/^\/clan(\/index)?\/?$/.test(PAGE) && !state.goldNavigating) {
+          botLog('info', '💰 Gold: donation form not on this clan page → clan main page');
+          state.goldNavigating = true; state.goldNavAt = Date.now();
+          saveState(state);
+          botSetTimeout(() => { humanNav('/clan/index'); }, randomDelay(800, 1600));
+          return true;
+        }
+        state.goldBackoffUntil = Date.now() + 10 * 60000;
+        botLog('warn', '💰 Gold: donation form not found on the clan page → retry in 10 min');
+        saveState(state);
         return false;
       }
 
       // Navigate to clan page
       if (!state.goldNavigating) {
         botLog('info', `💰 Gold: Navigating to clan for donation (${gold.toLocaleString()} on hand)`);
-        state.goldNavigating = true;
+        state.goldNavigating = true; state.goldNavAt = Date.now();
         saveState(state);
-        botSetTimeout(() => { window.location.href = BASE + '/clan'; }, randomDelay(1000, 2000));
+        botSetTimeout(() => { humanNav('/clan'); }, randomDelay(1000, 2000));
         return true;
       }
       return false;
@@ -4280,7 +4681,7 @@
     state.recruitNavigating = true;
     state.recruitLastCycle = now;
     saveState(state);
-    botSetTimeout(() => { window.location.href = BASE + '/nourishing/index'; }, randomDelay(1000, 2000));
+    botSetTimeout(() => { humanNav('/nourishing/index'); }, randomDelay(1000, 2000));
     return true;
   }
 
@@ -4446,7 +4847,7 @@
         botLog('info', `🪦 Graveyard: Navigating (${apLow ? 'AP: ' + ap.current : 'HP: ' + hpPct + '%'})`);
         state.graveyardWorking = false;
         saveState(state);
-        botSetTimeout(() => { window.location.href = BASE + '/city/graveyard'; }, randomDelay(1000, 2000));
+        botSetTimeout(() => { humanNav('/city/graveyard'); }, randomDelay(1000, 2000));
       }
     }
   }
@@ -4656,7 +5057,7 @@
       botLog('info', `🗑 Inventory Discard: Navigating to profile (${manualPending ? 'manual run' : 'scheduled'})`);
       state.invDiscardNavigating = true;
       saveState(state);
-      botSetTimeout(() => { window.location.href = BASE + '/profile/index'; }, randomDelay(800, 1500));
+      botSetTimeout(() => { humanNav('/profile/index'); }, randomDelay(800, 1500));
       return true;
     }
     return false;
@@ -4718,7 +5119,7 @@
         } else {
           // Navigate to profile
           botLog('info', '🎁 DBG: Navigating to profile to open gifts');
-          botSetTimeout(() => { window.location.href = BASE + '/profile/index'; }, randomDelay(800, 1500));
+          botSetTimeout(() => { humanNav('/profile/index'); }, randomDelay(800, 1500));
           return;
         }
       }
@@ -4778,7 +5179,7 @@
       } else {
         // Navigate to profile
         botLog('info', '🎁 Purple: Navigating to profile');
-        botSetTimeout(() => { window.location.href = BASE + '/profile/index'; }, randomDelay(800, 1500));
+        botSetTimeout(() => { humanNav('/profile/index'); }, randomDelay(800, 1500));
         return;
       }
     }
@@ -4824,7 +5225,7 @@
           botLog('warn', `Grotto: HP ${hpPct}% < ${settings.grottoMinHP}% → Idem do kostola`);
           state.grottoState = 'healing';
           saveState(state);
-          botSetTimeout(() => { window.location.href = BASE + '/city/church'; }, randomDelay(1000, 2000));
+          botSetTimeout(() => { humanNav('/city/church'); }, randomDelay(1000, 2000));
           return;
         }
       }
@@ -4848,7 +5249,7 @@
     if (isGrottoResultPage()) {
       botLog('info', `Grotto: Battle result #${state.grottoCount || 0} → Continuing`);
       // Navigate back to grotto page for next fight
-      botSetTimeout(() => { window.location.href = BASE + '/city/grotte'; }, getSpeedDelay(settings));
+      botSetTimeout(() => { humanNav('/city/grotte'); }, getSpeedDelay(settings));
       return;
     }
 
@@ -4857,7 +5258,7 @@
       botLog('info', 'Grotto: Navigating → Grotto');
       state.grottoState = 'navigating';
       saveState(state);
-      botSetTimeout(() => { window.location.href = BASE + '/city/grotte'; }, randomDelay(800, 1500));
+      botSetTimeout(() => { humanNav('/city/grotte'); }, randomDelay(800, 1500));
       return;
     }
 
@@ -5149,7 +5550,7 @@
       updatePvPUI(settings, state);
 
       // Navigate back to PvP page for next search
-      botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, getSpeedDelay(settings));
+      botSetTimeout(() => { humanNav('/robbery/index'); }, getSpeedDelay(settings));
       return;
     }
 
@@ -5195,7 +5596,7 @@
       const leaveProfile = (reason) => {
         state.pvpState = 'navigating';
         saveState(state);
-        botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
+        botSetTimeout(() => { humanNav('/robbery/index'); }, randomDelay(1000, 2000));
       };
 
       if (isBlacklisted) {
@@ -5427,7 +5828,7 @@
     botLog('info', 'PvP: Navigating → /robbery/index');
     state.pvpState = 'navigating';
     saveState(state);
-    botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(800, 1500));
+    botSetTimeout(() => { humanNav('/robbery/index'); }, randomDelay(800, 1500));
   }
 
   // ── HENCHMAN VS HENCHMAN BOT TICK (v1.6.9) ───────────────────
@@ -5560,7 +5961,7 @@
       }
       updateHenchmanUI(settings, state);
 
-      botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, getSpeedDelay(settings));
+      botSetTimeout(() => { humanNav('/robbery/index'); }, getSpeedDelay(settings));
       return;
     }
 
@@ -5597,7 +5998,7 @@
           }
           state.henchmanState = 'navigating';
           saveState(state);
-          botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
+          botSetTimeout(() => { humanNav('/robbery/index'); }, randomDelay(1000, 2000));
           return;
         }
         const inPageSearchBtn = document.querySelector('input[name="henchmanfightsearch"][type="submit"]');
@@ -5615,7 +6016,7 @@
           // false-positive on a perfectly normal landing.
           state.henchmanState = 'navigating';
           saveState(state);
-          botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
+          botSetTimeout(() => { humanNav('/robbery/index'); }, randomDelay(1000, 2000));
         }
       };
 
@@ -5646,7 +6047,7 @@
           state.henchmanLastTriedWhitelistName = '';
           state.henchmanState = 'navigating';
           saveState(state);
-          botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
+          botSetTimeout(() => { humanNav('/robbery/index'); }, randomDelay(1000, 2000));
           return;
         }
         botLog('info', `Henchman: whitelist target "${state.henchmanLastTriedWhitelistName}" found`);
@@ -5727,7 +6128,7 @@
                 // State-safe nav back (same fix as blacklist skip).
                 state.henchmanState = 'navigating';
                 saveState(state);
-                botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(800, 1500));
+                botSetTimeout(() => { humanNav('/robbery/index'); }, randomDelay(800, 1500));
               }
             }, 1200);
           }, randomDelay(500, 1200));
@@ -5749,7 +6150,7 @@
         }
         state.henchmanState = 'navigating';
         saveState(state);
-        botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
+        botSetTimeout(() => { humanNav('/robbery/index'); }, randomDelay(1000, 2000));
         return;
       }
       botLog('warn', 'Henchman: Henchman attack button not found → searching again');
@@ -5832,7 +6233,7 @@
             state.henchmanState = 'navigating';
             saveState(state);
             botLog('warn', `Henchman: Namesearch form not on this page (${PAGE}${window.location.search}; form inputs: ${inputs}) → reloading hunt page`);
-            botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 2000));
+            botSetTimeout(() => { humanNav('/robbery/index'); }, randomDelay(1000, 2000));
             return;
           }
           const cd = randomDelay(4 * 60 * 1000, 6 * 60 * 1000);
@@ -5918,7 +6319,7 @@
     botLog('info', 'Henchman: Navigating → /robbery/index');
     state.henchmanState = 'navigating';
     saveState(state);
-    botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(800, 1500));
+    botSetTimeout(() => { humanNav('/robbery/index'); }, randomDelay(800, 1500));
   }
 
   // ── SPEED HELPER ────────────────────────────────────────────
@@ -5981,6 +6382,11 @@
       settings.backgroundRefresh = document.getElementById('bf-bg-refresh')?.checked ?? false;
       settings.backgroundRefreshInterval = parseInt(document.getElementById('bf-bg-refresh-interval')?.value) || 60;
       settings.backgroundRefreshRandomize = parseInt(document.getElementById('bf-bg-refresh-rand')?.value) || 0;
+      settings.humanNav = document.getElementById('bf-human-nav')?.checked ?? true;
+      settings.humanTiming = document.getElementById('bf-human-timing')?.checked ?? true;
+      settings.humanDetours = document.getElementById('bf-human-detours')?.checked ?? true;
+      settings.humanBreaks = document.getElementById('bf-human-breaks')?.checked ?? false;
+      updateHumanCfg(settings);
       saveSettings(settings);
     });
   }
@@ -6043,6 +6449,10 @@
     const brr = document.getElementById('bf-bg-refresh-rand'); if (brr) brr.value = settings.backgroundRefreshRandomize ?? 5;
     const brPanel = document.getElementById('bf-bg-refresh-panel');
     if (brPanel) brPanel.style.display = settings.backgroundRefresh ? '' : 'none';
+    const hn = document.getElementById('bf-human-nav'); if (hn) hn.checked = settings.humanNav !== false;
+    const ht = document.getElementById('bf-human-timing'); if (ht) ht.checked = settings.humanTiming !== false;
+    const hd = document.getElementById('bf-human-detours'); if (hd) { hd.checked = settings.humanDetours !== false; hd.disabled = settings.humanNav === false; }
+    const hb = document.getElementById('bf-human-breaks'); if (hb) hb.checked = !!settings.humanBreaks;
   }
 
   // ── UI UPDATE FUNCTIONS ─────────────────────────────────────
@@ -6567,6 +6977,10 @@
         <div class="lk-row"><button class="lk-b" data-lrace="auto">Auto</button><button class="lk-b" data-lrace="1">🦇 Vampire</button><button class="lk-b" data-lrace="2">🐺 Werewolf</button></div>
         <div class="lk-row"><label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="bf-look-crest" checked> Skull crest (eyes show bot state)</label></div>
         <div class="lk-row"><label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="bf-look-lowfx"> Low effects (no glow animation)</label></div>
+        <div class="lk-h">Panels</div>
+        <div class="lk-row"><label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="bf-look-showbr" checked> 🔬 Battle Report Verify (Ruins tab)</label></div>
+        <div class="lk-row"><label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="bf-look-showpvp" checked> ⚔ Player vs Player (PvP tab)</label></div>
+        <div class="lk-row"><label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="bf-look-henchfirst"> 🗡 Henchman first in the PvP tab</label></div>
         <div class="lk-h">Size (everything — text, frames, windows)</div>
         <div class="lk-row">
           <button class="lk-b" data-z="1">1×</button><button class="lk-b" data-z="1.25">1.25×</button><button class="lk-b" data-z="1.5">1.5×</button>
@@ -6884,14 +7298,15 @@
               <input type="number" class="bf-bot-input" id="bf-ruins-cycles" value="5" min="1" max="999">
             </div>
             <div class="bf-bot-row" style="flex-wrap:wrap;gap:4px">
-              <span class="bf-bot-label" style="min-width:0;flex:0 0 auto">Default interval:</span>
+              <span class="bf-bot-label" style="min-width:0;flex:0 0 auto">⏱ Layer cooldown:</span>
               <input type="number" class="bf-bot-input" id="bf-ruins-interval" value="60" min="1" max="1440" style="width:55px;flex:0 0 auto">
-              <span style="color:#5a7a4a;font-size:0.6rem">min (fallback)</span>
+              <span style="color:#5a7a4a;font-size:0.6rem">min</span>
             </div>
-            <div style="font-size:0.56rem;color:#5a7a4a;margin-top:6px;margin-bottom:3px;line-height:1.3">
-              Per-band cooldown (min). 1–10 ≈ 1h, 11–100 ≈ 1:30h, 101+ depends on player.
+            <div style="font-size:0.56rem;color:#5a7a4a;margin-top:2px;line-height:1.3">
+              One timer for all layers: a layer is attacked again at the earliest this many minutes after its last fight.
+              The game's own daily limit ("available again in …") is read from the page on top of that.
             </div>
-            <div id="bf-ruins-interval-bands" style="max-height:130px;overflow-y:auto;border:1px solid #1a3a1a;border-radius:3px;padding:4px;background:rgba(0,0,0,0.2)"></div>
+            <div id="bf-ruins-next" style="font-size:0.58rem;margin-top:4px;color:#9a7a5a"></div>
           </div>
 
           <div class="bf-bot-group">
@@ -6972,7 +7387,7 @@
             <div id="bf-ruins-opt-t4-info" style="font-size:0.56rem;color:#5a7a4a;margin-top:5px;line-height:1.3;display:none"></div>
           </div>
 
-          <div class="bf-bot-group">
+          <div class="bf-bot-group" id="bf-br-group">
             <div class="bf-bot-group-title">🔬 Battle Report Verify</div>
             <label class="bf-bot-checkbox" style="align-items:flex-start;gap:6px;margin-bottom:4px">
               <input type="checkbox" id="bf-br-enabled" checked style="margin-top:3px">
@@ -7391,6 +7806,7 @@
             <span class="status-value" id="bf-pvp-status">Disabled</span>
           </div>
 
+          <div id="bf-pvp-block">
           <div class="bf-bot-group">
             <div class="bf-bot-group-title">⚔ Player vs Player</div>
             <div class="bf-bot-row">
@@ -7470,6 +7886,8 @@
             <span class="status-value" id="bf-henchman-status">Disabled</span>
           </div>
 
+          </div><!-- /bf-pvp-block -->
+          <div id="bf-hench-block">
           <div class="bf-bot-group">
             <div class="bf-bot-group-title">🗡 Henchman vs Henchman</div>
             <div style="font-size:0.56rem;color:#5a7a4a;margin-bottom:4px;line-height:1.3">
@@ -7531,6 +7949,7 @@
               <div class="bf-bot-info-cell"><span class="label">Losses:</span> <span class="value" id="bf-henchman-losses">0</span></div>
             </div>
           </div>
+          </div><!-- /bf-hench-block -->
         </div>
 
         <!-- GIFTS TAB -->
@@ -7814,6 +8233,34 @@
           </div>
 
           <div class="bf-bot-group">
+            <div class="bf-bot-group-title">🕵 Human behaviour</div>
+            <label class="bf-bot-checkbox">
+              <input type="checkbox" id="bf-human-nav" checked>
+              <span style="flex:1;min-width:0">🧭 Navigate by clicking links
+                <span style="display:block;color:#5a7a4a;font-size:0.55rem;margin-top:1px;font-weight:normal;line-height:1.3">Menu → section → page, one hop per page load (natural page order and Referer) instead of typing URLs.</span>
+              </span>
+            </label>
+            <label class="bf-bot-checkbox">
+              <input type="checkbox" id="bf-human-timing" checked>
+              <span style="flex:1;min-width:0">⏱ Human reaction times
+                <span style="display:block;color:#5a7a4a;font-size:0.55rem;margin-top:1px;font-weight:normal;line-height:1.3">Mostly quick clicks, sometimes slower, rarely a short distraction (4–24 s, very rarely 1–4 min).</span>
+              </span>
+            </label>
+            <label class="bf-bot-checkbox">
+              <input type="checkbox" id="bf-human-detours" checked>
+              <span style="flex:1;min-width:0">🚶 Occasional detours
+                <span style="display:block;color:#5a7a4a;font-size:0.55rem;margin-top:1px;font-weight:normal;line-height:1.3">Now and then opens profile, messages, city or clan on the way (max once per 12 min).</span>
+              </span>
+            </label>
+            <label class="bf-bot-checkbox">
+              <input type="checkbox" id="bf-human-breaks">
+              <span style="flex:1;min-width:0">☕ Session breaks
+                <span style="display:block;color:#5a7a4a;font-size:0.55rem;margin-top:1px;font-weight:normal;line-height:1.3">After 40–90 min of activity pauses for 5–20 min, then continues.</span>
+              </span>
+            </label>
+          </div>
+
+          <div class="bf-bot-group">
             <div class="bf-bot-group-title">🔧 Other</div>
             <label class="bf-bot-checkbox">
               <input type="checkbox" id="bf-auto-clan-war">
@@ -7985,7 +8432,24 @@
       const pop = document.getElementById('bf-look-pop');
       const lookBtn = document.getElementById('bf-bot-look');
       let _lookInitDone = false;
-      let look = { lookZoom: 1, lookTxt: 'default', lookTxtCustom: '#ffffff', lookNative: false, lookTheme: 'grim', lookRace: 'auto', lookCrest: true, lookLowFx: false };
+      let look = { lookZoom: 1, lookTxt: 'default', lookTxtCustom: '#ffffff', lookNative: false, lookTheme: 'grim', lookRace: 'auto', lookCrest: true, lookLowFx: false,
+                   lookShowBR: true, lookShowPvP: true, lookHenchFirst: false };
+      // v1.6.31 — optional panels / order
+      function applyPanels() {
+        const br = document.getElementById('bf-br-group'); if (br) br.style.display = look.lookShowBR === false ? 'none' : '';
+        const pv = document.getElementById('bf-pvp-block'), hb = document.getElementById('bf-hench-block');
+        if (pv) pv.style.display = look.lookShowPvP === false ? 'none' : '';
+        if (pv && hb && pv.parentNode === hb.parentNode) {
+          const henchOnTop = !!look.lookHenchFirst || look.lookShowPvP === false;
+          if (henchOnTop && hb.nextElementSibling !== pv) pv.parentNode.insertBefore(hb, pv);
+          if (!henchOnTop && pv.nextElementSibling !== hb) pv.parentNode.insertBefore(pv, hb);
+        }
+        const tab = panel.querySelector('.bf-bot-tab[data-tab="pvp"]');
+        if (tab) tab.textContent = look.lookShowPvP === false ? '🗡 Henchman' : '⚔ PvP';
+        const sb = document.getElementById('bf-look-showbr'); if (sb) sb.checked = look.lookShowBR !== false;
+        const sp = document.getElementById('bf-look-showpvp'); if (sp) sp.checked = look.lookShowPvP !== false;
+        const hf = document.getElementById('bf-look-henchfirst'); if (hf) { hf.checked = !!look.lookHenchFirst; hf.disabled = look.lookShowPvP === false; }
+      }
     // ── v1.6.27 — GRIMOIRE THEME + SKULL CREST ───────────────────────
     // Theme classes live on <html> (bf-grim, bf-grim-race-1|2, bf-lowfx).
     // Legacy inline greens inside bot UI are re-tinted to the race palette.
@@ -8099,7 +8563,7 @@
         .then(([def, act]) => {
           const W = def.naturalWidth, H = def.naturalHeight;
           const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
-          const cx = cv.getContext('2d');
+          const cx = cv.getContext('2d', { willReadFrequently: true });
           cx.drawImage(def, 0, 0); const dd = cx.getImageData(0, 0, W, H);
           let glowData = null, gx = 0, gy = 0, gn = 0;
           if (act && act.naturalWidth === W && act.naturalHeight === H) {
@@ -8202,6 +8666,7 @@
         }
       }
       function applyLook() {
+        try { applyPanels(); } catch (_) {}
         const _prevTheme = document.documentElement.classList.contains('bf-grim') ? 'grim' : 'classic';
         applyTheme();
         if (_prevTheme === 'grim' && look.lookTheme === 'classic' && _lookInitDone) { botSetTimeout(() => window.location.reload(), 300); }
@@ -8260,7 +8725,8 @@
 
       loadSettings(se => {
         look = { lookZoom: se.lookZoom || 1, lookTxt: se.lookTxt || 'default', lookTxtCustom: se.lookTxtCustom || '#ffffff', lookNative: !!se.lookNative,
-                 lookTheme: se.lookTheme === 'classic' ? 'classic' : 'grim', lookRace: se.lookRace || 'auto', lookCrest: se.lookCrest !== false, lookLowFx: !!se.lookLowFx };
+                 lookTheme: se.lookTheme === 'classic' ? 'classic' : 'grim', lookRace: se.lookRace || 'auto', lookCrest: se.lookCrest !== false, lookLowFx: !!se.lookLowFx,
+                 lookShowBR: se.lookShowBR !== false, lookShowPvP: se.lookShowPvP !== false, lookHenchFirst: !!se.lookHenchFirst };
         applyLook();
         _lookInitDone = true;
       });
@@ -8298,6 +8764,12 @@
       document.getElementById('bf-look-native')?.addEventListener('change', (e) => setLook({ lookNative: !!e.target.checked }));
       document.getElementById('bf-look-crest')?.addEventListener('change', (e) => setLook({ lookCrest: !!e.target.checked }));
       document.getElementById('bf-look-lowfx')?.addEventListener('change', (e) => setLook({ lookLowFx: !!e.target.checked }));
+      document.getElementById('bf-look-showbr')?.addEventListener('change', (e) => setLook({ lookShowBR: !!e.target.checked }));
+      document.getElementById('bf-look-showpvp')?.addEventListener('change', (e) => {
+        if (!e.target.checked) loadSettings(se => { if (se.pvpEnabled) botLog('warn', '⚔ PvP panel hidden while the PvP bot is ON — it keeps running (show the panel again to stop it)'); });
+        setLook({ lookShowPvP: !!e.target.checked });
+      });
+      document.getElementById('bf-look-henchfirst')?.addEventListener('change', (e) => setLook({ lookHenchFirst: !!e.target.checked }));
       document.getElementById('bf-bot-fullscreen')?.addEventListener('click', () => botSetTimeout(applyLook, 0));
     }
 
@@ -9854,6 +10326,10 @@
       });
     });
 
+    // v1.6.28 — detours only make sense with link navigation
+    document.getElementById('bf-human-nav')?.addEventListener('change', (e) => {
+      const hd = document.getElementById('bf-human-detours'); if (hd) hd.disabled = !e.target.checked;
+    });
     // Global settings — save on any change
     const globalPanel = document.getElementById('bf-bot-global');
     if (globalPanel) {
@@ -10424,6 +10900,8 @@
         // The ETA label loop runs unconditionally so the user sees "--"
         // when disabled and a live countdown when enabled.
         bgRefreshStartETALoop();
+        // v1.6.31 — keep the Ruins "Next:" line fresh (cosmetic → plain setInterval)
+        setInterval(() => { try { loadSettings(se => loadState(st => renderRuinsNext(getEffectiveSettings(se), st))); } catch (_) {} }, 30000);
         if (settings.backgroundRefresh) bgRefreshSchedule(false);
 
         // ── Wait for Central STOP check BEFORE auto-resume ──
@@ -10477,6 +10955,15 @@
               startCooldownTicker(settings, state);
             }
 
+            // v1.6.28 — finish a multi-hop walk first (menu → section → page)
+            if (continuePendingNav()) return;
+            // v1.6.28 — optional session break
+            const brk = sessionBreakWait();
+            if (brk > 0) {
+              if (brk > 60000) botLog('info', `☕ Break — resuming in ${Math.ceil(brk / 60000)} min`);
+              botSetTimeout(() => { loadState(st => loadSettings(se => botTick(st, se))); }, brk + randomDelay(2000, 8000));
+              return;
+            }
             // Single botTick call handles priority routing
             botSetTimeout(() => botTick(state, settings), randomDelay(1500, 3000));
           }
@@ -10520,6 +11007,7 @@
   }
 
   function cancelAllBotTimers() {
+    _ruinsRun++;   // v1.6.29 — invalidate any in-flight ruins sequence / optimizer result
     _botTimers.forEach(id => clearTimeout(id));
     _botTimers.clear();
     _botIntervals.forEach(id => clearInterval(id));
@@ -10877,7 +11365,7 @@
               st.extractionsThisSession = 0;
               saveState(st);
               // Navigate to hunt page
-              botSetTimeout(() => { window.location.href = BASE + '/robbery/index'; }, randomDelay(1000, 3000));
+              botSetTimeout(() => { humanNav('/robbery/index'); }, randomDelay(1000, 3000));
             }
           });
         });
@@ -10929,7 +11417,9 @@
       btn.classList.add('running');
       if (status) status.textContent = `Running... (cycle ${state.ruinsCurrentCycle || 1})`;
       if (dot) updateStatusDot(settings, state);
+      renderRuinsNext(settings, state);
     } else {
+      renderRuinsNext(settings, state);
       btn.textContent = '▶ Start Ruins Bot';
       btn.classList.remove('running');
       if (status) status.textContent = 'Disabled';
